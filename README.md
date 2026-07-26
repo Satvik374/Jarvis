@@ -134,6 +134,45 @@ The TTS model, prebuilt voice, and language can be changed under `voice:` in
 
 ---
 
+## Account connectors (Gmail · Discord · WhatsApp)
+
+Jarvis can read your accounts **directly** instead of driving a browser. Asking
+"any new mail?" costs one network round trip, not a window, a screenshot and a
+dozen clicks. Credentials go in a `.env` file at the project root (see
+`.env.example`, and note `.env` is gitignored); `:connect` shows what is wired
+up and runs a live test:
+
+```bash
+:connect                      # status of all three
+:connect gmail unread         # real call, so setup problems surface here
+:connect discord messages #general
+```
+
+| Service | Set in `.env` | Where to get it |
+|---------|---------------|-----------------|
+| Gmail | `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD` | [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) — the 16-character app password, **not** your account password (2-step verification must be on). Read over IMAP; the inbox is opened read-only, so nothing gets marked as seen. |
+| Discord | `DISCORD_BOT_TOKEN` | [discord.com/developers/applications](https://discord.com/developers/applications) → Bot. Turn **on** *Message Content Intent*, or message text comes back empty, and invite the bot with View Channels + Read Message History. |
+| WhatsApp | `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_ID` | Meta Cloud API at developers.facebook.com. |
+
+Once configured, a service appears in the model's prompt and Jarvis reaches for
+it on its own — you just ask. Under the hood it is the `connector` action
+(`jarvis/tools/connectors.py`).
+
+**Speed.** The Gmail IMAP session is opened once at startup and reused (the TLS
+handshake plus login is most of the latency), the unread list is pre-fetched in
+the background so the first question is already answered, and every read is
+cached for 60s (`JARVIS_CONNECTOR_TTL`) so repeats cost nothing.
+
+> **WhatsApp reads are the one gap.** Meta's Cloud API has no endpoint for
+> fetching past messages — it pushes incoming ones to a webhook instead, so
+> there is nothing to poll. Point `WHATSAPP_INBOX` at a JSONL file your webhook
+> appends to (flat `{from,text,timestamp}` records or raw webhook payloads both
+> work) and Jarvis reads it instantly; otherwise use a WhatsApp MCP bridge via
+> the `mcp` action. `WHATSAPP_TOKEN`/`WHATSAPP_PHONE_ID` alone only cover the
+> business-profile call.
+
+---
+
 ## How the app is organised
 
 | Path | What it does |

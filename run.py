@@ -71,12 +71,19 @@ def main(argv: list[str] | None = None) -> int:
         except BrainError as exc:
             log.error(str(exc))
             return 1
-        result = agent.run(" ".join(args.task))
+        # Jarvis always speaks his replies (voice mode only adds the mic);
+        # configure before running so mid-task questions are spoken too.
+        from jarvis.utils import voice
+        voice.configure(agent.brain, cfg.voice)
+        # A real terminal can answer mid-task questions; a pipe cannot.
+        import sys as _sys
+        asker = None
+        if _sys.stdin.isatty():
+            from jarvis.console import _typed_asker
+            asker = _typed_asker
+        result = agent.run(" ".join(args.task), asker=asker)
         log.jarvis(result)
-        if cfg.voice_enabled:
-            from jarvis.utils import voice
-            voice.configure(agent.brain, cfg.voice)
-            voice.speak(result, wait=True)   # sync: don't exit mid-sentence
+        voice.speak(result, wait=True)   # sync: don't exit mid-sentence
         return 0
 
     from jarvis.console import repl
@@ -106,7 +113,8 @@ def run_check(cfg) -> int:
 
     for mod, why in [("easyocr", "OCR fallback (optional, heavy)"),
                      ("pyperclip", "clipboard (optional)"),
-                     ("sounddevice", "microphone input for voice mode")]:
+                     ("sounddevice", "microphone input for voice mode"),
+                     ("kokoro_onnx", "local offline TTS (models/tts/)")]:
         (log.ok if _has(mod) else log.info)(
             f"{'found ' if _has(mod) else 'absent'} {mod:<14} - {why}")
 

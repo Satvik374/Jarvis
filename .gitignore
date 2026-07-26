@@ -38,3 +38,5 @@ models/
 Thumbs.db
 .idea/
 .vscode/
+
+.env

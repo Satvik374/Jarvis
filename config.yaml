@@ -31,8 +31,12 @@ perception:
   max_elements: 60    # cap on elements shown to the model (keeps prompt small)
   save_screenshots: true   # annotated shots saved for debugging + dataset
 
-# Gemini speech uses its own model and never replaces the thinking model above.
+# TTS engine: "gemini" = Gemini TTS on Vertex AI (cloud); "kokoro" = the
+# local Kokoro-82M model in models/tts/ (offline, falls back to Gemini).
 voice:
+  engine: gemini
+  local_voice: bm_george   # British male (JARVIS). Try af_heart, bm_lewis, am_michael
+  local_speed: 1.0
   model: gemini-3.1-flash-tts-preview
   voice: Kore
   language_code: en-US
@@ -46,6 +50,12 @@ voice_enabled: false
 safety:
   confirm_each_action: false  # set true while you build trust in the model
   max_steps: 50               # hard stop to prevent runaway loops
+  # Folders Jarvis may create/write/rename/delete in, IN ADDITION to your
+  # home folder (which is always allowed). Deletes go to the Recycle Bin.
+  # Uncomment and add entries to let the coder work on projects anywhere:
+  # allow_paths:
+  #   - D:/Projects
+  #   - C:/work
 
 data:
   collect_trajectories: true             # log real runs as training data

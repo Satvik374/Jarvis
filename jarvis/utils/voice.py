@@ -1,6 +1,7 @@
 """Voice I/O: speak replies (TTS) and hear commands (STT).
 
-TTS  - Gemini TTS on Vertex AI, using a model separate from Jarvis's brain.
+TTS  - local Kokoro-82M (ONNX, offline, ~5x real-time on CPU) when its model
+       files are in models/tts/; Gemini TTS on Vertex AI as fallback.
 STT  - record the microphone with sounddevice (simple energy-based
        start/stop), then transcribe with the existing Gemini backend, which
        accepts audio natively - no local Whisper/torch on this machine.
@@ -40,10 +41,11 @@ def configure(brain, config: VoiceConfig) -> None:
 
 def reset() -> None:
     """Clear configured TTS state and stop any asynchronous playback."""
-    global _brain, _tts_config
+    global _brain, _tts_config, _kokoro_broken
     _stop_async_playback()
     _brain = None
     _tts_config = VoiceConfig()
+    _kokoro_broken = False     # the loaded Kokoro model itself is kept
 
 
 def _synthesize(text: str) -> bytes:
@@ -63,14 +65,50 @@ def _synthesize(text: str) -> bytes:
     )
 
 
-def _wav_bytes(pcm: bytes) -> bytes:
+def _wav_bytes(pcm: bytes, rate: int = 24000) -> bytes:
     output = io.BytesIO()
     with wave.open(output, "wb") as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
-        wav_file.setframerate(24000)
+        wav_file.setframerate(rate)
         wav_file.writeframes(pcm)
     return output.getvalue()
+
+
+# --------------------------------------------------------------------------- #
+# Local TTS (Kokoro-82M via kokoro-onnx)
+# --------------------------------------------------------------------------- #
+
+_kokoro = None                 # loaded once, on first utterance
+_kokoro_broken = False         # failed once -> stop retrying, use Gemini
+
+
+def _synthesize_kokoro(text: str) -> bytes:
+    """WAV bytes from the local Kokoro model (raises if unavailable)."""
+    global _kokoro
+    if _kokoro is None:
+        from ..config import ROOT
+        model_dir = ROOT / "models" / "tts"
+        from kokoro_onnx import Kokoro
+        _kokoro = Kokoro(str(model_dir / "kokoro-v1.0.onnx"),
+                         str(model_dir / "voices-v1.0.bin"))
+    samples, rate = _kokoro.create(text, voice=_tts_config.local_voice,
+                                   speed=_tts_config.local_speed)
+    import numpy as np
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+    return _wav_bytes(pcm, rate)
+
+
+def _synthesize_wav(text: str) -> bytes:
+    """WAV bytes from the configured engine: local Kokoro first, Gemini after."""
+    global _kokoro_broken
+    if _tts_config.engine == "kokoro" and not _kokoro_broken:
+        try:
+            return _synthesize_kokoro(text)
+        except Exception as exc:
+            _kokoro_broken = True      # warn once, not on every sentence
+            log.warn(f"local TTS unavailable ({exc}); using Gemini TTS")
+    return _wav_bytes(_synthesize(text))
 
 
 def _stop_async_playback() -> None:
@@ -133,7 +171,7 @@ def speak(text: str, wait: bool = False) -> None:
     if not text:
         return
     try:
-        _play_wav(_wav_bytes(_synthesize(text)), wait)
+        _play_wav(_synthesize_wav(text), wait)
     except Exception as exc:
         log.warn(f"TTS unavailable: {exc}")
 
@@ -142,7 +180,7 @@ def speak_to_wav(text: str, path: str) -> bool:
     """Render speech to a WAV file (used by the self-test; no speakers needed)."""
     try:
         with open(path, "wb") as output:
-            output.write(_wav_bytes(_synthesize(text)))
+            output.write(_synthesize_wav(text))
         return True
     except Exception as exc:
         log.warn(f"TTS-to-file failed: {exc}")

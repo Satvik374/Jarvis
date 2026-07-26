@@ -14,6 +14,7 @@ Every step is logged via :class:`TrajectoryWriter` so real runs become data.
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -23,10 +24,41 @@ from ..perception import elements as elem_mod
 from ..perception import annotate as annotate_mod
 from ..tools import registry
 from ..utils import logging as log
-from .brain import Brain, BrainError
+from .brain import Brain, BrainError, complete_with_retry
 from .prompts import (build_system_prompt, parse_decision, format_observation,
                       format_decision, _extract_json)
+from .subagent import agents_note
 from .trajectory import Trajectory, TrajectoryWriter, Step
+
+
+_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+
+
+def _find_image(task: str):
+    """Return a PIL image for the first existing image-file path in the prompt.
+
+    Lets the user attach an image by simply including its path (drag & drop a
+    file into the console pastes the quoted path). The path is left in the
+    prompt text so tasks that operate ON the file ("delete photo.png") still
+    carry the full instruction.
+    """
+    for m in re.finditer(r'"([^"]+)"|\'([^\']+)\'|(\S+)', task):
+        cand = next(g for g in m.groups() if g is not None)
+        if not cand.lower().endswith(_IMG_EXTS):
+            continue
+        p = Path(cand)
+        if not p.is_file():
+            continue
+        try:
+            from PIL import Image  # type: ignore
+
+            img = Image.open(p)
+            img.load()
+            return img
+        except Exception as exc:
+            log.warn(f"could not load image {p.name}: {exc}")
+            return None
+    return None
 
 
 class Agent:
@@ -53,7 +85,7 @@ class Agent:
         # Exploit phase of the learning loop: if this task was already learned,
         # reuse the remembered approach and skip the (slow) planning call - the
         # full learned entry is already injected into the system prompt.
-        if memory and task.strip().lower() in memory.lower():
+        if self._memory_has(task, memory):
             log.info("Task found in memory - using the learned approach directly.")
             return [{"name": "Learned Plan (from memory)",
                      "description": "Follow the previously successful approach "
@@ -112,8 +144,14 @@ class Agent:
 
         return [{"name": "Default Action Path", "description": "Execute the task directly using standard operations."}]
 
-    def run(self, task: str) -> str:
+    def run(self, task: str, asker=None) -> str:
         """Execute one task to completion; returns the final message.
+
+        ``asker`` is an optional ``callable(question) -> answer`` wired by
+        interactive frontends (typed console, voice). When set, an ``ask``
+        action becomes a mid-task dialogue: the user's answer is fed back and
+        the task continues. Without it (cron, one-shot CLI without a TTY) an
+        ``ask`` ends the run with the question, as before.
 
         Reinforcement loop: generate candidate plans -> try each -> a plan is
         only *rewarded* (saved to persistent memory, trajectory labelled
@@ -124,12 +162,21 @@ class Agent:
         memory = self._read_memory()
         chat_note = self._chat_context()   # persistent user<->Jarvis history
 
+        # Image input: an image-file path anywhere in the prompt attaches that
+        # image to every model call for this run (alongside the screenshot).
+        user_image = _find_image(task)
+        if user_image is not None:
+            log.info("attached image from prompt.")
+            if not self.cfg.brain.use_vision:
+                log.warn("vision is off - the attached image will be ignored "
+                         "(':vision on' to enable).")
+
         # Plain conversation (greeting, small talk, a question that needs no
         # computer access) -> reply directly with NO tools/perception/planning.
         # Commands that clearly control the computer skip this entirely, and the
         # classifier is conservative, so existing control behaviour is untouched.
         if not self._looks_like_task(task):
-            reply = self._maybe_chat(task, chat_note)
+            reply = self._maybe_chat(task, chat_note, image=user_image)
             if reply is not None:
                 self._append_chat(task, reply)
                 return reply
@@ -164,11 +211,19 @@ class Agent:
                               + ". Try this alternative approach from the current screen state.")
             plan_note += "\n===================================="
 
-            system = build_system_prompt(memory) + chat_note + plan_note
+            from .. import mcp
+            from ..tools import connectors
+            system = (build_system_prompt(memory) + chat_note + agents_note()
+                      + connectors.note() + mcp.tools_note() + plan_note)
 
             traj = Trajectory(task=task, backend=self.cfg.brain.backend,
                               model=self.cfg.brain.model)
-            messages: list[dict] = [{"role": "user", "content": f"TASK: {task}"}]
+            task_msg = f"TASK: {task}"
+            if user_image is not None:
+                task_msg += ("\n(The user attached an image. Each turn, the "
+                             "FIRST image is that attachment; a second image, "
+                             "if present, is the current screen.)")
+            messages: list[dict] = [{"role": "user", "content": task_msg}]
 
             plan_succeeded = False
             off_script = 0     # consecutive non-action replies from the model
@@ -178,11 +233,14 @@ class Agent:
 
             for step_i in range(1, self.cfg.safety.max_steps + 1):
                 image = self._maybe_image(obs, step_i)
+                if user_image is not None:
+                    image = [user_image] + ([image] if image is not None else [])
                 messages_for_turn = self._with_observation(messages, obs)
 
                 try:
                     with log.spinner(f"thinking (step {step_i}/{self.cfg.safety.max_steps})"):
-                        raw = self.brain.complete(system, messages_for_turn, image=image)
+                        raw = complete_with_retry(self.brain, system,
+                                                  messages_for_turn, image=image)
                 except KeyboardInterrupt:
                     # Ctrl+C mid-task: keep the partial trajectory as data
                     # instead of silently losing the whole run.
@@ -194,6 +252,9 @@ class Agent:
                     log.error(f"brain error: {exc}")
                     final_message = f"Brain error: {exc}"
                     traj.outcome = "error"
+                    # Record WHY, so failure analysis over trajectories can see
+                    # the actual error instead of a bare "error" label.
+                    traj.summary = f"brain error: {exc}"[:300]
                     abort_run = True      # same brain will fail for every plan
                     break
 
@@ -228,7 +289,8 @@ class Agent:
                 # occurrence of the same action within the window with
                 # corrective feedback; abandon the plan on the 5th.
                 sig = (decision.action,
-                       json.dumps(decision.args, sort_keys=True, default=str))
+                       json.dumps(_sig_args(decision.args), sort_keys=True,
+                                  default=str))
                 repeat_count = recent_sigs.count(sig)
                 recent_sigs.append(sig)
                 # Scrolling through a long list repeats the SAME scroll on
@@ -266,7 +328,26 @@ class Agent:
                     abort_run = True      # the user said stop - stop everything
                     break
 
-                result = registry.execute(decision.action, decision.args, obs, self.cfg)
+                try:
+                    result = registry.execute(decision.action, decision.args,
+                                              obs, self.cfg)
+                except Exception as exc:
+                    if _is_failsafe(exc):
+                        log.warn("FAIL-SAFE: mouse moved to a screen corner - "
+                                 "aborting the task.")
+                        final_message = ("Aborted by fail-safe (mouse moved to "
+                                         "a screen corner).")
+                        traj.outcome = "failsafe"
+                        abort_run = True
+                        break
+                    # Self-healing: an action crash is fed back to the model as
+                    # a failed result so it can adapt, instead of killing the
+                    # whole run with a traceback.
+                    log.warn(f"action {decision.action} crashed: {exc}")
+                    result = registry.ActionResult(
+                        False, f"the {decision.action} action crashed with an "
+                               f"internal error: {exc}. Try a different "
+                               f"approach or different arguments.")
                 log.act(f"{decision.action}({_fmt_args(decision.args)}) -> {result.message}")
 
                 traj.add(Step(
@@ -287,8 +368,16 @@ class Agent:
 
                 if result.finished:
                     if result.ask:
-                        # A question for the user ends the whole run - it must
-                        # reach the user, not be swallowed as a "failed plan".
+                        # Interactive session: relay the answer and keep going.
+                        answer = self._ask_user(result.ask, asker)
+                        if answer:
+                            messages[-1]["content"] = (
+                                f"RESULT: the user answered: {answer}")
+                            obs = self._perceive()
+                            continue
+                        # No one to answer: the question ends the whole run -
+                        # it must reach the user, not be swallowed as a
+                        # "failed plan".
                         final_message = result.ask
                         traj.outcome = "ask"
                         traj.summary = final_message
@@ -390,6 +479,17 @@ class Agent:
         return final_message
 
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _ask_user(question: str, asker) -> str | None:
+        """Route a mid-task question to the live user via ``asker``. Returns
+        their answer, or None when no asker is wired / they gave none."""
+        if asker is None:
+            return None
+        try:
+            return (asker(question) or "").strip() or None
+        except Exception:
+            return None
+
     def _verify_success(self, task: str, messages: list[dict]) -> tuple:
         """Judge whether a claimed finish actually completed the task.
 
@@ -439,6 +539,24 @@ class Agent:
             return None, "unparseable verdict"
         return bool(obj.get("success")), str(obj.get("reason", ""))[:200]
 
+    @staticmethod
+    def _memory_has(task: str, memory: str) -> bool:
+        """True when a stored '- Learned Task:' TITLE matches ``task`` (same
+        fuzzy both-ways rule as _evict_memory). Matching only titles fixes a
+        bug where a task that appeared as a substring anywhere in the memory
+        prose (inside some plan's description) wrongly triggered plan reuse."""
+        want = (task or "").strip().lower()
+        if not want or not memory:
+            return False
+        marker = "- learned task:"
+        for line in memory.lower().splitlines():
+            line = line.strip()
+            if line.startswith(marker):
+                stored = line[len(marker):].strip()
+                if stored and (want in stored or stored in want):
+                    return True
+        return False
+
     def _read_memory(self) -> str:
         try:
             return (self.memory_path.read_text(encoding="utf-8")
@@ -480,7 +598,7 @@ class Agent:
         try:
             existing = (self.memory_path.read_text(encoding="utf-8")
                         if self.memory_path.exists() else "")
-            if task.strip().lower() in existing.lower():
+            if self._memory_has(task, existing):
                 return    # already learned
             combined = (existing.rstrip() + "\n\n" + entry).strip() + "\n"
             # Cap the file so the system prompt never bloats: drop the OLDEST
@@ -505,6 +623,12 @@ class Agent:
         "save", "delete", "remove", "move", "drag", "switch", "maximize",
         "minimize", "screenshot", "focus", "enter", "write", "refresh",
         "reload", "zoom", "hover", "rightclick", "doubleclick",
+        # software-specific verbs -> the task loop delegates to code_task.
+        # Deliberately NOT here: make/create/fix/generate - everyday chat
+        # words ("make me a meal plan") that must reach the chat classifier;
+        # it routes real computer work to the task loop anyway.
+        "build", "code", "develop", "refactor", "debug", "implement",
+        "install", "upgrade",
     ))
 
     def _looks_like_task(self, task: str) -> bool:
@@ -515,7 +639,8 @@ class Agent:
         words = task.strip().lower().lstrip("!.,?-").split()
         return bool(words) and words[0] in self._TASK_VERBS
 
-    def _maybe_chat(self, task: str, chat_note: str = "") -> str | None:
+    def _maybe_chat(self, task: str, chat_note: str = "",
+                    image=None) -> str | None:
         """Answer plain conversation directly, with NO tools or perception.
 
         Returns a friendly reply when the message is ordinary chat, or None
@@ -526,8 +651,12 @@ class Agent:
         if not self.cfg.brain.conversational:
             return None
         system = (
-            "You are JARVIS, a warm and concise assistant that can also control "
-            "the user's Windows computer. Decide whether the user's message is "
+            "You are JARVIS - a warm, quick-witted personal assistant with the "
+            "easy polish of a trusted aide and a dry sense of humour, who can "
+            "also control the user's Windows computer. You talk like a person, "
+            "not a program: natural, concise, personable, and you refer back "
+            "to earlier conversation like a colleague who remembers. "
+            "Decide whether the user's message is "
             "ordinary CONVERSATION you can answer with no access to their "
             "computer (greetings, thanks, small talk, general questions like "
             "'who are you' or 'what is 2+2'), or a TASK that needs you to look "
@@ -542,7 +671,7 @@ class Agent:
         messages.append({"role": "user", "content": task})
         try:
             with log.spinner("thinking"):
-                raw = self.brain.complete(system, messages)
+                raw = self.brain.complete(system, messages, image=image)
         except Exception:
             return None
         obj = _extract_json(raw)
@@ -663,6 +792,29 @@ class Agent:
         except EOFError:
             return True
         return ans in {"", "y", "yes"}
+
+
+_COORD_KEYS = frozenset({"x", "y", "x1", "y1", "x2", "y2"})
+
+
+def _sig_args(args: dict) -> dict:
+    """Loop-detection signature: raw coordinates are bucketed to a 200px grid.
+    Stuck runs jiggle coordinates ((300,655) -> (250,655) -> (300,655)) and
+    evade exact-args matching, burning dozens of steps; nearby re-clicks must
+    count as the same repeated attempt."""
+    out = {}
+    for k, v in (args or {}).items():
+        if k in _COORD_KEYS and isinstance(v, (int, float)):
+            out[k] = int(v // 200)
+        else:
+            out[k] = v
+    return out
+
+
+def _is_failsafe(exc: BaseException) -> bool:
+    """True for pyautogui's FailSafeException, matched by name so this module
+    never has to import pyautogui itself."""
+    return type(exc).__name__ == "FailSafeException"
 
 
 def _fmt_args(args: dict) -> str:

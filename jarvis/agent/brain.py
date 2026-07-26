@@ -48,6 +48,14 @@ class Brain:
 
     # -- shared helpers ----------------------------------------------------
     @staticmethod
+    def _as_images(image) -> list:
+        """Normalize the ``image`` argument: None, a single PIL image, or a
+        list of them -> always a list (user attachment + screenshot)."""
+        if image is None:
+            return []
+        return list(image) if isinstance(image, (list, tuple)) else [image]
+
+    @staticmethod
     def _png_b64(image) -> str:
         buf = io.BytesIO()
         image.save(buf, format="PNG")
@@ -67,9 +75,46 @@ class Brain:
         if max(w, h) > max_dim:
             scale = max_dim / max(w, h)
             image = image.resize((int(w * scale), int(h * scale)))
+        if image.mode not in ("RGB", "L"):    # RGBA/P attachments can't be JPEG
+            image = image.convert("RGB")
         buf = io.BytesIO()
         image.save(buf, format="JPEG", quality=quality)
         return base64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg"
+
+
+# Error-message fragments that mark a RETRYABLE failure. Trajectory analysis
+# showed 21 runs (11%) killed by these: 429 quota (resets on a per-minute
+# window - a 2s retry never survives it), network blips, token refresh flakes.
+_TRANSIENT_MARKS = ("429", "502", "503", "timed out", "timeout", "max retries",
+                    "connection", "temporarily", "overloaded", "exhausted",
+                    "recitation", "refresh access token", "empty content")
+
+
+def complete_with_retry(brain: "Brain", system: str, messages: list[dict],
+                        image=None, tries: int = 3) -> str:
+    """Self-healing brain call: transient failures are retried instead of
+    killing the whole task. Known-transient errors (rate limits, network
+    blips) get a bigger budget with long exponential backoff - a 429 quota
+    needs ~a minute, not 2 seconds. Unknown errors keep the short retry.
+    Only after every attempt fails does the error propagate."""
+    attempt = 0
+    while True:
+        try:
+            return brain.complete(system, messages, image=image)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            msg = str(exc).lower()
+            transient = any(m in msg for m in _TRANSIENT_MARKS)
+            budget = max(tries, 5) if transient else tries
+            attempt += 1
+            if attempt >= budget:
+                raise
+            delay = min(60, 5 * 2 ** (attempt - 1)) if transient else 2 * attempt
+            from ..utils import logging as log
+            log.warn(f"brain hiccup (attempt {attempt}/{budget}): {exc} "
+                     f"- retrying in {delay:.0f}s")
+            time.sleep(delay)
 
 
 def _coalesce_roles(messages: list[dict]) -> list[dict]:
@@ -112,8 +157,9 @@ class OllamaBrain(Brain):
         for m in messages:
             msg = {"role": m["role"], "content": m["content"]}
             msgs.append(msg)
-        if image is not None and self.cfg.use_vision and msgs:
-            msgs[-1]["images"] = [self._png_b64(image)]
+        imgs = self._as_images(image)
+        if imgs and self.cfg.use_vision and msgs:
+            msgs[-1]["images"] = [self._png_b64(i) for i in imgs]
 
         payload = {
             "model": self.cfg.model,
@@ -241,13 +287,13 @@ class OpenAICompatBrain(Brain):
         msgs: list[dict] = [{"role": "system", "content": system}]
         for m in messages:
             msgs.append({"role": m["role"], "content": m["content"]})
-        if image is not None and self.cfg.use_vision and msgs:
+        imgs = self._as_images(image)
+        if imgs and self.cfg.use_vision and msgs:
             last = msgs[-1]
-            b64 = self._png_b64(image)
-            last["content"] = [
-                {"type": "text", "text": last["content"]},
+            last["content"] = [{"type": "text", "text": last["content"]}] + [
                 {"type": "image_url",
-                 "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                 "image_url": {"url": f"data:image/png;base64,{self._png_b64(i)}"}}
+                for i in imgs
             ]
 
         headers = {"Content-Type": "application/json"}
@@ -289,13 +335,13 @@ class AnthropicBrain(Brain):
         # consecutive user turns (RESULT then the fresh observation), so merge
         # any consecutive same-role messages first.
         api_msgs = _coalesce_roles(messages)
-        if image is not None and self.cfg.use_vision and api_msgs:
-            b64 = self._png_b64(image)
+        imgs = self._as_images(image)
+        if imgs and self.cfg.use_vision and api_msgs:
             last = api_msgs[-1]
-            last["content"] = [
-                {"type": "text", "text": last["content"]},
+            last["content"] = [{"type": "text", "text": last["content"]}] + [
                 {"type": "image", "source": {"type": "base64",
-                 "media_type": "image/png", "data": b64}},
+                 "media_type": "image/png", "data": self._png_b64(i)}}
+                for i in imgs
             ]
 
         payload = {
@@ -431,16 +477,18 @@ class GeminiVertexBrain(Brain):
                         pass
             contents.append({"role": role, "parts": parts})
 
-        if image is not None and self.cfg.use_vision and contents:
+        imgs = self._as_images(image)
+        if imgs and self.cfg.use_vision and contents:
             for msg in reversed(contents):
                 if msg["role"] == "user":
-                    b64, mime = self._prepare_vision_b64(image)
-                    msg["parts"].append({
-                        "inlineData": {
-                            "mimeType": mime,
-                            "data": b64
-                        }
-                    })
+                    for im in imgs:
+                        b64, mime = self._prepare_vision_b64(im)
+                        msg["parts"].append({
+                            "inlineData": {
+                                "mimeType": mime,
+                                "data": b64
+                            }
+                        })
                     break
             # Gemini's native pointing convention is 0-1000 normalized; pin it
             # down so raw coordinates are unambiguous (denormalized in

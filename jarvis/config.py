@@ -99,6 +99,14 @@ class DataConfig:
 
 @dataclass
 class VoiceConfig:
+    # TTS engine: "gemini" = Gemini TTS on Vertex AI (cloud, default);
+    # "kokoro" = local Kokoro-82M ONNX in models/tts/ (offline, falls back
+    # to Gemini if its model files are missing).
+    engine: str = "gemini"
+    # Kokoro voice id: bm_george/bm_lewis = British male (movie-JARVIS feel),
+    # af_heart = highest-quality American female. Speed 1.0 = natural pace.
+    local_voice: str = "bm_george"
+    local_speed: float = 1.0
     # Gemini TTS is deliberately separate from the thinking model above.
     model: str = "gemini-3.1-flash-tts-preview"
     voice: str = "Kore"

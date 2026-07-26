@@ -6,6 +6,10 @@ from __future__ import annotations
 def _pg():
     import pyautogui  # type: ignore
 
+    # Same panic abort as mouse._pg: mouse parked in a corner stops typing too.
+    pyautogui.FAILSAFE = True
+    w, h = pyautogui.size()
+    pyautogui.FAILSAFE_POINTS = [(0, 0), (0, h - 1), (w - 1, 0), (w - 1, h - 1)]
     pyautogui.PAUSE = 0.02
     return pyautogui
 
@@ -32,11 +36,17 @@ def type_text(text: str, interval: float = 0.01) -> str:
 
 def press(keys: str) -> str:
     """Press a single key or a '+'-joined hotkey like 'ctrl+shift+esc'."""
-    pg = _pg()
     parts = [_ALIASES.get(k.strip().lower(), k.strip().lower())
              for k in keys.replace(" ", "").split("+") if k.strip()]
     if not parts:
         return "no keys given"
+    if set(parts) == {"alt", "f4"}:
+        from . import apps
+        if apps.active_is_own_console():
+            return ("refused: alt+f4 now would close Jarvis's own terminal - "
+                    "focus_window the window you want to close first, or use "
+                    "close_window")
+    pg = _pg()
     if len(parts) == 1:
         pg.press(parts[0])
     else:
