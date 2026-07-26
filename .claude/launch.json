@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ninja-game",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8734", "--directory", "ninja_game"],
+      "port": 8734
+    }
+  ]
+}

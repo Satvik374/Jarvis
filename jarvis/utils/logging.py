@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import textwrap
 import time
 
 _COLORS = {
@@ -49,12 +50,28 @@ def _c(text: str, color: str) -> str:
     return f"{_COLORS.get(color, '')}{text}{_COLORS['reset']}"
 
 
+# Arc-reactor cyan->blue shades (xterm-256 indices, light to deep).
+_ARC = (51, 45, 39, 33)
+
+
+def _c256(text: str, n: int) -> str:
+    """256-colour foreground; plain text when ANSI is unavailable."""
+    if not _COLORS["reset"]:
+        return text
+    return f"\033[38;5;{n}m{text}\033[0m"
+
+
+def _glyph(uni: str, ascii_: str) -> str:
+    return ascii_ if _ASCII else uni
+
+
 def _width() -> int:
     return shutil.get_terminal_size(fallback=(80, 24)).columns
 
 
 def rule(label: str = "", color: str = "grey") -> None:
     """A full-width horizontal divider, optionally with a centred label."""
+    label = " ".join(label.split())   # multi-line labels must not break the bar
     ch = "-" if _ASCII else "─"
     w = _width()
     if label:
@@ -70,38 +87,67 @@ def _stamp() -> str:
     return _c(time.strftime("%H:%M:%S"), "dim")
 
 
+def _emit(glyph: str, gcolor: str, msg: str, mcolor: str | None = None) -> None:
+    """One log line: timestamp + glyph, with wrapped continuation lines
+    hanging-indented so they align under the message column."""
+    stamp = time.strftime("%H:%M:%S")
+    pad = " " * (len(stamp) + len(glyph) + 2)
+    avail = max(20, _width() - 1 - len(pad))
+    out: list[str] = []
+    for raw in str(msg).splitlines() or [""]:
+        out.extend(textwrap.wrap(raw, avail) or [""])
+    tint = (lambda t: _c(t, mcolor)) if mcolor else (lambda t: t)
+    print(f"{_c(stamp, 'dim')} {_c(glyph, gcolor)} {tint(out[0])}")
+    for cont in out[1:]:
+        print(pad + tint(cont))
+
+
 def info(msg: str) -> None:
-    print(f"{_stamp()} {_c('*', 'cyan')} {msg}")
+    _emit(_glyph("•", "*"), "cyan", msg)
 
 
 def step(msg: str) -> None:
-    print(f"{_stamp()} {_c('>', 'blue')} {msg}")
+    _emit(_glyph("▸", ">"), "blue", msg)
 
 
 def think(msg: str) -> None:
-    print(f"{_stamp()} {_c('~', 'magenta')} {_c(msg, 'dim')}")
+    _emit(_glyph("~", "~"), "magenta", msg, mcolor="dim")
 
 
 def act(msg: str) -> None:
-    print(f"{_stamp()} {_c('->', 'yellow')} {msg}")
+    _emit(_glyph("➤", "->"), "yellow", msg)
 
 
 def ok(msg: str) -> None:
-    print(f"{_stamp()} {_c('[ok]', 'green')} {msg}")
+    _emit(_glyph("✓", "[ok]"), "green", msg)
 
 
 def warn(msg: str) -> None:
-    print(f"{_stamp()} {_c('[!]', 'yellow')} {_c(msg, 'yellow')}")
+    _emit(_glyph("⚠", "[!]"), "yellow", msg, mcolor="yellow")
 
 
 def error(msg: str) -> None:
-    print(f"{_stamp()} {_c('[x]', 'red')} {_c(msg, 'red')}")
+    _emit(_glyph("✗", "[x]"), "red", msg, mcolor="red")
 
 
 def jarvis(msg: str) -> None:
-    """A spoken/printed line attributed to Jarvis itself."""
-    badge = _c(f"{_COLORS['bold']} JARVIS ", "cyan")
-    print(f"\n{badge}{_COLORS['reset']} {msg}\n")
+    """Jarvis's own replies, in a rounded panel so they stand out from the
+    step-by-step log noise."""
+    tl, tr, bl, br, hz, vt = (
+        ("+", "+", "+", "+", "-", "|") if _ASCII
+        else ("╭", "╮", "╰", "╯", "─", "│"))
+    w = min(_width() - 2, 96)              # total width incl. borders
+    inner = w - 4                          # "| text |"
+    lines: list[str] = []
+    for raw in str(msg).splitlines() or [""]:
+        lines.extend(textwrap.wrap(raw, inner) or [""])
+    head = f"{tl}{hz * 2} JARVIS "
+    top = head + hz * max(0, w - len(head) - 1) + tr
+    print("\n" + _c256(top, _ARC[1]))
+    side = _c256(vt, _ARC[1])
+    for ln in lines:
+        print(f"{side} {ln.ljust(inner)} {side}")
+    print(_c256(bl + hz * (w - 2) + br, _ARC[1]) + "\n")
 
 
 class spinner:
@@ -127,10 +173,14 @@ class spinner:
         import threading
         self._stop = threading.Event()
 
+        # glow: the glyph pulses light -> deep -> light through the arc shades
+        _pulse = _ARC + _ARC[-2:0:-1]
+
         def _spin():
             t0, i = time.time(), 0
             while not self._stop.wait(0.12):
-                frame = _c(self._FRAMES[i % len(self._FRAMES)], "cyan")
+                frame = _c256(self._FRAMES[i % len(self._FRAMES)],
+                              _pulse[i % len(_pulse)])
                 line = f"  {frame} {_c(self.label, 'dim')} {_c(f'{time.time()-t0:.0f}s', 'grey')}"
                 sys.stdout.write("\r" + line + "   ")
                 sys.stdout.flush()

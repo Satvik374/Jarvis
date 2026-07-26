@@ -129,6 +129,7 @@ class VoiceOutputTests(unittest.TestCase):
         voice.configure(
             fake_brain,
             VoiceConfig(
+                engine="gemini",      # this test targets the cloud path
                 model="gemini-3.1-flash-tts-preview",
                 voice="Kore",
                 language_code="en-US",

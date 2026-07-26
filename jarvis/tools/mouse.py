@@ -13,7 +13,13 @@ import time
 def _pg():
     import pyautogui  # type: ignore
 
-    pyautogui.FAILSAFE = False
+    # Panic abort: the user slams the mouse into ANY screen corner and the
+    # next action raises FailSafeException (caught cleanly by the loop).
+    # _safe() clamps agent moves >=3px from every edge, so Jarvis itself can
+    # never trip it.
+    pyautogui.FAILSAFE = True
+    w, h = pyautogui.size()
+    pyautogui.FAILSAFE_POINTS = [(0, 0), (0, h - 1), (w - 1, 0), (w - 1, h - 1)]
     pyautogui.PAUSE = 0.05
     return pyautogui
 
