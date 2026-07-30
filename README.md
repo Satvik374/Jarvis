@@ -71,6 +71,7 @@ ollama pull ornith:9b
 ### 3. Run it
 ```bash
 python run.py                       # interactive console
+python run.py --browser             # animated browser UI, same terminal backend
 python run.py "open notepad and type Hello, then save as hello.txt"
 python run.py --check               # verify environment + backend
 ```
@@ -92,6 +93,7 @@ if (($p -split ';') -notcontains $bin) {
 Then, in a **new** terminal:
 ```bash
 jarvis                       # interactive console, from any directory
+jarvis --browser             # cyber UI in your default browser
 jarvis "open notepad and type Hello"
 jarvis --check               # verify environment + backend
 ```
@@ -99,6 +101,14 @@ jarvis --check               # verify environment + backend
 `bin/jarvis.bat` is self-locating (`%~dp0`), so the command keeps working even
 if you move the project — just re-point PATH at the new `bin/` folder. It prefers
 the Windows `py` launcher and falls back to `python`.
+
+Browser mode is local and dependency-free: it binds only to `127.0.0.1`, opens
+an authenticated page in your default browser, and keeps the regular Jarvis
+terminal REPL underneath. Keep the launching terminal open; closing it ends the
+browser session. The browser supports the same tasks, slash commands,
+mid-task questions, confirmations, and image prompts as the console. While
+Jarvis speaks, the center core renders a live spectrum from the synthesized
+voice amplitude.
 
 Inside the console:
 ```
@@ -112,7 +122,7 @@ you > :help
 
 Voice output uses the dedicated `gemini-3.1-flash-tts-preview` model through
 Vertex AI. It is configured separately from the thinking model, so
-`brain.model: gemini-3.5-flash` remains unchanged.
+`brain.model: gemini-3.6-flash` remains unchanged.
 Voice transcription uses the lower-latency `gemini-2.5-flash-lite` model with
 thinking disabled and a shorter end-of-speech delay.
 

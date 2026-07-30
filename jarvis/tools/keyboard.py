@@ -43,7 +43,7 @@ def press(keys: str) -> str:
     if set(parts) == {"alt", "f4"}:
         from . import apps
         if apps.active_is_own_console():
-            return ("refused: alt+f4 now would close Jarvis's own terminal - "
+            return ("refused: alt+f4 now would close Jarvis's own interface - "
                     "focus_window the window you want to close first, or use "
                     "close_window")
     pg = _pg()

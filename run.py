@@ -3,6 +3,7 @@
 
 Usage:
   python run.py                      # interactive console
+  python run.py --browser            # interactive cyber UI in your browser
   python run.py "open notepad and type hello"   # run one task then exit
   python run.py --check              # environment / dependency check
   python run.py --backend ollama --model ornith:9b "..."
@@ -40,6 +41,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--confirm", action="store_true", help="confirm each action")
     parser.add_argument("--steps", type=int, help="max steps per task")
     parser.add_argument("--check", action="store_true", help="run an environment check and exit")
+    parser.add_argument(
+        "--browser",
+        action="store_true",
+        help="start Jarvis in the local browser interface",
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -62,6 +68,31 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         return run_check(cfg)
+
+    if args.browser:
+        # The browser is a presentation layer over the regular terminal REPL.
+        # Rebuild only the existing runtime overrides for the child session;
+        # positional words are submitted as its first interactive task.
+        child_args: list[str] = []
+        for flag, value in (
+            ("--backend", args.backend),
+            ("--model", args.model),
+            ("--adapter", args.adapter),
+            ("--base-url", args.base_url),
+        ):
+            if value:
+                child_args.extend((flag, value))
+        if args.vision:
+            child_args.append("--vision")
+        if args.confirm:
+            child_args.append("--confirm")
+        if args.steps:
+            child_args.extend(("--steps", str(args.steps)))
+
+        from jarvis.browser import run_browser
+
+        initial_task = " ".join(args.task).strip() or None
+        return run_browser(child_args=child_args, initial_task=initial_task)
 
     if args.task:
         from jarvis.agent.brain import make_brain, BrainError

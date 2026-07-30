@@ -1,4 +1,6 @@
 import base64
+import contextlib
+import os
 import tempfile
 import unittest
 import wave
@@ -8,6 +10,30 @@ from unittest.mock import Mock, patch
 from jarvis.agent.brain import GeminiVertexBrain
 from jarvis.config import BrainConfig, VoiceConfig, load_config
 from jarvis.utils import voice
+
+# Every knob load_config() lets the environment override. Env beats config.yaml
+# by design, so a test that reads a config file has to neutralise these first.
+_ENV_OVERRIDES = (
+    "JARVIS_MODEL", "MODEL_ID", "MODEL", "JARVIS_BACKEND", "BACKEND",
+    "JARVIS_BASE_URL", "BASE_URL", "JARVIS_LOCATION", "LOCATION",
+    "JARVIS_TTS_MODEL", "JARVIS_TTS_VOICE", "JARVIS_TTS_LANGUAGE",
+    "JARVIS_STT_MODEL", "JARVIS_API_KEY", "API_KEY", "OPENAI_API_KEY",
+)
+
+
+@contextlib.contextmanager
+def isolated_env():
+    """Stop load_config() from reading the developer's real .env.
+
+    Without this the assertions below silently depend on whoever's machine is
+    running them - this test passed for months only because .env happened to
+    name the same model, and started failing the moment that changed.
+    """
+    with patch("dotenv.load_dotenv", lambda *a, **k: None), \
+            patch.dict(os.environ):          # snapshot; restored on exit
+        for key in _ENV_OVERRIDES:
+            os.environ.pop(key, None)
+        yield
 
 
 class GeminiTTSConfigTests(unittest.TestCase):
@@ -27,12 +53,26 @@ voice:
                 encoding="utf-8",
             )
 
-            cfg = load_config(config_path)
+            with isolated_env():
+                cfg = load_config(config_path)
 
         self.assertEqual(cfg.brain.model, "gemini-3.5-flash")
         self.assertEqual(cfg.voice.model, "gemini-3.1-flash-tts-preview")
         self.assertEqual(cfg.voice.voice, "Kore")
         self.assertEqual(cfg.voice.transcription_model, "gemini-2.5-flash-lite")
+
+    def test_environment_overrides_the_config_file_model(self):
+        """MODEL_ID wins over config.yaml. Pinned because it is a real
+        footgun: editing brain.model in config.yaml looks like it does
+        nothing while .env still names a different model."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.yaml"
+            config_path.write_text("brain:\n  model: from-yaml\n",
+                                   encoding="utf-8")
+            with isolated_env():
+                os.environ["MODEL_ID"] = "from-env"
+                cfg = load_config(config_path)
+        self.assertEqual(cfg.brain.model, "from-env")
 
 
 class GeminiVertexTTSRequestTests(unittest.TestCase):
