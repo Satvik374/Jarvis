@@ -98,15 +98,22 @@ def _own_console_ids() -> tuple[int, str]:
         return 0, ""
 
 
+_OWN_BROWSER_TITLE = "JARVIS // NEURAL INTERFACE"
+
+
 def _is_own_console(w, own: tuple | None = None) -> bool:
-    """True when ``w`` is the terminal Jarvis itself runs in. Matches by
-    console HWND, plus title equality as a fallback for Windows Terminal
-    (where the real console is a hidden ConPTY window, not the WT window)."""
+    """True for Jarvis's terminal or its optional browser interface.
+
+    Matches by console HWND, title equality as a fallback for Windows Terminal
+    (where the real console is a hidden ConPTY window), and the browser page's
+    deliberately unique title.  Protecting both surfaces keeps a desktop task
+    from accidentally closing the interface that is supervising it.
+    """
     hwnd, title = own if own is not None else _own_console_ids()
     if hwnd and getattr(w, "_hWnd", None) == hwnd:
         return True
     wt = (getattr(w, "title", "") or "").strip()
-    return bool(title) and wt == title
+    return (bool(title) and wt == title) or _OWN_BROWSER_TITLE in wt
 
 
 def active_is_own_console() -> bool:
@@ -136,7 +143,7 @@ def close_window(title: str) -> str:
         return f"no window matching '{title}'"
     safe = [w for w in matches if not _is_own_console(w)]
     if not safe:
-        return ("refused: that window is Jarvis's own terminal - closing it "
+        return ("refused: that window is Jarvis's own interface - closing it "
                 "would kill Jarvis")
     w = safe[0]
     try:

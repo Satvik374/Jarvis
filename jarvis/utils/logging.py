@@ -5,10 +5,14 @@ Kept dependency-free (no ``rich``) so Jarvis stays light on an 8 GB machine.
 
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 import textwrap
 import time
+import unicodedata
+
+from .latex import display_latex_lines, looks_like_math, render_latex
 
 _COLORS = {
     "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
@@ -103,15 +107,15 @@ def _emit(glyph: str, gcolor: str, msg: str, mcolor: str | None = None) -> None:
 
 
 def info(msg: str) -> None:
-    _emit(_glyph("•", "*"), "cyan", msg)
+    _emit(_glyph("✦", "*"), "cyan", msg)
 
 
 def step(msg: str) -> None:
-    _emit(_glyph("▸", ">"), "blue", msg)
+    _emit(_glyph("◈", ">"), "blue", msg)
 
 
 def think(msg: str) -> None:
-    _emit(_glyph("~", "~"), "magenta", msg, mcolor="dim")
+    _emit(_glyph("⚡", "~"), "magenta", msg, mcolor="dim")
 
 
 def act(msg: str) -> None:
@@ -130,23 +134,313 @@ def error(msg: str) -> None:
     _emit(_glyph("✗", "[x]"), "red", msg, mcolor="red")
 
 
+# --------------------------------------------------------------------------- #
+# markdown -> ANSI
+#
+# Models answer in markdown, so a reply arrives full of ``###``, ``**`` and
+# backticks that the terminal has no reason to understand. We render a common
+# subset in place. Two rules keep the surrounding panel intact:
+#
+#   * width is measured in PRINTABLE columns, not len() - escapes are free,
+#     combining marks are free, and emoji/CJK take two columns (miscounting
+#     these is what pushes a panel's right border out of line);
+#   * a style is applied per WORD, so a wrap between two words can never leave
+#     an escape open and bleed colour into the border.
+# --------------------------------------------------------------------------- #
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+_STYLE = {
+    "bold": "\033[1m",
+    "italic": "\033[3m",
+    "code": "\033[36m",
+    "dim": "\033[2m",
+    "head": "\033[1m\033[38;5;39m",
+    "link": "\033[4m\033[34m",
+    "math": "\033[38;5;81m",
+    "display_math": "\033[1m\033[38;5;81m",
+}
+
+
+# Variation selector-16/-15 and the zero-width joiner: emoji modifiers that
+# occupy no column of their own. Spelled as escapes - they are invisible in an
+# editor and get silently mangled by a careless copy/paste.
+_ZERO_WIDTH = (chr(0xFE0F), chr(0xFE0E), chr(0x200D))
+
+
+def _is_emoji(ch: str) -> bool:
+    o = ord(ch)
+    return (0x1F300 <= o <= 0x1FAFF or 0x1F000 <= o <= 0x1F2FF
+            or 0x2600 <= o <= 0x27BF or 0x2B00 <= o <= 0x2BFF)
+
+
+def _vislen(s: str) -> int:
+    """Printable column width. ponytail: a ZWJ emoji sequence (family, flags)
+    over-counts because each component is measured separately - switch to
+    grapheme clustering only if those start showing up in replies."""
+    total = 0
+    for ch in _ANSI_RE.sub("", s):
+        # variation selectors + ZWJ are modifiers, not columns
+        if unicodedata.combining(ch) or ch in _ZERO_WIDTH:
+            continue
+        if unicodedata.east_asian_width(ch) in ("W", "F") or _is_emoji(ch):
+            total += 2
+        else:
+            total += 1
+    return total
+
+
+def _style(text: str, *names: str) -> str:
+    """Style ``text``, one word at a time. Markers are always stripped by the
+    caller, so a colourless terminal still gets clean prose."""
+    if not _COLORS["reset"] or not text:
+        return text
+    opener = "".join(_STYLE[n] for n in names)
+    return " ".join(f"{opener}{word}{_COLORS['reset']}" if word else word
+                    for word in text.split(" "))
+
+
+_INLINE = (
+    (re.compile(r"\*\*\*(.+?)\*\*\*"), ("bold", "italic")),
+    (re.compile(r"\*\*(.+?)\*\*"), ("bold",)),
+    (re.compile(r"__(.+?)__"), ("bold",)),
+    (re.compile(r"~~(.+?)~~"), ("dim",)),
+    (re.compile(r"(?<![\w*])\*(?!\s)([^*]+?)(?<!\s)\*(?![\w*])"), ("italic",)),
+    (re.compile(r"(?<![\w_])_(?!\s)([^_]+?)(?<!\s)_(?![\w_])"), ("italic",)),
+)
+_CODE_RE = re.compile(r"`([^`]+?)`")
+_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]+)\)")
+
+def _replace_inline_math(text: str, stash) -> str:
+    """Replace valid single-dollar spans while preserving currency/shell text."""
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text) and text[i + 1] == "$":
+            out.append("$")
+            i += 2
+            continue
+        if text[i] != "$":
+            out.append(text[i])
+            i += 1
+            continue
+        if ((i + 1 < len(text) and text[i + 1] == "$")
+                or (i > 0 and text[i - 1] == "$")):
+            out.append("$")
+            i += 1
+            continue
+
+        end = i + 1
+        while end < len(text):
+            if text[end] == "\\":
+                end += 2
+                continue
+            if text[end] == "$":
+                break
+            end += 1
+        if end < len(text) and looks_like_math(text[i + 1:end]):
+            out.append(stash(text[i + 1:end]))
+            i = end + 1
+            continue
+        out.append("$")
+        i += 1
+    return "".join(out)
+
+
+
+def _inline(text: str) -> str:
+    """Render code, math, links and emphasis without cross-interference."""
+    slots: list[str] = []
+
+    def _slot(rendered: str) -> str:
+        slots.append(rendered)
+        return f"\x00{len(slots) - 1}\x00"
+
+    # Code wins over every other inline syntax. Math is stashed next so its
+    # underscores, stars and braces never reach the emphasis regexes.
+    text = _CODE_RE.sub(lambda m: _slot(_style(m.group(1), "code")), text)
+    text = _replace_inline_math(
+        text,
+        lambda value: _slot(_style(
+            render_latex(value, ascii_only=_ASCII), "math"
+        )),
+    )
+    text = _LINK_RE.sub(
+        lambda m: _style(m.group(1) or m.group(2), "link")
+        + (" " + _style(f"({m.group(2)})", "dim") if m.group(1) else ""), text)
+    for pattern, names in _INLINE:
+        text = pattern.sub(lambda m, n=names: _style(m.group(1), *n), text)
+    return re.sub(
+        r"\x00(\d+)\x00", lambda m: slots[int(m.group(1))], text
+    )
+
+_HEAD_RE = re.compile(r"(#{1,6})\s+(.*)")
+_BULLET_RE = re.compile(r"([-*+])\s+(.*)")
+_NUM_RE = re.compile(r"(\d{1,3}[.)])\s+(.*)")
+_RULE_RE = re.compile(r"([-*_])(\s*\1){2,}\s*$")
+
+
+def render_markdown(text: str) -> list[tuple[str, int]]:
+    """Markdown/math -> rendered lines paired with their hanging indent."""
+    out: list[tuple[str, int]] = []
+    source = str(text).splitlines() or [""]
+    in_fence = False
+    i = 0
+
+    def add_display(raw_math: str, indent: str) -> None:
+        prefix = indent + "  "
+        equations = display_latex_lines(raw_math, ascii_only=_ASCII)
+        for equation in equations:
+            out.append((
+                prefix + _style(equation, "display_math"),
+                len(prefix),
+            ))
+
+    while i < len(source):
+        raw = source[i]
+        stripped = raw.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            i += 1
+            continue
+
+        if in_fence:
+            out.append((_style(raw, "code"), 2))
+            i += 1
+            continue
+
+        # Display math wins over inline dollars and ordinary Markdown.
+        if stripped.startswith("$$"):
+            indent = " " * (len(raw) - len(raw.lstrip(" ")))
+            first = stripped[2:]
+            if "$$" in first:
+                body, suffix = first.split("$$", 1)
+                if not suffix.strip():
+                    add_display(body, indent)
+                    i += 1
+                    continue
+            else:
+                body_lines = [first]
+                j = i + 1
+                found = False
+                while j < len(source):
+                    before, marker, suffix = source[j].partition("$$")
+                    if marker:
+                        if not suffix.strip():
+                            body_lines.append(before)
+                            found = True
+                        break
+                    body_lines.append(source[j])
+                    j += 1
+                if found:
+                    add_display("\n".join(body_lines), indent)
+                    i = j + 1
+                    continue
+
+        indent = " " * (len(raw) - len(raw.lstrip(" ")))
+        if not stripped:
+            out.append(("", 0))
+        elif _RULE_RE.match(stripped):
+            out.append((_c256(_glyph("─", "-") * 24, _ARC[2]), 0))
+        else:
+            head = _HEAD_RE.match(stripped)
+            bullet = _BULLET_RE.match(stripped)
+            num = _NUM_RE.match(stripped)
+            if head:
+                out.append((_style(_inline(head.group(2)), "head"), 0))
+            elif stripped.startswith(">"):
+                body = _inline(stripped.lstrip("> ").strip())
+                out.append((
+                    f"{indent}{_c(_glyph('│', '|'), 'grey')} "
+                    f"{_style(body, 'dim')}",
+                    len(indent) + 2,
+                ))
+            elif bullet:
+                dot = _c256(_glyph("•", "*"), _ARC[0])
+                out.append((
+                    f"{indent}{dot} {_inline(bullet.group(2))}",
+                    len(indent) + 2,
+                ))
+            elif num:
+                out.append((
+                    f"{indent}{_style(num.group(1), 'bold')} "
+                    f"{_inline(num.group(2))}",
+                    len(indent) + len(num.group(1)) + 1,
+                ))
+            else:
+                out.append((indent + _inline(stripped), len(indent)))
+        i += 1
+    return out
+
+def _hard_break(word: str, limit: int) -> list[str]:
+    """Split one over-long word (a URL, a path) on printable width, stepping
+    over ANSI escapes rather than through them."""
+    chunks: list[str] = []
+    cur: list[str] = []
+    width, i = 0, 0
+    while i < len(word):
+        esc = _ANSI_RE.match(word, i)
+        if esc:
+            cur.append(esc.group())
+            i = esc.end()
+            continue
+        cw = _vislen(word[i])
+        if width + cw > limit and cur:
+            chunks.append("".join(cur))
+            cur, width = [], 0
+        cur.append(word[i])
+        width += cw
+        i += 1
+    if cur:
+        chunks.append("".join(cur))
+    return chunks or [""]
+
+
+def _wrap(text: str, width: int, hang: int = 0) -> list[str]:
+    """Word-wrap on printable width. Splitting on spaces is safe: an ANSI
+    escape never contains one, so it cannot be cut in half."""
+    if width < 4:
+        return [text]
+    pad = " " * min(hang, max(0, width - 8))
+    lines: list[str] = []
+    cur, cur_w = "", 0
+    # `started`, not `if cur`: the first words of an indented line are empty
+    # strings, and treating those as "nothing yet" ate the leading indent.
+    started = False
+    for word in text.split(" "):
+        for piece in (_hard_break(word, width) if _vislen(word) > width
+                      else [word]):
+            pw = _vislen(piece)
+            if started and cur_w + 1 + pw > width:
+                lines.append(cur)
+                cur, cur_w = pad + piece, len(pad) + pw
+            elif started:
+                cur, cur_w = f"{cur} {piece}", cur_w + 1 + pw
+            else:
+                cur, cur_w, started = piece, pw, True
+    lines.append(cur)
+    return lines
+
+
 def jarvis(msg: str) -> None:
-    """Jarvis's own replies, in a rounded panel so they stand out from the
-    step-by-step log noise."""
+    """Jarvis's own replies, in a sleek rounded panel so they stand out from
+    the step-by-step log noise. Markdown in the reply is rendered, not printed
+    raw."""
     tl, tr, bl, br, hz, vt = (
         ("+", "+", "+", "+", "-", "|") if _ASCII
         else ("╭", "╮", "╰", "╯", "─", "│"))
     w = min(_width() - 2, 96)              # total width incl. borders
     inner = w - 4                          # "| text |"
     lines: list[str] = []
-    for raw in str(msg).splitlines() or [""]:
-        lines.extend(textwrap.wrap(raw, inner) or [""])
+    for rendered, hang in render_markdown(msg):
+        lines.extend(_wrap(rendered, inner, hang))
     head = f"{tl}{hz * 2} JARVIS "
-    top = head + hz * max(0, w - len(head) - 1) + tr
+    top = head + hz * max(0, w - _vislen(head) - 1) + tr
     print("\n" + _c256(top, _ARC[1]))
     side = _c256(vt, _ARC[1])
+    reset = _COLORS["reset"]
     for ln in lines:
-        print(f"{side} {ln.ljust(inner)} {side}")
+        # reset closes anything a hard-break left open; it costs no columns.
+        print(f"{side} {ln}{reset}{' ' * max(0, inner - _vislen(ln))} {side}")
     print(_c256(bl + hz * (w - 2) + br, _ARC[1]) + "\n")
 
 
