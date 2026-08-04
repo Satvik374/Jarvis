@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 
 from pathlib import Path
@@ -37,11 +38,14 @@ BANNER = r"""
 _SLASH_COMMANDS = (
     ("/enhance", "AI-rewrite a rough prompt, confirm, then run it"),
     ("/paste", "attach the clipboard image/screenshot (Ctrl+V works too)"),
+    ("/remember", "[fact] - store a fact in permanent memory forever"),
+    ("/memory", "list permanent memories and learned plans"),
     ("/help", "show all commands"),
     ("/voice", "voice-ONLY mode: talk instead of typing"),
     ("/wake", 'hands-free mode: say "Hey Jarvis" to command'),
     ("/cron", "list/add/remove scheduled jobs"),
     ("/connect", "Gmail/Discord/WhatsApp connector status and test"),
+    ("/remote", "list paired devices, trust one, or send it a task"),
     ("/mcp", "list/add/remove MCP servers (extra tool connectors)"),
     ("/startup", "on|off - launch Jarvis when Windows starts"),
     ("/confirm", "on|off - confirm each action"),
@@ -386,6 +390,15 @@ def repl(cfg: Config | None = None) -> int:
     agent = Agent(brain, cfg)
     voice.configure(brain, cfg.voice)
 
+    # Refresh cloud credentials while the user is reading the greeting. This
+    # keeps first-command latency off the interactive critical path; failures
+    # remain silent here and are reported normally by the real request.
+    threading.Thread(
+        target=lambda: _warm_brain(brain),
+        daemon=True,
+        name="brain-warmup",
+    ).start()
+
     # Cron: a background thread fires scheduled jobs through the same agent.
     # Every job run holds the desktop lock so it never fights a foreground task.
     def _cron_runner(command: str) -> None:
@@ -513,6 +526,13 @@ def repl(cfg: Config | None = None) -> int:
     log.jarvis("Goodbye.")
     voice.speak("Goodbye, sir.", wait=True)   # sync: the process is exiting
     return 0
+
+
+def _warm_brain(brain) -> None:
+    try:
+        brain.warmup()
+    except Exception:
+        pass
 
 
 def _enhance(prompt: str, agent: Agent) -> str | None:
@@ -715,12 +735,44 @@ def _command(cmd: str, cfg: Config) -> bool:
     elif c == "config":
         import json
         print(json.dumps(cfg.as_dict(), indent=2, default=str))
+    elif c.startswith("remember") or c == "remember":
+        parts = cmd.strip().split(maxsplit=1)
+        fact = parts[1].strip() if len(parts) > 1 else ""
+        if fact:
+            from .agent.memory import remember_fact
+            msg = remember_fact(fact=fact, category="user")
+            log.ok(msg)
+        else:
+            log.warn("usage: /remember <fact to store forever>")
+    elif c == "memory" or c.startswith("memory "):
+        from .agent.memory import parse_memory_text, get_default_memory_path
+        p = get_default_memory_path()
+        if p.exists():
+            text = p.read_text(encoding="utf-8")
+            facts, plans = parse_memory_text(text)
+            log.rule("PERMANENT MEMORIES", "cyan")
+            if facts:
+                for f in facts:
+                    print(f"  {_c('•', 'cyan')} {f}")
+            else:
+                print(_c("  (No permanent memories stored)", "grey"))
+            log.rule("LEARNED TASK PLANS", "cyan")
+            if plans:
+                for plan in plans:
+                    print(_c(plan, "grey"))
+            else:
+                print(_c("  (No learned task plans)", "grey"))
+            log.rule()
+        else:
+            log.info("No memory.txt file found yet.")
     elif c == "cron" or c.startswith("cron "):
         _cron_command(cmd)
     elif c == "mcp" or c.startswith("mcp "):
         _mcp_command(cmd)
     elif c == "connect" or c.startswith("connect "):
         _connect_command(cmd)
+    elif c == "remote" or c.startswith("remote "):
+        _remote_command(cmd, cfg)
     else:
         log.warn(f"unknown command '{cmd}' (':help' for the list)")
     return False
@@ -815,6 +867,17 @@ def _connect_command(raw: str) -> None:
         log.warn(str(exc))
         return
     log.ok(out)
+
+
+def _remote_command(raw: str, cfg: Config) -> None:
+    """Handle ``:remote`` commands without exposing pairing secrets in chat."""
+    from . import remote
+    try:
+        output = remote.console_command(raw, cfg)
+    except remote.RemoteError as exc:
+        log.warn(str(exc))
+        return
+    log.info(output)
 
 
 def _mcp_command(raw: str) -> None:

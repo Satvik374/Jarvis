@@ -19,6 +19,7 @@ import base64
 import io
 import json
 import os
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -36,6 +37,12 @@ class Brain:
 
     def __init__(self, cfg: BrainConfig):
         self.cfg = cfg
+        # requests.post() creates and tears down a Session for every call.
+        # A Jarvis task makes several calls to the same host, so retain one
+        # connection pool per calling thread.  Thread-local storage keeps the
+        # foreground loop, cron runner, and speech worker from sharing the
+        # mutable Session object while still reusing TCP/TLS connections.
+        self._http_local = threading.local()
 
     def complete(self, system: str, messages: list[dict],
                  image=None) -> str:
@@ -45,6 +52,19 @@ class Brain:
         ``image`` is an optional PIL image for the current turn (vision mode).
         """
         raise NotImplementedError
+
+    def warmup(self) -> None:
+        """Best-effort backend warmup for interactive frontends."""
+
+    def _http_post(self, url: str, **kwargs: Any):
+        """POST through this thread's persistent requests connection pool."""
+        import requests  # type: ignore
+
+        session = getattr(self._http_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._http_local.session = session
+        return session.post(url, **kwargs)
 
     # -- shared helpers ----------------------------------------------------
     @staticmethod
@@ -151,8 +171,6 @@ class OllamaBrain(Brain):
     """Local models served by Ollama. The recommended default for this rig."""
 
     def complete(self, system, messages, image=None) -> str:
-        import requests  # type: ignore
-
         msgs: list[dict] = [{"role": "system", "content": system}]
         for m in messages:
             msg = {"role": m["role"], "content": m["content"]}
@@ -165,15 +183,20 @@ class OllamaBrain(Brain):
             "model": self.cfg.model,
             "messages": msgs,
             "stream": False,
+            "keep_alive": "24h",
             "options": {
                 "temperature": self.cfg.temperature,
                 "num_predict": self.cfg.max_tokens,
             },
             "format": "json",   # ask Ollama to constrain output to JSON
         }
+
         try:
-            r = requests.post(f"{self.cfg.base_url}/api/chat", json=payload,
-                              timeout=self.cfg.request_timeout)
+            r = self._http_post(
+                f"{self.cfg.base_url}/api/chat",
+                json=payload,
+                timeout=self.cfg.request_timeout,
+            )
         except Exception as exc:
             raise BrainError(
                 f"cannot reach Ollama at {self.cfg.base_url} ({exc}). "
@@ -282,8 +305,6 @@ def _dtype_kwarg(dtype) -> dict:
 
 class OpenAICompatBrain(Brain):
     def complete(self, system, messages, image=None) -> str:
-        import requests  # type: ignore
-
         msgs: list[dict] = [{"role": "system", "content": system}]
         for m in messages:
             msgs.append({"role": m["role"], "content": m["content"]})
@@ -310,8 +331,12 @@ class OpenAICompatBrain(Brain):
         url = base + ("/chat/completions" if base.endswith("/v1")
                       else "/v1/chat/completions")
         try:
-            r = requests.post(url, json=payload, headers=headers,
-                              timeout=self.cfg.request_timeout)
+            r = self._http_post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self.cfg.request_timeout,
+            )
         except Exception as exc:
             raise BrainError(f"cannot reach endpoint {url}: {exc}") from exc
         r.raise_for_status()
@@ -325,8 +350,6 @@ class OpenAICompatBrain(Brain):
 
 class AnthropicBrain(Brain):
     def complete(self, system, messages, image=None) -> str:
-        import requests  # type: ignore
-
         key = getattr(self.cfg, "api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
             raise BrainError("set ANTHROPIC_API_KEY or api_key in config/env to use the anthropic backend")
@@ -356,9 +379,12 @@ class AnthropicBrain(Brain):
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
-        r = requests.post("https://api.anthropic.com/v1/messages",
-                          json=payload, headers=headers,
-                          timeout=self.cfg.request_timeout)
+        r = self._http_post(
+            "https://api.anthropic.com/v1/messages",
+            json=payload,
+            headers=headers,
+            timeout=self.cfg.request_timeout,
+        )
         r.raise_for_status()
         data = r.json()
         parts = [b.get("text", "") for b in data.get("content", [])
@@ -378,11 +404,35 @@ class GeminiVertexBrain(Brain):
         self.project_id = None
         self._cached_token = None
         self._token_expiry = 0
+        self._auth_lock = threading.Lock()
 
     def _get_access_token_and_project(self) -> tuple[str, str]:
-        if self._cached_token and time.time() < self._token_expiry - 60:
+        if (
+            self._cached_token
+            and self.project_id
+            and time.time() < self._token_expiry - 60
+        ):
             return self._cached_token, self.project_id
+        with self._auth_lock:
+            # An interactive warmup, foreground request, and background TTS
+            # can arrive together. Only one of them should refresh ADC.
+            if (
+                self._cached_token
+                and self.project_id
+                and time.time() < self._token_expiry - 60
+            ):
+                return self._cached_token, self.project_id
+            return self._refresh_access_token_and_project()
 
+    def warmup(self) -> None:
+        self._get_access_token_and_project()
+
+    def _refresh_access_token_and_project(self) -> tuple[str, str]:
+        # Never let a failed background warmup leave a fresh token paired with
+        # a missing/stale project for the first real foreground request.
+        self._cached_token = None
+        self.project_id = None
+        self._token_expiry = 0
         # Try using google-auth library if installed
         ga_error = ""
         try:
@@ -391,13 +441,18 @@ class GeminiVertexBrain(Brain):
             credentials, project = google.auth.default()
             request = google.auth.transport.requests.Request()
             credentials.refresh(request)
-            self._cached_token = credentials.token
             # authorized_user creds carry no project, so fall back to the
             # configured GOOGLE_CLOUD_PROJECT for the Vertex endpoint.
-            self.project_id = (project or getattr(credentials, 'project_id', None)
-                               or os.environ.get('GOOGLE_CLOUD_PROJECT'))
-            self._token_expiry = time.time() + 3500
-            if self._cached_token and self.project_id:
+            token = credentials.token
+            project_id = (
+                project
+                or getattr(credentials, 'project_id', None)
+                or os.environ.get('GOOGLE_CLOUD_PROJECT')
+            )
+            if token and project_id:
+                self._cached_token = token
+                self.project_id = project_id
+                self._token_expiry = time.time() + 3500
                 return self._cached_token, self.project_id
         except ImportError:
             pass
@@ -439,7 +494,10 @@ class GeminiVertexBrain(Brain):
 
             req = urllib.request.Request(token_url, data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'})
             try:
-                with urllib.request.urlopen(req) as response:
+                with urllib.request.urlopen(
+                    req,
+                    timeout=self.cfg.request_timeout,
+                ) as response:
                     res = json.loads(response.read().decode('utf-8'))
                     self._cached_token = res['access_token']
                     self.project_id = project_id
@@ -527,8 +585,6 @@ class GeminiVertexBrain(Brain):
         loc = getattr(self.cfg, "location", "global")
         url = f"https://aiplatform.googleapis.com/v1/projects/{project_id}/locations/{loc}/publishers/google/models/{self.cfg.model}:generateContent"
 
-        import requests as _req  # type: ignore
-
         # Gemini sometimes returns an EMPTY candidate with finishReason
         # RECITATION (its copyright filter matching benign output), OTHER, or
         # MALFORMED_FUNCTION_CALL. The latter is common when an agent prompt
@@ -591,8 +647,12 @@ class GeminiVertexBrain(Brain):
                     1.0, max(self.cfg.temperature, 0.2) + 0.35 * attempt)
 
             try:
-                r = _req.post(url, json=request_payload, headers=headers,
-                              timeout=self.cfg.request_timeout)
+                r = self._http_post(
+                    url,
+                    json=request_payload,
+                    headers=headers,
+                    timeout=self.cfg.request_timeout,
+                )
             except Exception as exc:
                 raise BrainError(
                     f"Vertex AI Gemini API request failed: {exc}") from exc
@@ -646,8 +706,6 @@ class GeminiVertexBrain(Brain):
                          model: str | None = None) -> str:
         """Speech-to-text: Gemini accepts audio natively, so voice input needs
         no local speech model on this machine."""
-        import requests as _req  # type: ignore
-
         access_token, project_id = self._get_access_token_and_project()
         transcription_model = model or self.cfg.model
         b64 = base64.b64encode(wav_bytes).decode("ascii")
@@ -675,8 +733,12 @@ class GeminiVertexBrain(Brain):
         url = (f"https://aiplatform.googleapis.com/v1/projects/{project_id}"
                f"/locations/{loc}/publishers/google/models/"
                f"{transcription_model}:generateContent")
-        r = _req.post(url, json=payload, headers=headers,
-                      timeout=self.cfg.request_timeout)
+        r = self._http_post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=self.cfg.request_timeout,
+        )
         if not r.ok:
             raise BrainError(f"transcription HTTP {r.status_code}: {r.text[:200]}")
         candidates = r.json().get("candidates", [])
@@ -693,8 +755,6 @@ class GeminiVertexBrain(Brain):
         ``model`` is supplied explicitly so speech generation can never
         accidentally replace or mutate ``self.cfg.model``, the thinking model.
         """
-        import requests as _req  # type: ignore
-
         access_token, project_id = self._get_access_token_and_project()
         speech_config: dict[str, Any] = {
             "voiceConfig": {
@@ -729,7 +789,7 @@ class GeminiVertexBrain(Brain):
             f"{model}:generateContent"
         )
         try:
-            response = _req.post(
+            response = self._http_post(
                 url,
                 json=payload,
                 headers=headers,

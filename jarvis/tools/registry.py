@@ -731,6 +731,43 @@ def _h_clipboard_write(args, obs, cfg):
                         needs_observe=False)
 
 
+def _h_remember(args, obs, cfg):
+    fact = str(args.get("fact", "")).strip()
+    if not fact:
+        return ActionResult(False, "remember needs a 'fact' parameter", needs_observe=False)
+    cat = str(args.get("category", "fact")).strip()
+    from ..agent.memory import remember_fact
+    msg = remember_fact(fact=fact, category=cat)
+    return ActionResult(True, msg, needs_observe=False)
+
+
+def _h_forget(args, obs, cfg):
+    target = str(args.get("target", "")).strip()
+    if not target:
+        return ActionResult(False, "forget needs a 'target' parameter", needs_observe=False)
+    from ..agent.memory import forget_fact
+    msg = forget_fact(target=target)
+    return ActionResult(True, msg, needs_observe=False)
+
+
+def _h_remote_task(args, obs, cfg):
+    device = str(args.get("device", "")).strip()
+    task = str(args.get("task", "")).strip()
+    if not device or not task:
+        return ActionResult(False, "remote_task needs both a device and task", needs_observe=False)
+    try:
+        timeout = args.get("timeout")
+        timeout = int(timeout) if timeout is not None else None
+    except (TypeError, ValueError):
+        timeout = None
+    from .. import remote
+    try:
+        ok, message = remote.send_task(cfg, device, task, timeout=timeout)
+    except remote.RemoteError as exc:
+        return ActionResult(False, str(exc), needs_observe=False)
+    return ActionResult(ok, message, needs_observe=False)
+
+
 def _h_wait(args, obs, cfg):
     secs = max(0.0, min(10.0, float(args.get("seconds", 1.0))))
     time.sleep(secs)
@@ -800,6 +837,9 @@ _HANDLERS = {
     "delete_file": _h_delete_file,
     "clipboard_read": _h_clipboard_read,
     "clipboard_write": _h_clipboard_write,
+    "remember": _h_remember,
+    "forget": _h_forget,
+    "remote_task": _h_remote_task,
     "connector": _h_connector,
     "mcp": _h_mcp,
     "mcp_call": _h_mcp_call,

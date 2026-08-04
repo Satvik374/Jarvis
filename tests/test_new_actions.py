@@ -294,6 +294,19 @@ class CoderLoopTests(unittest.TestCase):
         self.assertTrue(is_ask)
         self.assertIn("React", msg)
 
+    def test_coder_caps_its_action_response_budget_without_mutating_config(self):
+        from jarvis.agent.coder import Coder, _MAX_CODER_TOKENS
+
+        self.cfg.brain.max_tokens = 500_000
+        brain = _ScriptedBrain([])
+        brain.cfg = self.cfg.brain
+
+        coder = Coder(brain, self.cfg)
+
+        self.assertEqual(coder.brain.cfg.max_tokens, _MAX_CODER_TOKENS)
+        self.assertEqual(self.cfg.brain.max_tokens, 500_000)
+        self.assertIsNot(coder.brain.cfg, self.cfg.brain)
+
 
 class WriteFilesTests(unittest.TestCase):
     def setUp(self):
@@ -528,6 +541,57 @@ class CodingRoutingBugTests(unittest.TestCase):
                     "debug the login flow", "refactor main.py",
                     "open notepad", "click the start button"):
             self.assertTrue(a._looks_like_task(msg), msg)
+
+    def test_polite_desktop_commands_skip_the_chat_classifier(self):
+        a = self._agent()
+        for msg in ("please open notepad",
+                    "can you click the start button?",
+                    "could you type hello into notepad",
+                    "Jarvis, would you launch calculator",
+                    "can you scroll down",
+                    "will you press enter"):
+            self.assertTrue(a._looks_like_task(msg), msg)
+
+        for msg in ("can you explain quantum computing",
+                    "could you tell me a joke",
+                    "please make me a healthy meal plan",
+                    "can you write a poem",
+                    "could you play devil's advocate",
+                    "can you run through how this works",
+                    "would you start by explaining the concept",
+                    "can you save me from boredom",
+                    "can you develop a meal plan",
+                    "could you launch into a quick explanation",
+                    "can you press charges",
+                    "can you type out a poem",
+                    "can you upgrade my workout plan",
+                    "can you open with a word of advice",
+                    "can you run a test of my knowledge",
+                    "can you play a podcast host in this roleplay",
+                    "can you build a project plan",
+                    "can you please build a small website",
+                    "can you type this in French",
+                    "can you type a poem in the style of Shakespeare",
+                    "can you open your answer with the word hello",
+                    "can you open your answer by discussing Python 3.12",
+                    "can you minimize the word count",
+                    "can you maximize website conversions",
+                    "can you develop a game plan",
+                    "can you build a software roadmap",
+                    "can you run through this script with me",
+                    "can you play with this video idea",
+                    "can you upgrade this workout program",
+                    "can you develop a game plan for my career",
+                    "can you implement an exercise program",
+                    "can you play a music trivia game with me",
+                    "can you open a window into quantum mechanics",
+                    "can you save me $5.00",
+                    "can you maximize application performance",
+                    "can you maximize app engagement",
+                    "can you minimize browser tracking",
+                    "can you open a window for questions",
+                    "can you scroll down memory lane with me"):
+            self.assertFalse(a._looks_like_task(msg), msg)
 
     def test_memory_matches_titles_only(self):
         memory = ("- Learned Task: Build a typing-speed test game\n"

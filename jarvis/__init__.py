@@ -17,3 +17,10 @@ if sys.platform == "win32":
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+    try:
+        from .perception._comtypes_fix import ensure as _ensure_comtypes
+        _ensure_comtypes()
+    except Exception:
+        pass
+

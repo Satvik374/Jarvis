@@ -118,12 +118,28 @@ class VoiceConfig:
 
 
 @dataclass
+class RemoteConfig:
+    # Public HTTPS URL of the separately hosted Jarvis Remote relay. Leaving
+    # this blank keeps remote support disabled until the owner opts in.
+    relay_url: str = ""
+    # Where this device keeps its private pairing material. Empty uses the
+    # per-user ~/.jarvis_remote directory, outside the project/repository.
+    state_dir: str = ""
+    # Time a controller waits for a remote task result (5-600 seconds).
+    result_timeout: int = 180
+    # Remote agents require local action confirmation by default. An owner can
+    # explicitly opt into unattended operation at launch.
+    require_confirmation: bool = True
+
+
+@dataclass
 class Config:
     brain: BrainConfig = field(default_factory=BrainConfig)
     perception: PerceptionConfig = field(default_factory=PerceptionConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     data: DataConfig = field(default_factory=DataConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
+    remote: RemoteConfig = field(default_factory=RemoteConfig)
     # Voice mode: speak replies aloud (Gemini TTS) and allow spoken commands
     # (mic -> Gemini transcription). Toggle at runtime with ':voice on|off'.
     voice_enabled: bool = False
@@ -167,6 +183,7 @@ def load_config(path: Path | str | None = None) -> Config:
         _apply(cfg.safety, data.get("safety", {}))
         _apply(cfg.data, data.get("data", {}))
         _apply(cfg.voice, data.get("voice", {}))
+        _apply(cfg.remote, data.get("remote", {}))
         cfg.voice_enabled = bool(data.get("voice_enabled", cfg.voice_enabled))
 
     # Environment overrides for the most common knobs.
@@ -187,6 +204,10 @@ def load_config(path: Path | str | None = None) -> Config:
         cfg.voice.language_code = v
     if v := env.get("JARVIS_STT_MODEL"):
         cfg.voice.transcription_model = v
+    if v := env.get("JARVIS_REMOTE_URL"):
+        cfg.remote.relay_url = v
+    if v := env.get("JARVIS_REMOTE_STATE_DIR"):
+        cfg.remote.state_dir = v
     if v := env.get("JARVIS_API_KEY") or env.get("API_KEY") or env.get("OPENAI_API_KEY"):
         cfg.brain.api_key = v
         # Ensure it is set in environment for standard libraries

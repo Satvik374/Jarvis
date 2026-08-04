@@ -110,6 +110,31 @@ mid-task questions, confirmations, and image prompts as the console. While
 Jarvis speaks, the center core renders a live spectrum from the synthesized
 voice amplitude.
 
+### Control a paired device remotely
+
+Jarvis Remote is opt-in: you run a small relay from the separate
+[`jarvis-server` repository](https://github.com/Satvik374/jarvis-server)
+folder, and you explicitly start a Jarvis agent on every device you want to
+control. The relay forwards encrypted messages only; it cannot run a desktop
+command or read task contents.
+
+1. Deploy the relay using its [deployment guide](https://github.com/Satvik374/jarvis-server#jarvis-remote-relay) to Render and set
+   `JARVIS_REMOTE_URL` to its public HTTPS URL on both devices.
+2. On the controlling computer run `python run.py --remote-pair "Office PC"`.
+3. On the other computer run the displayed `--remote-accept <code>` command.
+4. Compare the fingerprint printed on both computers, then run the displayed
+   `--remote-trust ...` command on **both**. Do not trust a mismatch.
+5. Start the recipient with `python run.py --remote-agent`. It asks for local
+   approval of every action by default. Use `--remote-allow-unattended` only on
+   a physically secured device you own and intend to control without someone at it.
+6. Send a task with `python run.py --remote-send "Office PC" "open Notepad and type hello"`,
+   or from the normal Jarvis console: `:remote send Office PC | open Notepad and type hello`.
+
+`--remote-status` lists the local pairings. The remote relay uses long polling,
+so neither device needs an open inbound port or a public IP. Render's free web
+services may sleep or restart, so a genuinely always-on relay and durable
+pairings require a persistent host/disk; see the relay README.
+
 Inside the console:
 ```
 you > open the calculator and compute 24 times 7

@@ -34,7 +34,7 @@ def build_system_prompt(memory: str = "") -> str:
     if memory.strip():
         prompt += f"\n\n=== PERSISTENT MEMORY (persists across runs) ===\n{memory.strip()}\n================================================="
     else:
-        prompt += f"\n\n=== PERSISTENT MEMORY (persists across runs) ===\n(No memory recorded yet. Use write_file on 'memory.txt' to store facts/preferences.)\n================================================="
+        prompt += f"\n\n=== PERSISTENT MEMORY (persists across runs) ===\n(No memory recorded yet. Use the 'remember' action to store facts/preferences.)\n================================================="
     return prompt + "\n\n" + _action_reference() + "\n\n" + _RULES
 
 
@@ -187,10 +187,11 @@ Rules:
      list/tools). Any enabled server's tools are listed under MCP TOOLS above -
      call one with mcp_call. Prefer a built-in action when one already fits;
      reach for an MCP tool for capabilities you otherwise lack.
-  13. PERSISTENT MEMORY: You have a persistent memory stored in "memory.txt".
+  13. PERSISTENT MEMORY: You have permanent memory stored in "memory.txt".
      - Its current contents are automatically shown above in the system prompt.
-     - You can update this memory at any time by calling write_file(path="memory.txt", content="<updated memory>").
-     - Use this memory to store key facts, user preferences, API keys, paths, or tips you want to remember across different runs. Keep it concise.
+     - To store any fact, user preference, instruction, or rule FOREVER across sessions, call remember(fact="...", category="...").
+     - To remove a memory, call forget(target="...").
+     - Use memory to store key facts, user preferences, API keys, paths, or tips you want to remember across all future runs. Keep it concise.
 
 Example reply:
   {"thought": "The Save dialog is open; I'll type the filename.", "action": "type", "args": {"text": "report.txt"}}"""

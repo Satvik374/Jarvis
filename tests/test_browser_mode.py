@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import subprocess
 import struct
+import signal
 import sys
 import tempfile
 import threading
@@ -62,6 +63,9 @@ class _FakeProcess:
     def poll(self):
         return self.returncode
 
+    def send_signal(self, value):
+        self.signal = value
+
 
 class _ExitedProcess:
     def __init__(self, returncode=0):
@@ -96,6 +100,22 @@ class TerminalBridgeInputTests(unittest.TestCase):
         bridge = self.bridge()
         self.assertTrue(bridge.submit("one")[0])
         self.assertFalse(bridge.submit("two")[0])
+
+    def test_interrupt_signals_an_active_directive(self):
+        bridge = self.bridge()
+        bridge.accepting_input = False
+        ok, message = bridge.request_interrupt()
+        expected_signal = (
+            getattr(signal, "CTRL_BREAK_EVENT", signal.SIGINT)
+            if sys.platform == "win32"
+            else signal.SIGINT
+        )
+        self.assertEqual(bridge.process.signal, expected_signal)
+
+
+    def test_interrupt_rejects_when_jarvis_is_ready(self):
+        bridge = self.bridge()
+        self.assertFalse(bridge.request_interrupt()[0])
 
     def test_blank_confirmation_preserves_terminal_default_yes(self):
         bridge = self.bridge(mode="confirmation")
@@ -252,6 +272,40 @@ class BrowserWorkerTests(unittest.TestCase):
         self.assertAlmostEqual(max(levels), 1.0, places=3)
         self.assertGreater(len(set(levels)), 2)
         self.assertEqual(browser_worker._wav_profile(b"not a wav"), (0.0, []))
+
+    def test_wav_spectrogram_separates_low_and_high_tones(self):
+        import base64 as b64
+        import math as _math
+
+        def tone(hz, seconds=0.2, rate=8000):
+            frames = round(seconds * rate)
+            samples = [
+                round(20000 * _math.sin(2 * _math.pi * hz * index / rate))
+                for index in range(frames)
+            ]
+            output = BytesIO()
+            with wave.open(output, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(rate)
+                wav_file.writeframes(struct.pack(f"<{frames}h", *samples))
+            return output.getvalue()
+
+        def peak_band(data):
+            count, fps, encoded = browser_worker._wav_spectrogram(data)
+            self.assertGreater(count, 0)
+            self.assertGreater(fps, 0)
+            raw = b64.b64decode(encoded)
+            self.assertEqual(len(raw) % count, 0)
+            self.assertGreaterEqual(len(raw) // count, 2)
+            middle = (len(raw) // count // 2) * count
+            frame = list(raw[middle:middle + count])
+            return frame.index(max(frame))
+
+        # A 150 Hz tone must light a lower band than a 3 kHz tone, otherwise
+        # every bar is showing the same number and the ring cannot move.
+        self.assertLess(peak_band(tone(150)), peak_band(tone(3000)))
+        self.assertEqual(browser_worker._wav_spectrogram(b"not a wav"), (0, 0, ""))
 
     def test_async_speech_events_use_duration_and_ignore_old_timer(self):
         timers = []
@@ -432,6 +486,9 @@ class _HTTPFakeBridge:
     def request_shutdown(self):
         return True, "stopping"
 
+    def request_interrupt(self):
+        return True, "interrupt requested"
+
     def save_attachment(self, *_args):
         raise ValueError("not used")
 
@@ -503,6 +560,18 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertIn("speechIdWatermark", app)
         self.assertIn('data-speaking="true"', styles)
 
+    def test_static_interface_replaces_send_with_stop_while_generating(self):
+        with self.request("/") as response:
+            page = response.read().decode("utf-8")
+        with self.request("/app.js") as response:
+            app = response.read().decode("utf-8")
+        with self.request("/styles.css") as response:
+            styles = response.read().decode("utf-8")
+        self.assertIn('id="sendButtonLabel"', page)
+        self.assertIn('elements.sendLabel.textContent = canStop ? "STOP" : "SEND"', app)
+        self.assertIn('await api("/api/interrupt", {})', app)
+        self.assertIn('.send-button.is-stop', styles)
+
     def test_non_ascii_token_is_rejected_without_handler_error(self):
         with self.assertRaises(HTTPError) as caught:
             self.request("/api/state?token=%C3%A9")
@@ -557,6 +626,25 @@ class BrowserHTTPTests(unittest.TestCase):
                 "Inspect\n[Attached image: capture.png]",
             ),
         )
+
+    def test_interrupt_requires_exact_origin_and_token(self):
+        with self.assertRaises(HTTPError) as caught:
+            self.request(
+                "/api/interrupt",
+                token=True,
+                payload={},
+                origin="https://malicious.example",
+            )
+        self.assertEqual(caught.exception.code, 403)
+
+        with self.request(
+            "/api/interrupt",
+            token=True,
+            payload={},
+            origin=self.origin,
+        ) as response:
+            body = json.load(response)
+        self.assertTrue(body["ok"])
 
     def test_head_event_stream_is_rejected_without_blocking(self):
         request = Request(

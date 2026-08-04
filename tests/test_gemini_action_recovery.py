@@ -28,7 +28,7 @@ class GeminiActionRecoveryTests(unittest.TestCase):
         )
         return brain
 
-    @patch("requests.post")
+    @patch.object(GeminiVertexBrain, "_http_post")
     def test_malformed_action_retries_with_forced_valid_function(self, post):
         malformed = _response({
             "content": {"parts": []},
@@ -79,7 +79,7 @@ class GeminiActionRecoveryTests(unittest.TestCase):
             "text/plain",
         )
 
-    @patch("requests.post")
+    @patch.object(GeminiVertexBrain, "_http_post")
     def test_normal_json_response_does_not_enable_native_tools(self, post):
         post.return_value = _response({
             "content": {"parts": [{
@@ -97,7 +97,7 @@ class GeminiActionRecoveryTests(unittest.TestCase):
         self.assertEqual(json.loads(raw)["action"], "finish")
         self.assertNotIn("tools", post.call_args.kwargs["json"])
 
-    @patch("requests.post")
+    @patch.object(GeminiVertexBrain, "_http_post")
     def test_persistent_malformed_error_keeps_vertex_detail(self, post):
         post.return_value = _response({
             "content": {"parts": []},

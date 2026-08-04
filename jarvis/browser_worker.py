@@ -30,6 +30,9 @@ _emit_lock = threading.Lock()
 _speech_lock = threading.Lock()
 _speech_generation = 0
 _active_speech_generation: int | None = None
+_SPECTRUM_BANDS = 28
+_SPECTRUM_FPS = 30
+_SPECTRUM_MAX_FRAMES = _SPECTRUM_FPS * 60
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if not sys.path or sys.path[0] != str(_PROJECT_ROOT):
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -144,8 +147,79 @@ def _wav_profile(data: bytes, points: int = 72) -> tuple[float, list[float]]:
         return 0.0, []
 
 
-def _begin_speech(duration: float, envelope: list[float]) -> int:
+def _wav_spectrogram(data: bytes) -> tuple[int, int, str]:
+    """Per-frame frequency bands so the voice ring can move band by band.
+
+    Returns ``(band_count, fps, base64)`` where the payload is a
+    ``frames x band_count`` uint8 matrix in row-major order.  Returns
+    ``(0, 0, "")`` when numpy is missing or the clip is unusable; the browser
+    then falls back to the flat amplitude envelope.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return 0, 0, ""
+    try:
+        with wave.open(io.BytesIO(data), "rb") as wav_file:
+            rate = wav_file.getframerate()
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            raw = wav_file.readframes(wav_file.getnframes())
+    except (EOFError, OSError, ValueError, wave.Error):
+        return 0, 0, ""
+    if sample_width != 2 or not raw or rate <= 0 or channels <= 0:
+        return 0, 0, ""
+
+    samples = np.frombuffer(raw, dtype="<i2").astype(np.float32)
+    if channels > 1:
+        usable = samples.size - samples.size % channels
+        samples = samples[:usable].reshape(-1, channels).mean(axis=1)
+    if samples.size < 2:
+        return 0, 0, ""
+
+    hop = max(1, rate // _SPECTRUM_FPS)
+    window_size = 1 << max(8, (hop * 2 - 1).bit_length())
+    frames = min(_SPECTRUM_MAX_FRAMES, max(1, -(-samples.size // hop)))
+    padded = np.zeros((frames - 1) * hop + window_size, dtype=np.float32)
+    copied = min(samples.size, padded.size)
+    padded[:copied] = samples[:copied]
+
+    window = np.hanning(window_size).astype(np.float32)
+    chunks = np.lib.stride_tricks.sliding_window_view(padded, window_size)
+    spectra = np.abs(np.fft.rfft(chunks[::hop][:frames] * window, axis=1))
+
+    # Log-spaced edges: speech energy is bunched at the bottom, so linear bands
+    # would leave most of the ring dead.
+    edges = np.geomspace(80.0, max(160.0, min(7600.0, rate / 2 - 1)),
+                         _SPECTRUM_BANDS + 1)
+    bins = np.clip((edges * window_size / rate).astype(int),
+                   0, window_size // 2)
+    matrix = np.zeros((frames, _SPECTRUM_BANDS), dtype=np.float32)
+    for band in range(_SPECTRUM_BANDS):
+        low = bins[band]
+        high = max(low + 1, bins[band + 1])
+        matrix[:, band] = spectra[:, low:high].mean(axis=1)
+
+    matrix = np.log1p(matrix / 32.0)
+    peak = float(matrix.max())
+    if peak <= 0:
+        return 0, 0, ""
+    scaled = np.clip(matrix / peak, 0.0, 1.0) ** 0.85
+    payload = (scaled * 255.0).astype(np.uint8).tobytes()
+    return (
+        _SPECTRUM_BANDS,
+        _SPECTRUM_FPS,
+        base64.b64encode(payload).decode("ascii"),
+    )
+
+
+def _begin_speech(
+    duration: float,
+    envelope: list[float],
+    spectrum: tuple[int, int, str] = (0, 0, ""),
+) -> int:
     global _speech_generation, _active_speech_generation
+    band_count, band_fps, bands = spectrum
     with _speech_lock:
         _speech_generation += 1
         generation = _speech_generation
@@ -161,6 +235,9 @@ def _begin_speech(duration: float, envelope: list[float]) -> int:
                 max(0, min(255, round(level * 255)))
                 for level in envelope
             ],
+            band_count=band_count,
+            band_fps=band_fps,
+            bands=bands,
         )
     return generation
 
@@ -174,17 +251,26 @@ def _finish_speech(generation: int) -> None:
         emit("speech", active=False, utterance_id=generation)
 
 
+def _warm_spectrogram_deps() -> None:
+    """Import numpy ahead of the first utterance (~90 ms off the hot path)."""
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        pass
+
+
 def _install_speech_bridge(voice_module: Any) -> None:
     """Observe WAV playback without changing the shared voice implementation."""
     if getattr(voice_module, "_browser_speech_bridge_installed", False):
         return
     voice_module._browser_speech_bridge_installed = True
+    threading.Thread(target=_warm_spectrogram_deps, daemon=True).start()
     original_play = voice_module._play_wav
 
     @functools.wraps(original_play)
     def browser_play_wav(data: bytes, wait: bool) -> Any:
         duration, envelope = _wav_profile(data)
-        generation = _begin_speech(duration, envelope)
+        generation = _begin_speech(duration, envelope, _wav_spectrogram(data))
         try:
             result = original_play(data, wait)
         except Exception:
@@ -207,11 +293,19 @@ def _install_speech_bridge(voice_module: Any) -> None:
 
 def install_event_bridge() -> None:
     """Instrument the logger and input boundary for this worker process."""
+    import signal
+    if hasattr(signal, "SIGBREAK"):
+        try:
+            signal.signal(signal.SIGBREAK, signal.default_int_handler)
+        except Exception:
+            pass
+
     from jarvis.utils import logging as log
 
     if getattr(log, "_browser_event_bridge_installed", False):
         return
     log._browser_event_bridge_installed = True
+
 
     for name in ("info", "step", "think", "act", "ok", "warn", "error"):
         _wrap_activity(log, name)
@@ -236,6 +330,26 @@ def install_event_bridge() -> None:
         text = str(message)
         emit("assistant", message=text)
         emit("state", state="responding", label="Synthesizing response")
+        try:
+            from jarvis.sessions import get_session_manager
+            sm = get_session_manager()
+            session = sm.append_message("assistant", text)
+            if not session.has_ai_title and len(session.messages) >= 2:
+                def _gen_title():
+                    try:
+                        from jarvis.config import load_config
+                        from jarvis.agent.brain import make_brain
+                        cfg = load_browser_config()
+                        brain = make_brain(cfg.brain)
+                        new_title = sm.generate_ai_title(session, brain)
+                        if new_title:
+                            emit("session_title_updated", id=session.id, title=new_title)
+                            emit("session_list", sessions=sm.list_sessions(), active_id=sm.active_session_id)
+                    except Exception:
+                        pass
+                threading.Thread(target=_gen_title, daemon=True, name="ai-title-gen").start()
+        except Exception:
+            pass
         return original_jarvis(message)
 
     log.jarvis = jarvis
@@ -281,8 +395,9 @@ def install_event_bridge() -> None:
             if exc and exc[0] is not None:
                 emit("state", state="error", label=str(exc[1])[:120])
             else:
-                emit("state", state="working", label="Processing")
+                emit("state", state="working", label=self.label or "Processing")
             return result
+
 
     log.spinner = BrowserSpinner
 
@@ -319,7 +434,14 @@ def install_event_bridge() -> None:
                     ).decode("utf-8")
                 except (ValueError, UnicodeDecodeError):
                     pass
+            if value and mode == "command" and not value.startswith(":"):
+                try:
+                    from jarvis.sessions import get_session_manager
+                    get_session_manager().append_message("user", value)
+                except Exception:
+                    pass
             return value
+
         finally:
             emit("state", state="working", label="Directive received")
 

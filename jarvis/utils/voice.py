@@ -9,11 +9,14 @@ STT  - record the microphone with sounddevice (simple energy-based
 
 from __future__ import annotations
 
+import copy
+from dataclasses import dataclass
 import io
 import math
 import os
 import struct
 import tempfile
+import threading
 import wave
 
 from ..config import VoiceConfig
@@ -30,28 +33,152 @@ _CHUNK = 1600          # 0.1 s per energy reading
 _brain = None
 _tts_config = VoiceConfig()
 _async_wav_path: str | None = None
+_speech_generation = 0
+_voice_epoch = 0
+_speech_state = threading.Condition()
+_speech_lifecycle_lock = threading.Lock()
+_speech_playback_lock = threading.Lock()
+_sync_speech_lock = threading.Lock()
+_sync_owner: object | None = None
+
+
+@dataclass(frozen=True)
+class _VoiceSnapshot:
+    """Immutable configuration captured when an utterance is submitted."""
+
+    brain: object
+    config: VoiceConfig
+    epoch: int
+
+
+class _LatestSpeechDispatcher:
+    """Two bounded daemon workers with one coalescing pending slot.
+
+    One stalled cloud request cannot block the next reply. If both requests
+    stall, repeated responses replace the one pending job instead of growing
+    threads, HTTP sessions, memory, and quota usage without bound.
+    """
+
+    def __init__(self, workers: int = 2):
+        self._worker_count = max(1, workers)
+        self._condition = threading.Condition()
+        self._pending: tuple | None = None
+        self._workers: list[threading.Thread] = []
+
+    def submit(
+        self,
+        text: str,
+        generation: int,
+        snapshot: _VoiceSnapshot,
+    ) -> None:
+        with self._condition:
+            self._pending = (text, generation, snapshot)
+            if not self._workers:
+                for index in range(self._worker_count):
+                    worker = threading.Thread(
+                        target=self._run,
+                        daemon=True,
+                        name=f"jarvis-tts-{index + 1}",
+                    )
+                    self._workers.append(worker)
+                    worker.start()
+            self._condition.notify_all()
+
+    def discard_pending(self) -> None:
+        with self._condition:
+            self._pending = None
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while self._pending is None:
+                    self._condition.wait()
+                job = self._pending
+                self._pending = None
+            _speak_async(*job)
+
+
+_SPEECH_DISPATCHER = _LatestSpeechDispatcher()
+
+
+def _next_speech_generation_locked() -> int:
+    global _speech_generation
+    _speech_generation += 1
+    return _speech_generation
+
+
+def _voice_snapshot_locked() -> _VoiceSnapshot:
+    return _VoiceSnapshot(
+        brain=_brain,
+        config=copy.copy(_tts_config),
+        epoch=_voice_epoch,
+    )
+
+
+def _next_speech_generation() -> int:
+    with _speech_state:
+        return _next_speech_generation_locked()
+
+
+def _speech_is_current(
+    generation: int,
+    snapshot: _VoiceSnapshot | None = None,
+) -> bool:
+    with _speech_state:
+        return (
+            generation == _speech_generation
+            and (snapshot is None or snapshot.epoch == _voice_epoch)
+        )
+
+
+def _current_voice_snapshot() -> _VoiceSnapshot:
+    with _speech_state:
+        return _voice_snapshot_locked()
 
 
 def configure(brain, config: VoiceConfig) -> None:
     """Connect voice output to Jarvis's authenticated Gemini brain."""
-    global _brain, _tts_config
-    _brain = brain
-    _tts_config = config
+    global _brain, _tts_config, _voice_epoch, _sync_owner, _kokoro_broken
+    with _speech_lifecycle_lock:
+        with _speech_state:
+            _next_speech_generation_locked()
+            _voice_epoch += 1
+            _brain = brain
+            _tts_config = copy.copy(config)
+            _kokoro_broken = False
+            _sync_owner = None
+            _SPEECH_DISPATCHER.discard_pending()
+            _speech_state.notify_all()
+        _stop_async_playback()
 
 
 def reset() -> None:
     """Clear configured TTS state and stop any asynchronous playback."""
-    global _brain, _tts_config, _kokoro_broken
-    _stop_async_playback()
-    _brain = None
-    _tts_config = VoiceConfig()
-    _kokoro_broken = False     # the loaded Kokoro model itself is kept
+    global _brain, _tts_config, _voice_epoch, _sync_owner, _kokoro_broken
+    # Invalidate synthesis immediately; never wait behind a cloud request.
+    with _speech_lifecycle_lock:
+        with _speech_state:
+            _next_speech_generation_locked()
+            _voice_epoch += 1
+            _brain = None
+            _tts_config = VoiceConfig()
+            _kokoro_broken = False  # the loaded Kokoro model itself is kept
+            _sync_owner = None
+            _SPEECH_DISPATCHER.discard_pending()
+            _speech_state.notify_all()
+        _stop_async_playback()
 
 
-def _synthesize(text: str) -> bytes:
-    if _brain is None:
+def _synthesize(
+    text: str,
+    snapshot: _VoiceSnapshot | None = None,
+) -> bytes:
+    snapshot = snapshot or _current_voice_snapshot()
+    brain = snapshot.brain
+    config = snapshot.config
+    if brain is None:
         raise RuntimeError("Gemini TTS is not configured")
-    synthesize = getattr(_brain, "synthesize_speech", None)
+    synthesize = getattr(brain, "synthesize_speech", None)
     if synthesize is None:
         raise RuntimeError(
             "the active brain cannot authenticate Gemini TTS; "
@@ -59,9 +186,9 @@ def _synthesize(text: str) -> bytes:
         )
     return synthesize(
         text,
-        model=_tts_config.model,
-        voice_name=_tts_config.voice,
-        language_code=_tts_config.language_code,
+        model=config.model,
+        voice_name=config.voice,
+        language_code=config.language_code,
     )
 
 
@@ -81,34 +208,75 @@ def _wav_bytes(pcm: bytes, rate: int = 24000) -> bytes:
 
 _kokoro = None                 # loaded once, on first utterance
 _kokoro_broken = False         # failed once -> stop retrying, use Gemini
+_kokoro_lock = threading.Lock()
 
 
-def _synthesize_kokoro(text: str) -> bytes:
+def _synthesize_kokoro(text: str, config: VoiceConfig) -> bytes:
     """WAV bytes from the local Kokoro model (raises if unavailable)."""
     global _kokoro
-    if _kokoro is None:
-        from ..config import ROOT
-        model_dir = ROOT / "models" / "tts"
-        from kokoro_onnx import Kokoro
-        _kokoro = Kokoro(str(model_dir / "kokoro-v1.0.onnx"),
-                         str(model_dir / "voices-v1.0.bin"))
-    samples, rate = _kokoro.create(text, voice=_tts_config.local_voice,
-                                   speed=_tts_config.local_speed)
+    # Kokoro's model initialization and create() are not documented as
+    # thread-safe. Serialize only this fast local engine; cloud calls retain
+    # the dispatcher's two-way concurrency.
+    with _kokoro_lock:
+        if _kokoro is None:
+            from ..config import ROOT
+            model_dir = ROOT / "models" / "tts"
+            from kokoro_onnx import Kokoro
+            _kokoro = Kokoro(str(model_dir / "kokoro-v1.0.onnx"),
+                             str(model_dir / "voices-v1.0.bin"))
+        samples, rate = _kokoro.create(
+            text,
+            voice=config.local_voice,
+            speed=config.local_speed,
+        )
     import numpy as np
     pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
     return _wav_bytes(pcm, rate)
 
 
-def _synthesize_wav(text: str) -> bytes:
+class _SupersededSpeech(Exception):
+    pass
+
+
+def _synthesize_wav(
+    text: str,
+    snapshot: _VoiceSnapshot | None = None,
+    generation: int | None = None,
+) -> bytes:
     """WAV bytes from the configured engine: local Kokoro first, Gemini after."""
     global _kokoro_broken
-    if _tts_config.engine == "kokoro" and not _kokoro_broken:
+    snapshot = snapshot or _current_voice_snapshot()
+    config = snapshot.config
+    with _speech_state:
+        current_epoch = snapshot.epoch == _voice_epoch
+        kokoro_broken = _kokoro_broken if current_epoch else False
+    if config.engine == "kokoro" and not kokoro_broken:
         try:
-            return _synthesize_kokoro(text)
+            return _synthesize_kokoro(text, config)
         except Exception as exc:
-            _kokoro_broken = True      # warn once, not on every sentence
+            with _speech_state:
+                still_current = (
+                    snapshot.epoch == _voice_epoch
+                    and (
+                        generation is None
+                        or generation == _speech_generation
+                    )
+                )
+                if still_current:
+                    _kokoro_broken = True  # warn once, not every sentence
+            if not still_current:
+                raise _SupersededSpeech() from exc
             log.warn(f"local TTS unavailable ({exc}); using Gemini TTS")
-    return _wav_bytes(_synthesize(text))
+    with _speech_state:
+        if (
+            snapshot.epoch != _voice_epoch
+            or (
+                generation is not None
+                and generation != _speech_generation
+            )
+        ):
+            raise _SupersededSpeech()
+    return _wav_bytes(_synthesize(text, snapshot))
 
 
 def _stop_async_playback() -> None:
@@ -163,24 +331,139 @@ def _play_wav(data: bytes, wait: bool) -> None:
         raise
 
 
+def _speak_async(
+    text: str,
+    generation: int,
+    snapshot: _VoiceSnapshot,
+) -> None:
+    """Synthesize in a bounded daemon worker and play only the latest reply."""
+    if not _speech_is_current(generation, snapshot):
+        return
+    try:
+        data = _synthesize_wav(
+            text,
+            snapshot=snapshot,
+            generation=generation,
+        )
+        # A synchronous goodbye/microphone hand-off has playback priority.
+        # Wait without occupying the playback lock, then recheck under both
+        # locks so reset/new speech cannot race stale audio into existence.
+        while True:
+            with _speech_state:
+                while (
+                    _sync_owner is not None
+                    and generation == _speech_generation
+                    and snapshot.epoch == _voice_epoch
+                ):
+                    _speech_state.wait()
+                if (
+                    generation != _speech_generation
+                    or snapshot.epoch != _voice_epoch
+                ):
+                    return
+            with _speech_lifecycle_lock:
+                with _speech_playback_lock:
+                    with _speech_state:
+                        if (
+                            generation != _speech_generation
+                            or snapshot.epoch != _voice_epoch
+                        ):
+                            return
+                        if _sync_owner is not None:
+                            continue
+                        # Lifecycle + state remain held through quick async
+                        # PlaySound initiation. Reset either wins before this
+                        # check or stops the playback after it starts.
+                        _play_wav(data, False)
+                        return
+    except _SupersededSpeech:
+        return
+    except Exception as exc:
+        # Superseded cloud calls may finish with an error much later. Do not
+        # print stale warnings into an otherwise idle prompt/browser session.
+        if _speech_is_current(generation, snapshot):
+            log.warn(f"TTS unavailable: {exc}")
+
+
+def _speak_sync(text: str) -> None:
+    """Synthesize and play a blocking utterance without supersession."""
+    global _sync_owner
+    with _sync_speech_lock:
+        owner = object()
+        with _speech_state:
+            _next_speech_generation_locked()
+            snapshot = _voice_snapshot_locked()
+            _sync_owner = owner
+            _speech_state.notify_all()
+        try:
+            # Synthesis deliberately happens outside the playback/state locks:
+            # reset and reconfiguration remain immediate even if the cloud
+            # request stalls for its entire timeout.
+            data = _synthesize_wav(text, snapshot=snapshot)
+            with _speech_lifecycle_lock:
+                with _speech_playback_lock:
+                    with _speech_state:
+                        if (
+                            snapshot.epoch != _voice_epoch
+                            or _sync_owner is not owner
+                        ):
+                            return
+                    # PlaySound's synchronous API combines initiation and wait,
+                    # so retain the lifecycle gate for the audio duration. A
+                    # reset during synthesis is still immediate; a reset after
+                    # playback begins waits for this promised sync utterance.
+                    _play_wav(data, True)
+        except _SupersededSpeech:
+            return
+        except Exception as exc:
+            with _speech_state:
+                current = snapshot.epoch == _voice_epoch
+            if current:
+                log.warn(f"TTS unavailable: {exc}")
+        finally:
+            with _speech_state:
+                if _sync_owner is owner:
+                    _sync_owner = None
+                _speech_state.notify_all()
+
+
 def speak(text: str, wait: bool = False) -> None:
-    """Say text out loud. Async + purge by default (a new utterance interrupts
-    the old, the loop never blocks); ``wait=True`` speaks synchronously - use
-    it before the process exits so speech isn't cut off."""
+    """Say text out loud without blocking typed/browser replies.
+
+    Non-waiting speech uses two bounded daemon workers and coalesces excess
+    replies, so one slow request cannot hold up the next response or process
+    exit. ``wait=True`` remains fully synchronous for microphone and farewell
+    call sites.
+    """
     text = (text or "").strip()
     if not text:
         return
-    try:
-        _play_wav(_synthesize_wav(text), wait)
-    except Exception as exc:
-        log.warn(f"TTS unavailable: {exc}")
+    if wait:
+        try:
+            _speak_sync(text)
+        except BaseException:
+            # A Ctrl+C during a blocking farewell/microphone hand-off also
+            # cancels any newer background synthesis before the caller exits.
+            with _speech_lifecycle_lock:
+                with _speech_state:
+                    _next_speech_generation_locked()
+                    _speech_state.notify_all()
+                _SPEECH_DISPATCHER.discard_pending()
+                _stop_async_playback()
+            raise
+        return
+    with _speech_state:
+        generation = _next_speech_generation_locked()
+        snapshot = _voice_snapshot_locked()
+        _SPEECH_DISPATCHER.submit(text, generation, snapshot)
 
 
 def speak_to_wav(text: str, path: str) -> bool:
     """Render speech to a WAV file (used by the self-test; no speakers needed)."""
     try:
+        snapshot = _current_voice_snapshot()
         with open(path, "wb") as output:
-            output.write(_synthesize_wav(text))
+            output.write(_synthesize_wav(text, snapshot=snapshot))
         return True
     except Exception as exc:
         log.warn(f"TTS-to-file failed: {exc}")

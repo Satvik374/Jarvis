@@ -40,3 +40,10 @@ Thumbs.db
 .vscode/
 
 .env
+
+# Remote-pairing keys and local replay cursors (never commit these).
+.jarvis_remote/
+relay_server/relay_state.json
+relay_server/relay_state.json.tmp
+/relay_state.json
+/relay_state.json.tmp

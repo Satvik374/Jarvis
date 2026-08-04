@@ -66,3 +66,12 @@ data:
   verify_success: true
   memory_max_chars: 4000                 # cap memory.txt so the prompt stays lean
   chat_history_turns: 10                 # recent prompt+response pairs remembered
+
+# Optional remote-device relay. Deploy relay_server/ separately (for example
+# to Render) and set the public HTTPS URL here or in JARVIS_REMOTE_URL. Pairing
+# private keys remain in ~/.jarvis_remote and are never stored in this project.
+remote:
+  relay_url: ""
+  state_dir: ""
+  result_timeout: 180
+  require_confirmation: true

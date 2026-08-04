@@ -23,6 +23,12 @@
     prompt: $("#promptInput"),
     removeAttachment: $("#removeAttachment"),
     send: $("#sendButton"),
+    sendLabel: $("#sendButtonLabel"),
+    sessionsDrawer: $("#sessionsDrawer"),
+    sessionsList: $("#sessionsList"),
+    sessionsToggle: $("#sessionsToggle"),
+    closeSessions: $("#closeSessions"),
+    newSessionButton: $("#newSessionButton"),
     sessionTimer: $("#sessionTimer"),
     stateDetail: $("#stateDetail"),
     stateIndex: $("#stateIndex"),
@@ -34,6 +40,7 @@
     toastRegion: $("#toastRegion"),
     welcome: $("#welcomeCard"),
   };
+
 
   const stateMeta = {
     booting: ["00", "INITIALIZING", "Calibrating neural interface"],
@@ -52,6 +59,17 @@
     offline: ["13", "OFFLINE", "Terminal session ended"],
   };
 
+  const generatingStates = new Set([
+    "working",
+    "planning",
+    "perceiving",
+    "thinking",
+    "acting",
+    "verifying",
+    "transcribing",
+    "responding",
+  ]);
+
   const sessionStarted = Date.now();
   let acceptingInput = false;
   let inputMode = "command";
@@ -69,6 +87,7 @@
   let activeUtteranceId = 0;
   let speechIdWatermark = 0;
   let speechExpiryTimer = null;
+  let interruptPending = false;
 
   const hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
   let token = hashParams.get("token") || sessionStorage.getItem("jarvis-browser-token") || "";
@@ -100,6 +119,16 @@
     return `"${String(path).replaceAll('"', '\\"')}"`;
   }
 
+  function escapeHtml(text) {
+    return String(text || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+
   function setConnected(value, label) {
     connected = value;
     root.dataset.connected = value ? "true" : "false";
@@ -125,9 +154,11 @@
     orb.setState(name);
     if (name === "offline") {
       acceptingInput = false;
+      interruptPending = false;
       clearSpeechOverlay();
       updateComposer();
     }
+    updateSendEnabled();
   }
 
   function updateComposer(promptText) {
@@ -157,7 +188,30 @@
     });
   }
 
+  function isGeneratingResponse() {
+    return (
+      connected &&
+      !acceptingInput &&
+      currentState !== "offline" &&
+      generatingStates.has(currentState)
+    );
+  }
+
   function updateSendEnabled() {
+    const canStop = isGeneratingResponse();
+    elements.send.classList.toggle("is-stop", canStop);
+    elements.sendLabel.textContent = canStop ? "STOP" : "SEND";
+    elements.send.setAttribute(
+      "aria-label",
+      canStop ? "Stop Jarvis response" : "Send directive to Jarvis",
+    );
+    elements.send.title = canStop ? "Stop response" : "Send directive";
+
+    if (canStop) {
+      elements.send.disabled = interruptPending;
+      return;
+    }
+
     const hasText = Boolean(elements.prompt.value.trim());
     const canSendBlank = ["confirmation", "answer"].includes(inputMode);
     elements.send.disabled = !(
@@ -488,6 +542,9 @@
         durationMs,
         elapsedMs,
         levels: payload.levels,
+        bands: payload.bands,
+        bandCount: payload.band_count,
+        bandFps: payload.band_fps,
       });
       if (speechExpiryTimer !== null) clearTimeout(speechExpiryTimer);
       const remainingMs = durationMs > 0
@@ -520,6 +577,7 @@
         break;
       case "input_request":
         acceptingInput = true;
+        interruptPending = false;
         inputMode = payload.mode || "command";
         inputPrompt = String(payload.prompt || "");
         setState("listening", payload.prompt || (
@@ -554,10 +612,18 @@
       case "speech":
         applySpeech(payload);
         break;
+      case "session_list":
+        renderSessionsList(payload.sessions || [], payload.active_id);
+        break;
+      case "session_title_updated":
+        updateSessionTitleInUI(payload.id, payload.title);
+        toast(`Session title: ${payload.title}`);
+        break;
       default:
         break;
     }
   }
+
 
   function connectEvents() {
     if (!token) {
@@ -630,6 +696,20 @@
         acceptingInput = true;
       }
       updateComposer();
+    }
+  }
+
+  async function stopResponse() {
+    if (!isGeneratingResponse() || interruptPending) return;
+
+    interruptPending = true;
+    updateSendEnabled();
+    try {
+      await api("/api/interrupt", {});
+    } catch (error) {
+      interruptPending = false;
+      updateSendEnabled();
+      toast(error.message || "Could not stop Jarvis", "error");
     }
   }
 
@@ -714,7 +794,11 @@
 
   elements.composer.addEventListener("submit", (event) => {
     event.preventDefault();
-    submitDirective();
+    if (isGeneratingResponse()) {
+      stopResponse();
+    } else {
+      submitDirective();
+    }
   });
 
   elements.prompt.addEventListener("input", () => {
@@ -792,6 +876,148 @@
     }
   });
 
+  let cachedSessions = [];
+  let currentActiveSessionId = null;
+
+  function toggleSessions(force) {
+    const open = force === undefined
+      ? !elements.sessionsDrawer.classList.contains("open")
+      : Boolean(force);
+    const shouldReturnFocus =
+      !open && elements.sessionsDrawer.contains(document.activeElement);
+    elements.sessionsDrawer.classList.toggle("open", open);
+    elements.sessionsDrawer.inert = !open;
+    elements.sessionsDrawer.setAttribute("aria-hidden", open ? "false" : "true");
+    elements.sessionsToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      fetchSessions();
+      elements.closeSessions.focus({ preventScroll: true });
+    } else if (shouldReturnFocus) {
+      elements.sessionsToggle.focus({ preventScroll: true });
+    }
+  }
+
+  async function fetchSessions() {
+    try {
+      const res = await api("/api/sessions");
+      if (res.ok) {
+        cachedSessions = res.sessions || [];
+        currentActiveSessionId = res.active_id;
+        renderSessionsList(cachedSessions, currentActiveSessionId);
+      }
+    } catch (err) {
+      console.warn("Failed to fetch sessions", err);
+    }
+  }
+
+  function renderSessionsList(sessions, activeId) {
+    cachedSessions = sessions || [];
+    if (activeId) currentActiveSessionId = activeId;
+    if (!elements.sessionsList) return;
+    if (!cachedSessions || cachedSessions.length === 0) {
+      elements.sessionsList.innerHTML = '<div class="sessions-empty">No saved sessions yet</div>';
+      return;
+    }
+    elements.sessionsList.innerHTML = "";
+    cachedSessions.forEach((s) => {
+      const card = document.createElement("div");
+      card.className = "session-card" + (s.id === currentActiveSessionId ? " active" : "");
+      card.dataset.id = s.id;
+
+      const dateStr = s.updated_at ? new Date(s.updated_at * 1000).toLocaleString([], {
+        month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"
+      }) : "";
+
+      card.innerHTML = `
+        <div class="session-card-header">
+          <span class="session-title">${escapeHtml(s.title || "New Session")}</span>
+          ${s.id === currentActiveSessionId ? '<span class="session-badge">ACTIVE</span>' : ''}
+        </div>
+        <div class="session-meta">
+          <span>${s.message_count || 0} msgs · ${dateStr}</span>
+          <button type="button" class="session-delete-btn" title="Delete Session">×</button>
+        </div>
+      `;
+
+      card.addEventListener("click", (e) => {
+        if (e.target.classList.contains("session-delete-btn")) {
+          e.stopPropagation();
+          deleteSession(s.id);
+          return;
+        }
+        if (s.id !== currentActiveSessionId) {
+          loadSession(s.id);
+        }
+      });
+
+      elements.sessionsList.appendChild(card);
+    });
+  }
+
+  function updateSessionTitleInUI(id, title) {
+    const card = elements.sessionsList.querySelector(`.session-card[data-id="${CSS.escape(id)}"]`);
+    if (card) {
+      const titleElem = card.querySelector(".session-title");
+      if (titleElem) titleElem.textContent = title;
+    }
+  }
+
+  async function loadSession(id) {
+    try {
+      const res = await api(`/api/sessions/load?id=${encodeURIComponent(id)}`);
+      if (res.ok && res.session) {
+        currentActiveSessionId = res.active_id;
+        elements.messages.querySelectorAll(".message, .welcome-card").forEach(m => m.remove());
+        const msgs = res.session.messages || [];
+        if (msgs.length === 0) {
+          elements.messages.appendChild(elements.welcome);
+        } else {
+          msgs.forEach((m) => {
+            const role = m.role === "user" ? "user" : "assistant";
+            addMessage(role, m.display_text || m.content, m.timestamp);
+          });
+        }
+        renderSessionsList(cachedSessions, currentActiveSessionId);
+        toast(`Loaded session: ${res.session.title}`);
+        toggleSessions(false);
+      }
+    } catch (err) {
+      toast("Failed to load session", "error");
+    }
+  }
+
+  async function createNewSession() {
+    try {
+      const res = await api("/api/sessions/new", {});
+      if (res.ok) {
+        currentActiveSessionId = res.active_id;
+        elements.messages.querySelectorAll(".message").forEach(m => m.remove());
+        elements.messages.appendChild(elements.welcome);
+        await fetchSessions();
+        toast("Created new session");
+        toggleSessions(false);
+      }
+    } catch (err) {
+      toast("Failed to create new session", "error");
+    }
+  }
+
+  async function deleteSession(id) {
+    try {
+      const res = await api("/api/sessions/delete", { id });
+      if (res.ok) {
+        toast("Session deleted");
+        await fetchSessions();
+      }
+    } catch (err) {
+      toast("Failed to delete session", "error");
+    }
+  }
+
+  elements.sessionsToggle.addEventListener("click", () => toggleSessions());
+  elements.closeSessions.addEventListener("click", () => toggleSessions(false));
+  elements.newSessionButton.addEventListener("click", () => createNewSession());
+
   elements.endSession.addEventListener("click", async () => {
     if (!powerArmed) {
       powerArmed = true;
@@ -817,8 +1043,11 @@
       if (!elements.prompt.disabled) elements.prompt.focus();
     } else if (event.key === "Escape" && elements.terminalDrawer.classList.contains("open")) {
       toggleTerminal(false);
+    } else if (event.key === "Escape" && elements.sessionsDrawer.classList.contains("open")) {
+      toggleSessions(false);
     }
   });
+
 
   const dialoguePanel = $(".dialogue-panel");
   dialoguePanel.addEventListener("dragover", (event) => {
@@ -869,11 +1098,21 @@
       this.speechEnvelope = [];
       this.speechMix = 0;
       this.speechLevel = 0;
+      this.bands = null;
+      this.bandCount = 0;
+      this.bandFps = 30;
+      this.bandFrames = 0;
+      this.bars = new Float32Array(0);
+      this.barTargets = new Float32Array(0);
+      this.bass = 0;
+      this.bassAverage = 0;
+      this.lastShock = -1;
+      this.shocks = [];
       this.current = {
         speed: 0.2,
         deform: 0.25,
         energy: 0.28,
-        color: [255, 157, 61],
+        color: [67, 178, 255],
         pulse: 0.3,
       };
       this.target = { ...this.current, color: [...this.current.color] };
@@ -881,20 +1120,22 @@
       this.links = [];
       this.sparks = [];
       this.profiles = {
-        booting:       { speed: 0.18, deform: 0.18, energy: 0.42, pulse: 0.38, color: [255, 139, 48] },
-        listening:     { speed: 0.25, deform: 0.3, energy: 0.94, pulse: 1.15, color: [255, 160, 58] },
-        working:       { speed: 0.54, deform: 0.5, energy: 0.79, pulse: 0.72, color: [255, 157, 61] },
-        planning:      { speed: 0.72, deform: 0.42, energy: 0.74, pulse: 0.82, color: [255, 168, 65] },
+        // Blue family to match --accent-rgb in styles.css; success/warning/
+        // error keep their semantic colours.
+        booting:       { speed: 0.18, deform: 0.18, energy: 0.42, pulse: 0.38, color: [48, 150, 255] },
+        listening:     { speed: 0.25, deform: 0.3, energy: 0.94, pulse: 1.15, color: [72, 198, 255] },
+        working:       { speed: 0.54, deform: 0.5, energy: 0.79, pulse: 0.72, color: [67, 178, 255] },
+        planning:      { speed: 0.72, deform: 0.42, energy: 0.74, pulse: 0.82, color: [92, 170, 255] },
         perceiving:    { speed: 0.42, deform: 0.23, energy: 0.72, pulse: 0.48, color: [83, 184, 255] },
-        thinking:      { speed: 1.05, deform: 0.82, energy: 1.0, pulse: 1.05, color: [255, 151, 43] },
-        acting:        { speed: 1.45, deform: 0.58, energy: 1.0, pulse: 1.4, color: [255, 102, 39] },
-        verifying:     { speed: 0.52, deform: 0.16, energy: 0.82, pulse: 0.56, color: [255, 189, 84] },
-        transcribing:  { speed: 0.63, deform: 0.68, energy: 0.78, pulse: 1.3, color: [255, 171, 71] },
-        responding:    { speed: 0.38, deform: 0.37, energy: 0.78, pulse: 0.96, color: [255, 202, 115] },
+        thinking:      { speed: 1.05, deform: 0.82, energy: 1.0, pulse: 1.05, color: [56, 196, 255] },
+        acting:        { speed: 1.45, deform: 0.58, energy: 1.0, pulse: 1.4, color: [38, 224, 255] },
+        verifying:     { speed: 0.52, deform: 0.16, energy: 0.82, pulse: 0.56, color: [116, 206, 255] },
+        transcribing:  { speed: 0.63, deform: 0.68, energy: 0.78, pulse: 1.3, color: [86, 190, 255] },
+        responding:    { speed: 0.38, deform: 0.37, energy: 0.78, pulse: 0.96, color: [130, 214, 255] },
         success:       { speed: 0.22, deform: 0.16, energy: 1.0, pulse: 1.55, color: [189, 246, 120] },
         warning:       { speed: 0.58, deform: 0.7, energy: 0.84, pulse: 0.92, color: [255, 190, 60] },
         error:         { speed: 0.3, deform: 0.88, energy: 0.68, pulse: 0.6, color: [255, 78, 69] },
-        offline:       { speed: 0.04, deform: 0.08, energy: 0.08, pulse: 0.1, color: [164, 57, 47] },
+        offline:       { speed: 0.04, deform: 0.08, energy: 0.08, pulse: 0.1, color: [58, 96, 128] },
       };
       this.resizeObserver = new ResizeObserver(() => this.resize());
       this.resizeObserver.observe(canvas.parentElement);
@@ -1017,6 +1258,12 @@
             .filter((value) => Number.isFinite(value))
             .map((value) => Math.max(0, Math.min(1, value / 255)))
           : [];
+        this.bandCount = Math.max(0, Math.min(64, Number(payload.bandCount) || 0));
+        this.bandFps = Math.max(1, Math.min(120, Number(payload.bandFps) || 30));
+        this.bands = this.decodeBands(payload.bands);
+      } else {
+        this.bands = null;
+        this.bandFrames = 0;
       }
       if (this.reducedMotion) {
         this.speechMix = this.speaking ? 1 : 0;
@@ -1052,6 +1299,59 @@
 
     mix(current, target, amount) {
       return current + (target - current) * amount;
+    }
+
+    decodeBands(encoded) {
+      this.bandFrames = 0;
+      if (typeof encoded !== "string" || !encoded || !this.bandCount) return null;
+      let binary;
+      try {
+        binary = atob(encoded);
+      } catch {
+        return null;
+      }
+      const frames = Math.floor(binary.length / this.bandCount);
+      if (frames < 1) return null;
+      const bytes = new Uint8Array(frames * this.bandCount);
+      for (let index = 0; index < bytes.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      this.bandFrames = frames;
+      return bytes;
+    }
+
+    /** Fill barTargets with this instant's per-band levels (0..1). */
+    sampleBands(t) {
+      const count = this.bars.length;
+      if (!count) return;
+      if (this.bands && this.bandFrames > 0) {
+        const cursor = Math.max(0, Math.min(
+          this.bandFrames - 1,
+          (t - this.speechStartedAt) * this.bandFps,
+        ));
+        const lower = Math.floor(cursor);
+        const upper = Math.min(this.bandFrames - 1, lower + 1);
+        const blend = cursor - lower;
+        const lowRow = lower * this.bandCount;
+        const highRow = upper * this.bandCount;
+        for (let index = 0; index < count; index += 1) {
+          this.barTargets[index] = this.mix(
+            this.bands[lowRow + index],
+            this.bands[highRow + index],
+            blend,
+          ) / 255;
+        }
+        return;
+      }
+      // No spectrogram (numpy missing, or an older backend): shape the flat
+      // amplitude envelope into a plausible voice curve so the ring still
+      // reads as speech instead of a rigid pulsing circle.
+      const level = this.speechSample(t);
+      for (let index = 0; index < count; index += 1) {
+        const tilt = 1 - (index / count) * 0.5;
+        const shimmer = 0.62 + Math.abs(Math.sin(index * 0.83 - t * 7.3)) * 0.38;
+        this.barTargets[index] = Math.max(0, Math.min(1, level * tilt * shimmer));
+      }
     }
 
     frame(time) {
@@ -1098,13 +1398,62 @@
         rawSpeechLevel,
         Math.min(1, levelAmount),
       );
+      this.updateBars(t, dt);
       this.pointer.x = this.mix(this.pointer.x, this.pointer.tx, 0.03 * dt);
       this.pointer.y = this.mix(this.pointer.y, this.pointer.ty, 0.03 * dt);
+    }
+
+    updateBars(t, dt) {
+      const count = this.bandCount || 24;
+      if (this.bars.length !== count) {
+        this.bars = new Float32Array(count);
+        this.barTargets = new Float32Array(count);
+      }
+      if (this.speaking || this.speechMix > 0.01) this.sampleBands(t);
+      else this.barTargets.fill(0);
+
+      // Fast attack, slow release: transients survive, so a beat reads as a
+      // snap outward followed by a decay instead of an averaged-out wobble.
+      const attack = Math.min(1, 0.44 * dt);
+      const release = Math.min(1, 0.1 * dt);
+      const bassBins = Math.min(4, count);
+      let bass = 0;
+      for (let index = 0; index < count; index += 1) {
+        const target = this.barTargets[index];
+        this.bars[index] = this.reducedMotion
+          ? target
+          : this.mix(
+            this.bars[index],
+            target,
+            target > this.bars[index] ? attack : release,
+          );
+        if (index < bassBins) bass += this.bars[index];
+      }
+      this.bass = bassBins ? bass / bassBins : 0;
+
+      this.bassAverage = this.mix(this.bassAverage, this.bass, Math.min(1, 0.05 * dt));
+      const isKick = this.bass > 0.24
+        && this.bass > this.bassAverage * 1.4
+        && this.speechMix > 0.25;
+      if (isKick && t - this.lastShock > 0.14) {
+        this.lastShock = t;
+        this.shocks.push({ born: t, power: Math.min(1, this.bass) });
+      }
+      if (this.shocks.length) {
+        this.shocks = this.shocks.filter((shock) => t - shock.born < 1.5);
+      }
     }
 
     color(alpha, multiplier = 1) {
       const [r, g, b] = this.current.color.map((value) =>
         Math.max(0, Math.min(255, Math.round(value * multiplier))));
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    /** Current state colour blended toward white; `whiteness` 0..1 = hotter. */
+    tint(alpha, whiteness = 0) {
+      const [r, g, b] = this.current.color.map((value) =>
+        Math.max(0, Math.min(255, Math.round(this.mix(value, 255, whiteness)))));
       return `rgba(${r},${g},${b},${alpha})`;
     }
 
@@ -1118,7 +1467,14 @@
 
       this.drawOuterHud(ctx, t, energy, speed);
       this.drawPulseRings(ctx, t, energy, pulse);
-      const projected = this.projectNodes(t, deform, speed);
+      this.drawShockwaves(ctx, t);
+      // The particle shell breathes with the voice so the whole blob talks,
+      // not just the ring around it.
+      const projected = this.projectNodes(
+        t,
+        deform * (1 + this.speechMix * this.speechLevel * 0.85),
+        speed,
+      );
       this.drawLinks(ctx, projected, energy);
       this.drawShell(ctx, projected, energy, t);
       this.drawFilaments(ctx, t, energy, deform, speed);
@@ -1174,6 +1530,25 @@
           Math.cos(angle) * (tickRadius + length),
           Math.sin(angle) * (tickRadius + length),
         );
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    drawShockwaves(ctx, t) {
+      if (!this.shocks.length) return;
+      ctx.save();
+      ctx.translate(this.cx, this.cy);
+      ctx.globalCompositeOperation = "lighter";
+      for (const shock of this.shocks) {
+        const progress = (t - shock.born) / 1.5;
+        if (progress < 0 || progress > 1) continue;
+        const eased = 1 - (1 - progress) ** 3;
+        const fade = (1 - progress) ** 2;
+        ctx.beginPath();
+        ctx.strokeStyle = this.color(fade * 0.42 * shock.power, 1.2);
+        ctx.lineWidth = 0.5 + fade * 2.4;
+        ctx.arc(0, 0, this.radius * (0.5 + eased * 0.95), 0, Math.PI * 2);
         ctx.stroke();
       }
       ctx.restore();
@@ -1353,124 +1728,88 @@
       ctx.restore();
     }
 
+    /**
+     * Circular band spectrum.  Bands run from bass at the top to treble at the
+     * bottom down the right half and mirror back up the left, which is what
+     * makes an audio ring read as symmetric rather than as noise.
+     */
     drawVoiceSpectrum(ctx, t, energy) {
       const voice = this.speechMix;
-      if (voice < 0.008) return;
+      const bands = this.bars.length;
+      if (voice < 0.008 || !bands) return;
 
       const compact = Math.min(this.width, this.height) < 520;
-      const count = compact ? 32 : 60;
-      const baseRadius = this.radius * (compact ? 0.39 : 0.4);
-      const maxExcursion = this.radius * (compact ? 0.075 : 0.105);
-      const overall = 0.24 + this.speechLevel * 0.76;
+      const slots = bands * 2;
+      const baseRadius = this.radius * (compact ? 0.56 : 0.6);
+      const span = this.radius * (compact ? 0.3 : 0.42);
+      const surface = (band, angle) =>
+        baseRadius * (0.84 + this.bars[band] * 0.26 * voice)
+        + Math.sin(angle * 3 + t * 1.7) * this.radius * 0.014;
 
       ctx.save();
       ctx.translate(this.cx, this.cy);
       ctx.globalCompositeOperation = "lighter";
       ctx.lineCap = "round";
-      ctx.shadowColor = `rgba(255,154,48,${0.62 * voice})`;
-      ctx.shadowBlur = compact ? 6 : 10;
 
-      for (let index = 0; index < count; index += 1) {
-        const angle = (index / count) * Math.PI * 2 - Math.PI / 2;
-        const offset = (index - count / 2) * 0.13;
-        const sample = this.speechSample(t, offset);
-        const harmonic =
-          0.52 +
-          Math.abs(Math.sin(index * 0.71 - t * 8.8)) * 0.34 +
-          Math.abs(Math.sin(index * 1.83 + t * 4.2)) * 0.14;
-        const level = Math.min(
-          1,
-          (0.22 + sample * 0.78) * harmonic * overall,
+      // The blob surface itself, deformed band by band.
+      ctx.beginPath();
+      for (let slot = 0; slot <= slots; slot += 1) {
+        const wrapped = slot % slots;
+        const band = wrapped < bands ? wrapped : slots - 1 - wrapped;
+        const angle = (wrapped / slots) * Math.PI * 2 - Math.PI / 2;
+        const radius = surface(band, angle);
+        const x = Math.cos(angle) * radius;
+        const y = Math.sin(angle) * radius;
+        if (slot === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.strokeStyle = this.tint((0.22 + this.speechLevel * 0.4) * voice, 0.45);
+      ctx.lineWidth = compact ? 1.1 : 1.5;
+      ctx.stroke();
+
+      ctx.shadowColor = this.tint(0.6 * voice, 0.08);
+      ctx.shadowBlur = compact ? 8 : 14;
+      for (let slot = 0; slot < slots; slot += 1) {
+        const band = slot < bands ? slot : slots - 1 - slot;
+        const level = this.bars[band];
+        const angle = (slot / slots) * Math.PI * 2 - Math.PI / 2;
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        const inner = surface(band, angle) + 2;
+        const outer = inner + span * (0.05 + level * 0.95) * voice;
+        ctx.beginPath();
+        // Loud bands run hotter (toward white) instead of shifting hue, so the
+        // ring stays on whatever colour the current state profile sets.
+        ctx.strokeStyle = this.tint(
+          (0.26 + level * 0.66) * voice * (0.72 + energy * 0.28),
+          0.12 + level * 0.5,
         );
-        const bar = maxExcursion * (0.18 + level * 0.82) * voice;
-        const inner = baseRadius - bar * 0.16;
-        const outer = baseRadius + bar;
-        ctx.beginPath();
-        ctx.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
-        ctx.lineTo(Math.cos(angle) * outer, Math.sin(angle) * outer);
-        const green = Math.round(160 + level * 76);
-        const blue = Math.round(54 + level * 96);
-        ctx.strokeStyle = `rgba(255,${green},${blue},${
-          (0.24 + level * 0.58) * voice * (0.74 + energy * 0.26)
-        })`;
-        ctx.lineWidth = compact ? 0.85 + level * 0.4 : 1.05 + level * 0.72;
+        ctx.lineWidth = compact ? 1.3 : 2;
+        ctx.moveTo(cos * inner, sin * inner);
+        ctx.lineTo(cos * outer, sin * outer);
         ctx.stroke();
-      }
 
-      for (let layer = 0; layer < 2; layer += 1) {
-        ctx.beginPath();
-        for (let index = 0; index <= count; index += 1) {
-          const wrapped = index % count;
-          const angle = (index / count) * Math.PI * 2 - Math.PI / 2;
-          const sample = this.speechSample(
-            t,
-            (wrapped - count / 2) * 0.12,
-          );
-          const carrier = Math.sin(
-            angle * (layer ? 9 : 6) - t * (layer ? 7.2 : 9.6) + layer * 1.7,
-          );
-          const ripple = Math.sin(angle * 15 + t * 3.4 + layer) * 0.12;
-          const signal = (0.2 + sample * 0.8) * (0.62 + Math.abs(carrier) * 0.38);
-          const radius = baseRadius + maxExcursion * voice * (
-            0.08 + signal * (layer ? 0.58 : 0.76) + ripple
-          );
-          const x = Math.cos(angle) * radius;
-          const y = Math.sin(angle) * radius;
-          if (index === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
+        if (level > 0.52) {
+          ctx.beginPath();
+          ctx.fillStyle = this.tint((level - 0.52) * 1.5 * voice, 0.85);
+          ctx.arc(cos * outer, sin * outer, compact ? 1 : 1.5, 0, Math.PI * 2);
+          ctx.fill();
         }
-        ctx.closePath();
-        ctx.strokeStyle = layer
-          ? `rgba(255,167,64,${0.26 * voice * overall})`
-          : `rgba(255,222,151,${0.58 * voice * overall})`;
-        ctx.lineWidth = layer ? 0.8 : compact ? 1.15 : 1.55;
-        ctx.stroke();
-      }
-
-      const ribbonWidth = this.radius * (compact ? 0.92 : 1.18);
-      const ribbonSegments = compact ? 42 : 64;
-      ctx.rotate(-0.045);
-      for (let layer = 0; layer < 2; layer += 1) {
-        ctx.beginPath();
-        for (let index = 0; index <= ribbonSegments; index += 1) {
-          const progress = index / ribbonSegments;
-          const x = (progress - 0.5) * ribbonWidth;
-          const taper = Math.sin(progress * Math.PI) ** 0.72;
-          const sample = this.speechSample(
-            t,
-            (progress - 0.5) * this.speechEnvelope.length * 0.4,
-          );
-          const carrier = Math.sin(
-            progress * Math.PI * (layer ? 13 : 9)
-            - t * (layer ? 10.2 : 8.1)
-            + layer * 1.4,
-          );
-          const secondary = Math.sin(
-            progress * Math.PI * 23 + t * 3.2 + layer,
-          ) * 0.22;
-          const amplitude = this.radius
-            * (compact ? 0.055 : 0.072)
-            * (0.28 + sample * 0.72)
-            * voice
-            * taper;
-          const y = (carrier + secondary) * amplitude;
-          if (index === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
-        ctx.strokeStyle = layer
-          ? `rgba(255,143,42,${0.22 * voice * overall})`
-          : `rgba(255,226,163,${0.52 * voice * overall})`;
-        ctx.lineWidth = layer ? 0.72 : compact ? 0.95 : 1.25;
-        ctx.stroke();
       }
       ctx.restore();
     }
 
     drawCore(ctx, t, energy, pulse, speechLevel = 0) {
       const beat = 1 + Math.sin(t * (1.1 + pulse)) * 0.035 * pulse;
-      const voiceLift = 1 + this.speechMix * (0.012 + speechLevel * 0.028);
+      const voiceLift = 1 + this.speechMix * (
+        0.012 + speechLevel * 0.06 + this.bass * 0.16
+      );
       const coreRadius = this.radius * 0.28 * beat * voiceLift;
-      const activeEnergy = Math.min(1, energy + this.speechMix * 0.08);
+      const activeEnergy = Math.min(
+        1,
+        energy + this.speechMix * (0.08 + this.bass * 0.22),
+      );
       ctx.save();
       ctx.globalCompositeOperation = "lighter";
       const glow = ctx.createRadialGradient(
@@ -1498,7 +1837,7 @@
         this.cy,
         coreRadius,
       );
-      whiteCore.addColorStop(0, `rgba(255,245,218,${0.9 * activeEnergy})`);
+      whiteCore.addColorStop(0, this.tint(0.9 * activeEnergy, 0.88));
       whiteCore.addColorStop(0.18, this.color(0.76 * activeEnergy, 1.28));
       whiteCore.addColorStop(0.62, this.color(0.19 * activeEnergy));
       whiteCore.addColorStop(1, this.color(0));

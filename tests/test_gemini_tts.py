@@ -76,7 +76,7 @@ voice:
 
 
 class GeminiVertexTTSRequestTests(unittest.TestCase):
-    @patch("requests.post")
+    @patch.object(GeminiVertexBrain, "_http_post")
     def test_synthesis_uses_dedicated_tts_model_and_returns_pcm(self, post):
         pcm = b"\x01\x00\x02\x00"
         response = Mock()
@@ -126,7 +126,7 @@ class GeminiVertexTTSRequestTests(unittest.TestCase):
             "Kore",
         )
 
-    @patch("requests.post")
+    @patch.object(GeminiVertexBrain, "_http_post")
     def test_transcription_uses_fast_model_without_changing_thinking_model(self, post):
         response = Mock()
         response.ok = True

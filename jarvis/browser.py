@@ -21,6 +21,7 @@ from pathlib import Path
 import queue
 import re
 import secrets
+import signal
 import subprocess
 import sys
 import tempfile
@@ -112,6 +113,9 @@ class TerminalBridge:
         self.speech_utterance_id = 0
         self.speech_duration_ms = 0
         self.speech_levels: list[int] = []
+        self.speech_bands = ""
+        self.speech_band_count = 0
+        self.speech_band_fps = 0
         self.speech_started_at = 0.0
         self._initial_sent = False
         self._shutdown_pending = False
@@ -143,15 +147,17 @@ class TerminalBridge:
             str(ROOT / "jarvis" / "browser_worker.py"),
             *self.child_args,
         ]
-        self.process = subprocess.Popen(
-            command,
-            cwd=str(self.launch_cwd),
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,
-        )
+        popen_options: dict[str, Any] = {
+            "cwd": str(self.launch_cwd),
+            "env": env,
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "bufsize": 0,
+        }
+        if os.name == "nt":
+            popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        self.process = subprocess.Popen(command, **popen_options)
         self.broker.publish(
             "session",
             alive=True,
@@ -255,6 +261,17 @@ class TerminalBridge:
                         levels.append(max(0, min(255, int(value))))
                     except (TypeError, ValueError, OverflowError):
                         continue
+            try:
+                band_count = max(0, min(64, int(payload.get("band_count", 0) or 0)))
+                band_fps = max(0, min(120, int(payload.get("band_fps", 0) or 0)))
+            except (TypeError, ValueError, OverflowError):
+                band_count = band_fps = 0
+            raw_bands = payload.get("bands", "")
+            # base64 uint8 matrix; cap it so a malformed record cannot pin
+            # unbounded memory in the bridge or the SSE snapshot.
+            bands = raw_bands if isinstance(raw_bands, str) else ""
+            if len(bands) > 262144:
+                bands, band_count, band_fps = "", 0, 0
             with self._state_lock:
                 # The stderr reader can still receive buffered records after
                 # the child exits.  Never let one of those records revive a
@@ -267,6 +284,9 @@ class TerminalBridge:
                     self.speech_utterance_id = utterance_id
                     self.speech_duration_ms = duration_ms
                     self.speech_levels = levels
+                    self.speech_bands = bands
+                    self.speech_band_count = band_count
+                    self.speech_band_fps = band_fps
                     self.speech_started_at = time.time()
                     accepted = True
                 elif (
@@ -413,6 +433,9 @@ class TerminalBridge:
                 "utterance_id": self.speech_utterance_id,
                 "duration_ms": self.speech_duration_ms,
                 "levels": list(self.speech_levels),
+                "bands": self.speech_bands,
+                "band_count": self.speech_band_count,
+                "band_fps": self.speech_band_fps,
                 "started_at": self.speech_started_at,
             }
 
@@ -427,6 +450,34 @@ class TerminalBridge:
         if message == "shutdown queued":
             return True, message
         return False, message
+
+    def request_interrupt(self) -> tuple[bool, str]:
+        process = self.process
+        if process is None or process.poll() is not None:
+            return False, "terminal runtime is not running"
+        with self._state_lock:
+            if self.accepting_input:
+                return False, "Jarvis is ready for the next directive"
+        interrupt_signal = (
+            getattr(signal, "CTRL_BREAK_EVENT", signal.SIGINT)
+            if os.name == "nt"
+            else signal.SIGINT
+        )
+        try:
+            process.send_signal(interrupt_signal)
+        except (OSError, ValueError) as exc:
+            return False, f"could not interrupt Jarvis: {exc}"
+        self.broker.publish(
+            "activity",
+            kind="warning",
+            message="Interrupt requested for the active directive",
+        )
+        self.broker.publish(
+            "state",
+            state="working",
+            label="Stopping active directive",
+        )
+        return True, "interrupt requested"
 
     def stop(self, graceful_timeout: float = 2.0) -> None:
         process = self.process
@@ -524,6 +575,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         "/index.html": ("index.html", "text/html; charset=utf-8"),
         "/styles.css": ("styles.css", "text/css; charset=utf-8"),
         "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+        "/vendor/three.min.js": ("vendor/three.min.js", "text/javascript; charset=utf-8"),
     }
 
     def log_message(self, _format: str, *args: Any) -> None:
@@ -560,8 +612,33 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _drain_request_body(self) -> None:
+        """Consume an unread request body before replying.
+
+        Rejecting a POST without reading its body leaves bytes sitting in the
+        socket; closing on top of them makes the OS send RST, so the client
+        sees a connection abort instead of the status code we just wrote.
+        Bodies past the accepted ceiling are left unread on purpose - that is
+        the size guard doing its job.
+        """
+        if getattr(self, "_body_consumed", False):
+            return
+        self._body_consumed = True
+        try:
+            remaining = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            return
+        if remaining <= 0 or remaining > _MAX_ATTACHMENT_BODY:
+            return
+        while remaining > 0:
+            chunk = self.rfile.read(min(65536, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     def _json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._drain_request_body()
         self._send_bytes(status, body, "application/json; charset=utf-8")
 
     def _token_valid(self) -> bool:
@@ -653,7 +730,45 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             self._stream_events()
             return
 
+        if path == "/api/sessions":
+            if not self._require_api_access():
+                return
+            from .sessions import get_session_manager
+            sm = get_session_manager()
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "sessions": sm.list_sessions(),
+                    "active_id": sm.active_session_id,
+                },
+            )
+            return
+
+        if path == "/api/sessions/load":
+            if not self._require_api_access():
+                return
+            query = parse_qs(parsed.query)
+            sid = query.get("id", [""])[0]
+            from .sessions import get_session_manager
+            sm = get_session_manager()
+            session = sm.load_session(sid) if sid else None
+            if session is None:
+                self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "session not found"})
+                return
+            sm.active_session_id = session.id
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "session": session.to_dict(),
+                    "active_id": sm.active_session_id,
+                },
+            )
+            return
+
         self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
+
 
     def _stream_events(self) -> None:
         subscriber, history = self.server.bridge.broker.subscribe()
@@ -696,7 +811,14 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-        if path not in {"/api/input", "/api/attachment", "/api/shutdown"}:
+        if path not in {
+            "/api/input",
+            "/api/attachment",
+            "/api/interrupt",
+            "/api/shutdown",
+            "/api/sessions/new",
+            "/api/sessions/delete",
+        }:
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
             return
         if not self._require_api_access(require_origin=True):
@@ -724,6 +846,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
+            self._body_consumed = True
             body = self.rfile.read(length)
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -739,6 +862,31 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/api/sessions/new":
+            from .sessions import get_session_manager
+            sm = get_session_manager()
+            title = str(payload.get("title") or "New Session").strip() or "New Session"
+            session = sm.create_session(title)
+            self.server.bridge.broker.publish("session_list", sessions=sm.list_sessions(), active_id=session.id)
+            self._json(
+                HTTPStatus.OK,
+                {"ok": True, "session": session.to_dict(), "active_id": session.id},
+            )
+            return
+
+        if path == "/api/sessions/delete":
+            sid = str(payload.get("id", "")).strip()
+            from .sessions import get_session_manager
+            sm = get_session_manager()
+            ok = sm.delete_session(sid) if sid else False
+            if ok:
+                self.server.bridge.broker.publish("session_list", sessions=sm.list_sessions(), active_id=sm.active_session_id)
+            self._json(
+                HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
+                {"ok": ok, "active_id": sm.active_session_id},
+            )
+            return
+
         if path == "/api/input":
             ok, message = self.server.bridge.submit(
                 payload.get("text", ""),
@@ -749,6 +897,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                 {"ok": ok, "message": message, "error": None if ok else message},
             )
             return
+
 
         if path == "/api/attachment":
             try:
@@ -766,6 +915,14 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             self._json(
                 HTTPStatus.OK,
                 {"ok": True, "path": str(saved), "name": saved.name},
+            )
+            return
+
+        if path == "/api/interrupt":
+            ok, message = self.server.bridge.request_interrupt()
+            self._json(
+                HTTPStatus.OK if ok else HTTPStatus.CONFLICT,
+                {"ok": ok, "message": message, "error": None if ok else message},
             )
             return
 

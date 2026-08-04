@@ -22,8 +22,16 @@ if sys.platform == "win32":
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+    try:
+        import signal
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, signal.default_int_handler)
+    except Exception:
+        pass
+
 
 import argparse
+
 
 from jarvis.config import load_config
 from jarvis.utils import logging as log
@@ -46,6 +54,25 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="start Jarvis in the local browser interface",
     )
+    # Remote-device modes are deliberately separate from normal task execution.
+    # A hosted relay never runs commands; the paired device must run
+    # --remote-agent itself before it can receive an encrypted task.
+    parser.add_argument("--remote-url", help="override remote relay URL (must be https except localhost)")
+    parser.add_argument("--remote-pair", metavar="DEVICE",
+                        help="start pairing this controller with a named remote device")
+    parser.add_argument("--remote-accept", metavar="CODE",
+                        help="accept the one-time pairing code on the other device")
+    parser.add_argument("--remote-name", default="",
+                        help="this device's display name while pairing")
+    parser.add_argument("--remote-trust", nargs=2, metavar=("DEVICE", "FINGERPRINT"),
+                        help="trust a pairing after comparing fingerprints on both devices")
+    parser.add_argument("--remote-status", action="store_true", help="list local remote pairings")
+    parser.add_argument("--remote-send", nargs=2, metavar=("DEVICE", "TASK"),
+                        help="send one task to a trusted paired device and wait for its result")
+    parser.add_argument("--remote-agent", action="store_true",
+                        help="run this computer as a paired remote Jarvis agent")
+    parser.add_argument("--remote-allow-unattended", action="store_true",
+                        help="with --remote-agent, do not require someone at this computer to approve each action")
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -57,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg.brain.adapter_path = args.adapter
     if args.base_url:
         cfg.brain.base_url = args.base_url
+    if args.remote_url:
+        cfg.remote.relay_url = args.remote_url
     if args.vision:
         cfg.brain.use_vision = True
     if args.voice:
@@ -65,6 +94,16 @@ def main(argv: list[str] | None = None) -> int:
         cfg.safety.confirm_each_action = True
     if args.steps:
         cfg.safety.max_steps = args.steps
+
+    remote_modes = [bool(args.remote_pair), bool(args.remote_accept),
+                    bool(args.remote_trust), bool(args.remote_status),
+                    bool(args.remote_send), bool(args.remote_agent)]
+    if args.remote_allow_unattended and not args.remote_agent:
+        parser.error("--remote-allow-unattended only applies with --remote-agent")
+    if sum(remote_modes) > 1:
+        parser.error("choose exactly one remote mode per command")
+    if any(remote_modes):
+        return _run_remote_mode(args, cfg)
 
     if args.check:
         return run_check(cfg)
@@ -119,6 +158,53 @@ def main(argv: list[str] | None = None) -> int:
 
     from jarvis.console import repl
     return repl(cfg)
+
+
+def _run_remote_mode(args, cfg) -> int:
+    """Run the explicit CLI lifecycle for encrypted remote pairing/control."""
+    from jarvis import remote
+
+    try:
+        if args.remote_pair:
+            offer = remote.start_pairing(cfg, args.remote_pair, local_name=args.remote_name)
+            print(f"Pairing code for {offer.label}: {offer.code}")
+            print("On the other device, run:")
+            print(f'  python run.py --remote-accept {offer.code} --remote-name "{offer.label}"')
+            print("Waiting up to 10 minutes for that device to accept the code...")
+            pairing = remote.finish_pairing(cfg, offer)
+            print(f"Paired with {pairing.peer_name}, but it is NOT trusted yet.")
+            print(f"Compare this fingerprint on BOTH devices: {pairing.verification_fingerprint}")
+            print(f'Then on this computer run: python run.py --remote-trust "{pairing.label}" {pairing.verification_fingerprint}')
+            return 0
+        if args.remote_accept:
+            pairing = remote.accept_pairing(cfg, args.remote_accept, local_name=args.remote_name)
+            print(f"Paired with {pairing.peer_name}, but it is NOT trusted yet.")
+            print(f"Compare this fingerprint on BOTH devices: {pairing.verification_fingerprint}")
+            print(f'Then on this computer run: python run.py --remote-trust "{pairing.label}" {pairing.verification_fingerprint}')
+            return 0
+        if args.remote_trust:
+            label, supplied = args.remote_trust
+            store = remote.PairingStore(cfg.remote.state_dir)
+            try:
+                pairing = store.get(label, role="controller")
+            except remote.RemoteError:
+                pairing = store.get(label, role="agent")
+            remote.trust_pairing(cfg, pairing.label, supplied, role=pairing.role)
+            print(f"Trusted {pairing.label} ({pairing.role}).")
+            return 0
+        if args.remote_status:
+            print(remote.status_text(cfg))
+            return 0
+        if args.remote_send:
+            ok, message = remote.send_task(cfg, args.remote_send[0], args.remote_send[1])
+            print(message)
+            return 0 if ok else 1
+        if args.remote_agent:
+            return remote.run_remote_agent(cfg, allow_unattended=args.remote_allow_unattended)
+    except remote.RemoteError as exc:
+        log.error(str(exc))
+        return 1
+    return 1
 
 
 def run_check(cfg) -> int:

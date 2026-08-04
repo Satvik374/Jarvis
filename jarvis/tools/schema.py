@@ -449,6 +449,36 @@ ACTIONS: tuple[Action, ...] = (
         (Param("text", "str", "Text to copy."),),
         category="system", examples=({"text": "copied text"},),
     ),
+    Action(
+        "remember", "Store a fact, preference, rule, or piece of context in "
+        "persistent memory so you remember it FOREVER across sessions.",
+        (Param("fact", "str", "The exact fact, preference, or rule to remember forever."),
+         Param("category", "str", "Category or tag, e.g. 'preference', 'fact', "
+               "'user_info', 'rule', 'project' (default 'fact').",
+               required=False, default="fact")),
+        category="system",
+        examples=({"fact": "User prefers dark mode UI and concise responses", "category": "preference"},
+                  {"fact": "Project root is C:/Users/Administrator/Jarvis", "category": "project"}),
+    ),
+    Action(
+        "forget", "Remove a stored fact or memory from persistent memory.",
+        (Param("target", "str", "The keyword or text of the memory to remove."),),
+        category="system",
+        examples=({"target": "dark mode"},),
+    ),
+    # ---- remote devices --------------------------------------------------
+    Action(
+        "remote_task", "Send a natural-language task to an explicitly named, "
+        "trusted paired device. The task runs only in that device's locally "
+        "started Jarvis Remote agent; use this ONLY when the user clearly asks "
+        "to control that named remote device.",
+        (Param("device", "str", "Exact name of the paired remote device."),
+         Param("task", "str", "The task to perform on that remote device."),
+         Param("timeout", "int", "Seconds to wait for its result (5-600; default configured).",
+               required=False)),
+        category="remote",
+        examples=({"device": "Office PC", "task": "Open Notepad and type the shopping list."},),
+    ),
     # ---- connectors -------------------------------------------------------
     Action(
         "connector", "Read the user's own accounts DIRECTLY - Gmail, Discord "

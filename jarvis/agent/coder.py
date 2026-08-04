@@ -10,6 +10,8 @@ prompt are coder-specific.
 
 from __future__ import annotations
 
+import copy
+
 from ..config import Config
 from ..tools import files
 from ..tools.schema import ACTIONS
@@ -25,6 +27,13 @@ ALLOWED = frozenset({
     "delete_file", "run_command", "python", "read_url", "open_url",
     "http_request", "download_file", "wait", "finish", "ask",
 })
+
+# A coding turn has to return one JSON action.  It may contain a complete file,
+# but it should never inherit the very large general-purpose output budget used
+# by the interactive agent.  In particular, a 500k-token budget lets thinking
+# models spend an unbounded-feeling amount of time reasoning before they emit a
+# tiny action, which leaves the browser on ``PROCESSING``.
+_MAX_CODER_TOKENS = 16_384
 
 
 def _system_prompt(workdir: str) -> str:
@@ -86,6 +95,16 @@ class Coder:
         self.brain = brain
         self.cfg = cfg
         self.max_steps = max_steps or max(cfg.safety.max_steps, 40)
+        # The coding engine is created with a fresh brain, but its config is
+        # still the shared application config.  Copy it before constraining the
+        # action response so a coding task cannot silently change the main
+        # agent's conversation budget.
+        # Test doubles and third-party Brain implementations may not expose
+        # ``cfg``; the caller's configuration is the authoritative fallback.
+        brain_cfg = copy.copy(getattr(brain, "cfg", cfg.brain))
+        brain_cfg.max_tokens = min(max(1, int(brain_cfg.max_tokens)),
+                                   _MAX_CODER_TOKENS)
+        self.brain.cfg = brain_cfg
 
     def run(self, task: str, workdir: str) -> tuple[str, bool]:
         """Build ``task`` inside ``workdir``. Returns ``(message, is_ask)``."""

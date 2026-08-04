@@ -52,7 +52,7 @@ def run_command(command: str, blocked: tuple[str, ...] = (),
     try:
         proc = subprocess.run(
             command, shell=True, capture_output=True, text=True,
-            timeout=timeout, cwd=cwd or None,
+            timeout=timeout, cwd=cwd or None, stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return f"command timed out after {timeout}s"
@@ -89,7 +89,9 @@ def run_python(code: str, timeout: int = 60, cwd: str | None = None) -> str:
     try:
         proc = subprocess.run(
             [sys.executable, "-c", code], capture_output=True, text=True,
-            timeout=timeout, cwd=cwd or None)
+            timeout=timeout, cwd=cwd or None, stdin=subprocess.DEVNULL,
+        )
+
     except subprocess.TimeoutExpired:
         return f"python timed out after {timeout}s (raise the timeout if it needs longer)"
     except Exception as exc:

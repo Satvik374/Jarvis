@@ -14,7 +14,9 @@ Every step is logged via :class:`TrajectoryWriter` so real runs become data.
 from __future__ import annotations
 
 import json
+import queue
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -32,6 +34,72 @@ from .trajectory import Trajectory, TrajectoryWriter, Step
 
 
 _IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+
+
+def _archive_screenshot(obs, shot, path: Path) -> None:
+    """Save one diagnostic frame away from the model's critical path."""
+    try:
+        annotate_mod.annotate(obs, shot, path)
+        obs.screenshot_path = str(path)
+    except Exception:
+        # Screenshot archival is diagnostic only and must never affect a task.
+        pass
+
+
+class _ScreenshotArchiver:
+    """Bounded, daemonized diagnostic writer.
+
+    At most one frame is being written and one waits behind it. If disk I/O
+    falls behind, newer diagnostic frames are skipped before copying their
+    multi-megabyte images; model vision is never affected.
+    """
+
+    def __init__(self, capacity: int = 2):
+        self._slots = threading.BoundedSemaphore(max(1, capacity))
+        self._queue: queue.Queue = queue.Queue(maxsize=max(1, capacity))
+        self._start_lock = threading.Lock()
+        self._worker: threading.Thread | None = None
+
+    def submit(self, obs, shot, path: Path) -> bool:
+        if not self._slots.acquire(blocking=False):
+            return False
+        try:
+            archival_shot = screen_mod.Screenshot(
+                image=shot.image.copy(),
+                width=shot.width,
+                height=shot.height,
+            )
+            self._ensure_worker()
+            self._queue.put_nowait((obs, archival_shot, path))
+            return True
+        except Exception:
+            self._slots.release()
+            return False
+
+    def _ensure_worker(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        with self._start_lock:
+            if self._worker is not None and self._worker.is_alive():
+                return
+            self._worker = threading.Thread(
+                target=self._run,
+                daemon=True,
+                name="jarvis-screenshot",
+            )
+            self._worker.start()
+
+    def _run(self) -> None:
+        while True:
+            obs, shot, path = self._queue.get()
+            try:
+                _archive_screenshot(obs, shot, path)
+            finally:
+                self._queue.task_done()
+                self._slots.release()
+
+
+_SCREENSHOT_ARCHIVER = _ScreenshotArchiver()
 
 
 def _find_image(task: str):
@@ -212,9 +280,11 @@ class Agent:
             plan_note += "\n===================================="
 
             from .. import mcp
+            from .. import remote
             from ..tools import connectors
             system = (build_system_prompt(memory) + chat_note + agents_note()
-                      + connectors.note() + mcp.tools_note() + plan_note)
+                      + connectors.note() + mcp.tools_note() + remote.note(self.cfg)
+                      + plan_note)
 
             traj = Trajectory(task=task, backend=self.cfg.brain.backend,
                               model=self.cfg.brain.model)
@@ -566,54 +636,24 @@ class Agent:
             return ""
 
     def _evict_memory(self, task: str) -> None:
-        """#3: drop a learned entry that no longer works so the task is
-        re-explored fresh next time instead of reusing a stale/poisoned plan.
-
-        Matches the same fuzzy rule the exploit path uses (substring either
-        way) so whatever entry triggered the reuse is the one removed.
-        """
-        text = self._read_memory()
-        marker = "- Learned Task:"
-        if not text or marker not in text:
-            return
-        want = task.strip().lower()
-        parts = text.split(marker)          # parts[0] = freeform preamble
-        kept, dropped = [parts[0]], False
-        for block in parts[1:]:
-            stored = block.splitlines()[0].strip().lower() if block.strip() else ""
-            if not dropped and stored and (want in stored or stored in want):
-                dropped = True
-                continue                    # evict this block
-            kept.append(block)
-        if not dropped:
-            return
-        new = (kept[0] + "".join(marker + b for b in kept[1:])).strip()
-        self.memory_path.write_text(new + "\n" if new else "", encoding="utf-8")
-        log.info(f"un-learned stale plan for task: {task[:50]}")
+        """Drop a learned plan entry that no longer works."""
+        from .memory import evict_learned_plan
+        evict_learned_plan(self.memory_path, task)
 
     def _append_memory(self, task: str, plan: dict) -> None:
         """Persist a verified-successful plan, deduped and size-capped."""
-        entry = (f"- Learned Task: {task}\n  Successful Plan: {plan['name']}\n"
-                 f"  Approach: {plan['description']}\n")
-        try:
-            existing = (self.memory_path.read_text(encoding="utf-8")
-                        if self.memory_path.exists() else "")
-            if self._memory_has(task, existing):
-                return    # already learned
-            combined = (existing.rstrip() + "\n\n" + entry).strip() + "\n"
-            # Cap the file so the system prompt never bloats: drop the OLDEST
-            # learned entries first.
-            max_chars = self.cfg.data.memory_max_chars
-            while len(combined) > max_chars:
-                nxt = combined.find("\n- Learned Task:", 1)
-                if nxt == -1:
-                    combined = combined[-max_chars:]
-                    break
-                combined = combined[nxt + 1:]
-            self.memory_path.write_text(combined, encoding="utf-8")
-            log.ok("Saved verified-successful plan to memory.txt (learned).")
-        except Exception as exc:
-            log.warn(f"Failed to save successful plan to memory: {exc}")
+        from .memory import append_learned_plan
+        append_learned_plan(self.memory_path, task, plan, self.cfg.data.memory_max_chars)
+
+    def _remember_fact(self, fact: str, category: str = "fact") -> str:
+        """Store a permanent fact in memory.txt so it persists forever."""
+        from .memory import remember_fact
+        return remember_fact(self.memory_path, fact, category)
+
+    def _forget_fact(self, target: str) -> str:
+        """Remove facts matching target from permanent memory."""
+        from .memory import forget_fact
+        return forget_fact(self.memory_path, target)
 
     # -- plain conversation (no tools) --------------------------------- #
     _TASK_VERBS = frozenset((
@@ -630,14 +670,180 @@ class Agent:
         "build", "code", "develop", "refactor", "debug", "implement",
         "install", "upgrade",
     ))
+    _TASK_WRAPPERS = (
+        ("can", "you"),
+        ("could", "you"),
+        ("would", "you"),
+        ("will", "you"),
+    )
+    _CONCRETE_APPS = frozenset((
+        "calculator", "calc", "chrome", "cmd", "edge", "excel", "explorer",
+        "firefox", "notepad", "paint", "powershell", "settings", "spotify",
+        "terminal", "vscode",
+    ))
+    _UI_OBJECT_TARGETS = frozenset((
+        "app", "application", "browser", "file", "folder", "tab", "window",
+    ))
+    _UI_CONTROL_TARGETS = frozenset((
+        "button", "checkbox", "control", "dropdown", "field", "icon", "input",
+        "link", "menu", "option", "start", "tab", "textbox",
+    ))
+    _KEY_TARGETS = frozenset((
+        "alt", "backspace", "ctrl", "delete", "enter", "esc", "escape", "f1",
+        "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11",
+        "f12", "shift", "space", "tab", "windows",
+    ))
+    _TEXT_ENTRY_TARGETS = frozenset((
+        "box", "editor", "field", "input", "notepad", "textbox",
+    ))
+    _OPENABLE_EXTENSIONS = (
+        ".bat", ".cmd", ".csv", ".doc", ".docx", ".exe", ".html", ".jpg",
+        ".jpeg", ".pdf", ".png", ".ppt", ".pptx", ".ps1", ".py", ".txt",
+        ".xls", ".xlsx",
+    )
 
     def _looks_like_task(self, task: str) -> bool:
         # Imperative computer commands start with an action verb, so route them
         # straight to the control loop without paying for a classifier call.
         # ponytail: verb prefix, not NLP - high precision so no command is ever
         # mistaken for chat.
-        words = task.strip().lower().lstrip("!.,?-").split()
-        return bool(words) and words[0] in self._TASK_VERBS
+        words = [
+            word.strip("!.,?:;")
+            for word in task.strip().lower().lstrip("!.,?-").split()
+        ]
+        # The same clear command is often phrased politely. Strip only narrow
+        # wrappers, then use verb-specific UI grammar. Natural-language verbs
+        # are too ambiguous to fast-path alone ("press charges", "save me",
+        # "develop a meal plan"), so anything unclear still uses the model
+        # classifier and preserves conversational quality.
+        stripped_wrapper = False
+        while words:
+            if words[0] in {"jarvis", "please"}:
+                words = words[1:]
+                stripped_wrapper = True
+                continue
+            wrapper = next(
+                (prefix for prefix in self._TASK_WRAPPERS
+                 if tuple(words[:len(prefix)]) == prefix),
+                None,
+            )
+            if wrapper:
+                words = words[len(wrapper):]
+                stripped_wrapper = True
+                continue
+            break
+        if not words:
+            return False
+        if not stripped_wrapper:
+            return words[0] in self._TASK_VERBS
+
+        verb, rest = words[0], words[1:]
+        targets = set(rest)
+        if verb in {"rightclick", "doubleclick", "screenshot"}:
+            return True
+        if verb == "click":
+            obj = list(rest)
+            while obj and obj[0] in {"a", "an", "on", "the"}:
+                obj = obj[1:]
+            return bool(obj and obj[0] in self._UI_CONTROL_TARGETS)
+        if verb == "press":
+            obj = list(rest)
+            while obj and obj[0] in {"a", "an", "the"}:
+                obj = obj[1:]
+            return bool(
+                obj
+                and obj[0] in (
+                    self._KEY_TARGETS | self._UI_CONTROL_TARGETS
+                )
+            )
+        if verb == "scroll":
+            if rest[:3] == ["down", "memory", "lane"]:
+                return False
+            return bool(
+                rest
+                and (
+                    rest[0] in {"up", "down", "left", "right"}
+                    or (
+                        rest[0] == "page"
+                        and len(rest) > 1
+                        and rest[1] in {"up", "down"}
+                    )
+                )
+            )
+        if verb in {"type", "paste"}:
+            if "out" in targets:
+                return False
+            for index, word in enumerate(rest):
+                if word not in {"in", "into"}:
+                    continue
+                destination = list(rest[index + 1:])
+                while destination and destination[0] in {
+                    "a", "an", "my", "the",
+                }:
+                    destination = destination[1:]
+                if (
+                    destination
+                    and destination[0] in self._TEXT_ENTRY_TARGETS
+                ):
+                    return True
+            return False
+        if verb in {"open", "close", "switch", "launch"}:
+            obj = list(rest)
+            while obj and obj[0] in {
+                "a", "an", "my", "the", "to", "your",
+            }:
+                obj = obj[1:]
+            if not obj or obj[0] in {"with", "into", "by"}:
+                return False
+            return (
+                (
+                    obj[0] in self._CONCRETE_APPS
+                    and (
+                        len(obj) == 1
+                        or (
+                            len(obj) == 2
+                            and obj[1] in {
+                                "app", "application", "browser", "tab", "window",
+                            }
+                        )
+                    )
+                )
+                or (
+                    obj[0] in self._UI_OBJECT_TARGETS
+                    and len(obj) == 1
+                )
+                or (
+                    obj[0] == "microsoft"
+                    and len(obj) == 2
+                    and obj[1] == "word"
+                )
+                or obj[0].startswith(("http://", "https://", "www."))
+                or obj[0].endswith(self._OPENABLE_EXTENSIONS)
+            )
+        if verb in {"maximize", "minimize"}:
+            obj = list(rest)
+            while obj and obj[0] in {"a", "an", "the", "my"}:
+                obj = obj[1:]
+            return bool(
+                obj
+                and (
+                    (
+                        obj[0] in self._CONCRETE_APPS
+                        and (
+                            len(obj) == 1
+                            or (
+                                len(obj) == 2
+                                and obj[1] == "window"
+                            )
+                        )
+                    )
+                    or (
+                        obj[0] in self._UI_OBJECT_TARGETS
+                        and len(obj) == 1
+                    )
+                )
+            )
+        return False
 
     def _maybe_chat(self, task: str, chat_note: str = "",
                     image=None) -> str | None:
@@ -662,8 +868,11 @@ class Agent:
             "'who are you' or 'what is 2+2'), or a TASK that needs you to look "
             "at or control their computer (open/click/type/search/play/read the "
             "screen, anything on their machine). If unsure, choose task.\n"
+            "If the user asks you to remember something or provides a fact/preference to keep, "
+            'include "remember": "<fact to store forever>" in your response JSON.\n'
             "Reply with ONE JSON object and nothing else:\n"
-            '  {"mode":"chat","reply":"<friendly reply>"}   or   {"mode":"task"}'
+            '  {"mode":"chat","reply":"<friendly reply>","remember":"<optional fact to store forever>"}\n'
+            '   or   {"mode":"task"}'
         )
         messages: list[dict] = []
         if chat_note:
@@ -677,6 +886,9 @@ class Agent:
         obj = _extract_json(raw)
         if isinstance(obj, dict) and str(obj.get("mode", "")).lower() == "chat":
             reply = str(obj.get("reply", "")).strip()
+            rem = str(obj.get("remember", "")).strip()
+            if rem:
+                self._remember_fact(rem)
             if reply:
                 return reply
         return None
@@ -752,8 +964,14 @@ class Agent:
             try:
                 name = screen_mod.timestamped_name(f"step{step_i:02d}")
                 path = self._shot_dir / name
-                annotate_mod.annotate(obs, shot, path)
-                obs.screenshot_path = str(path)
+                # Annotation + PNG encoding costs hundreds of milliseconds but
+                # its output is only for diagnostics. The bounded worker copies
+                # accepted frames; the untouched live image goes to the model.
+                _SCREENSHOT_ARCHIVER.submit(
+                    obs,
+                    shot,
+                    path,
+                )
             except Exception:
                 pass
         return shot.image if self.cfg.brain.use_vision else None

@@ -31,6 +31,10 @@
       </div>
 
       <div class="topbar-actions">
+        <button class="icon-button" id="sessionsToggle" type="button"
+                aria-label="Open sessions sidebar" aria-expanded="false" title="Saved Sessions">
+          <span class="sessions-glyph" aria-hidden="true">☰</span>
+        </button>
         <button class="icon-button" id="terminalToggle" type="button"
                 aria-label="Open terminal transcript" aria-expanded="false">
           <span class="terminal-glyph" aria-hidden="true">&gt;_</span>
@@ -46,6 +50,7 @@
         </button>
       </div>
     </header>
+
 
     <main class="workspace">
       <aside class="activity-panel hud-panel" aria-label="Live activity">
@@ -105,9 +110,11 @@
           <div class="coordinate coordinate-bottom" aria-hidden="true">LOCAL NODE 127.0.0.1</div>
 
           <canvas id="coreCanvas" aria-hidden="true"></canvas>
+          <div id="fluidBlob" aria-hidden="true"></div>
 
           <div class="core-center-label" aria-hidden="true">
-            <span>J</span>
+            <span class="core-mark">J</span>
+            <span class="core-caption">VOICE CORE</span>
           </div>
 
           <div class="state-readout" role="status" aria-live="polite" aria-atomic="true">
@@ -176,7 +183,7 @@
             <input id="fileInput" type="file" accept="image/*" hidden>
             <span class="key-hint"><kbd>↵</kbd> SEND · <kbd>⇧↵</kbd> NEW LINE</span>
             <button class="send-button" id="sendButton" type="submit" disabled>
-              <span>SEND</span>
+              <span id="sendButtonLabel">SEND</span>
               <i aria-hidden="true"></i>
             </button>
           </div>
@@ -207,8 +214,25 @@
             type="button" hidden>NEW OUTPUT <span aria-hidden="true">↓</span></button>
   </aside>
 
+  <aside class="sessions-drawer" id="sessionsDrawer" aria-label="Saved Sessions"
+         aria-hidden="true" inert>
+    <div class="sessions-header">
+      <span><i></i> CONVERSATION SESSIONS</span>
+      <div>
+        <button type="button" class="new-session-button" id="newSessionButton">+ NEW SESSION</button>
+        <button type="button" id="closeSessions" aria-label="Close sessions sidebar">×</button>
+      </div>
+    </div>
+    <div class="sessions-list" id="sessionsList" role="navigation" aria-label="Saved conversation sessions">
+      <div class="sessions-empty">Loading saved sessions…</div>
+    </div>
+  </aside>
+
+
   <div class="toast-region" id="toastRegion" aria-live="polite"></div>
 
+
+  <script src="/vendor/three.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

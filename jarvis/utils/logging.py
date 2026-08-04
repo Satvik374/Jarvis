@@ -502,12 +502,23 @@ def pop(success: bool = True) -> None:
     """
     if sys.platform != "win32":
         return
-    try:
-        import winsound
-        if success:
-            winsound.Beep(880, 90)
-            winsound.Beep(1320, 130)
-        else:
-            winsound.Beep(440, 180)
-    except Exception:
-        pass
+
+    def _play() -> None:
+        try:
+            import winsound
+            if success:
+                winsound.Beep(880, 90)
+                winsound.Beep(1320, 130)
+            else:
+                winsound.Beep(440, 180)
+        except Exception:
+            pass
+
+    # The cue is feedback, not part of the result. Let Agent.run return and
+    # publish the response while the exact same notes play in the background.
+    import threading
+    threading.Thread(
+        target=_play,
+        daemon=True,
+        name="jarvis-complete-cue",
+    ).start()
