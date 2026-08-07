@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--remote-agent", action="store_true",
                         help="run this computer as a paired remote Jarvis agent")
     parser.add_argument("--remote-allow-unattended", action="store_true",
-                        help="with --remote-agent, do not require someone at this computer to approve each action")
+                        help="with --remote-agent, force unattended execution for this launch")
     args = parser.parse_args(argv)
 
     cfg = load_config()

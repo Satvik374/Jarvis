@@ -16,7 +16,7 @@ brain:
   # model: Qwen/Qwen2.5-0.5B-Instruct          # the base you trained from
   # adapter_path: training/outputs/jarvis-lora  # the adapter you trained
   temperature: 0.2
-  max_tokens: 500000
+  max_tokens: 50000    # openai/anthropic pass this straight through; 500000 is a 400
   # Keep vision ON to allow Gemini 3.5 Flash to analyze screen images natively.
   use_vision: true
   request_timeout: 120
@@ -74,4 +74,4 @@ remote:
   relay_url: ""
   state_dir: ""
   result_timeout: 180
-  require_confirmation: true
+  require_confirmation: false  # trusted remote tasks run automatically

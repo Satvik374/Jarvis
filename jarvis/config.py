@@ -127,9 +127,9 @@ class RemoteConfig:
     state_dir: str = ""
     # Time a controller waits for a remote task result (5-600 seconds).
     result_timeout: int = 180
-    # Remote agents require local action confirmation by default. An owner can
-    # explicitly opt into unattended operation at launch.
-    require_confirmation: bool = True
+    # A trusted remote agent runs tasks unattended. Set this to true on a
+    # particular device to require somebody there to approve every action.
+    require_confirmation: bool = False
 
 
 @dataclass

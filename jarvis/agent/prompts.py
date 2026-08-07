@@ -234,30 +234,19 @@ def _extract_json(text: str) -> dict | None:
     # Strip code fences if the model added them despite instructions.
     text = re.sub(r"^```(?:json)?|```$", "", text.strip(),
                   flags=re.MULTILINE).strip()
-    # Fast path.
-    try:
-        obj = json.loads(text)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:
-        pass
-    # Find the first balanced { ... } block.
+    # Decode the first JSON object at or after each '{'. raw_decode is
+    # string-literal aware, unlike counting braces by hand: args routinely
+    # carry code or prose containing { and }, and a hand-rolled depth counter
+    # miscounts those and rejects a perfectly valid action.
+    decoder = json.JSONDecoder()
     start = text.find("{")
     while start != -1:
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    chunk = text[start:i + 1]
-                    try:
-                        obj = json.loads(chunk)
-                        if isinstance(obj, dict):
-                            return obj
-                    except Exception:
-                        break
+        try:
+            obj, _ = decoder.raw_decode(text, start)
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict):
+            return obj
         start = text.find("{", start + 1)
     return None
 

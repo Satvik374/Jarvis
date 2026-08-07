@@ -39,7 +39,61 @@
     terminalToggle: $("#terminalToggle"),
     toastRegion: $("#toastRegion"),
     welcome: $("#welcomeCard"),
+    // Tabs
+    tabUnderline: $(".tab-underline"),
+    tabCountStream: $("#tabCountStream"),
+    tabCountLogs: $("#tabCountLogs"),
+    // Vitals
+    vitalUptime: $("#vitalUptime"),
+    vitalEvents: $("#vitalEvents"),
+    vitalRate: $("#vitalRate"),
+    vitalMessages: $("#vitalMessages"),
+    vitalPeak: $("#vitalPeak"),
+    vitalsSpark: $("#vitalsSpark"),
+    vitalKindTotal: $("#vitalKindTotal"),
+    vitalStateTotal: $("#vitalStateTotal"),
+    kindBars: $("#kindBars"),
+    stateBars: $("#stateBars"),
+    // Commands
+    cmdFilter: $("#cmdFilter"),
+    cmdList: $("#cmdList"),
+    // Alerts
+    alertList: $("#alertList"),
+    clearAlerts: $("#clearAlerts"),
+    // Stage HUD
+    hudEvents: $("#hudEvents"),
+    hudUptime: $("#hudUptime"),
+    hudSteps: $("#hudSteps"),
+    hudAlerts: $("#hudAlerts"),
+    hudAlertChip: $(".hud-chip-alert"),
+    stateRibbon: $("#stateRibbon"),
+    // Palette
+    paletteToggle: $("#paletteToggle"),
+    paletteBackdrop: $("#paletteBackdrop"),
+    paletteInput: $("#paletteInput"),
+    paletteResults: $("#paletteResults"),
   };
+
+  // The real slash commands, mirroring _SLASH_COMMANDS in jarvis/console.py.
+  const slashCommands = [
+    ["/enhance", "AI-rewrite a rough prompt, confirm, then run it"],
+    ["/paste", "attach the clipboard image/screenshot (Ctrl+V works too)"],
+    ["/remember", "[fact] - store a fact in permanent memory forever"],
+    ["/memory", "list permanent memories and learned plans"],
+    ["/help", "show all commands"],
+    ["/voice", "voice-ONLY mode: talk instead of typing"],
+    ["/wake", 'hands-free mode: say "Hey Jarvis" to command'],
+    ["/cron", "list/add/remove scheduled jobs"],
+    ["/connect", "Gmail/Discord/WhatsApp connector status and test"],
+    ["/remote", "list paired devices, trust one, or send it a task"],
+    ["/mcp", "list/add/remove MCP servers (extra tool connectors)"],
+    ["/startup", "on|off - launch Jarvis when Windows starts"],
+    ["/confirm", "on|off - confirm each action"],
+    ["/vision", "on|off - send screenshots to the model"],
+    ["/steps", "set max steps per task, e.g. /steps 20"],
+    ["/config", "print the active configuration"],
+    ["/quit", "exit"],
+  ];
 
 
   const stateMeta = {
@@ -88,6 +142,40 @@
   let speechIdWatermark = 0;
   let speechExpiryTimer = null;
   let interruptPending = false;
+
+  // ---- Live metrics, all derived from events the UI already receives ----
+  const metrics = {
+    events: 0,
+    userMessages: 0,
+    assistantMessages: 0,
+    steps: 0,
+    alerts: 0,
+    kinds: new Map(),          // activity kind -> count
+    stateMs: new Map(),        // state name -> accumulated ms
+    ribbon: [],               // recent states, newest last
+    buckets: new Array(48).fill(0), // events per 2s slot, rolling
+  };
+  let lastStateAt = Date.now();
+  let activeTab = "stream";
+  let unseenStream = 0;
+  let vitalsRafId = null; // debounce handle for renderVitals
+
+  const stateColors = {
+    listening: "82, 216, 255",
+    perceiving: "83, 184, 255",
+    thinking: "56, 196, 255",
+    acting: "38, 224, 255",
+    planning: "92, 170, 255",
+    working: "67, 178, 255",
+    verifying: "116, 206, 255",
+    transcribing: "86, 190, 255",
+    responding: "130, 214, 255",
+    success: "189, 246, 120",
+    warning: "255, 194, 71",
+    error: "255, 78, 69",
+    offline: "58, 96, 128",
+    booting: "100, 125, 139",
+  };
 
   const hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
   let token = hashParams.get("token") || sessionStorage.getItem("jarvis-browser-token") || "";
@@ -145,6 +233,7 @@
 
   function setState(name, detail) {
     if (!(name in stateMeta)) name = "working";
+    const previous = currentState;
     currentState = name;
     const [index, title, fallback] = stateMeta[name];
     root.dataset.state = name;
@@ -152,6 +241,21 @@
     elements.stateTitle.textContent = title;
     elements.stateDetail.textContent = String(detail || fallback).replace(/\s+/g, " ").trim();
     orb.setState(name);
+    // Shift the Grainient background palette to match the current state.
+    window.grainientSetState?.(name);
+
+    // Bank the time the previous state was held, then log the transition.
+    const now = Date.now();
+    if (previous) {
+      metrics.stateMs.set(previous, (metrics.stateMs.get(previous) || 0) + (now - lastStateAt));
+    }
+    lastStateAt = now;
+    if (previous !== name) {
+      metrics.ribbon.push(name);
+      if (metrics.ribbon.length > 40) metrics.ribbon.shift();
+      renderRibbon();
+    }
+
     if (name === "offline") {
       acceptingInput = false;
       interruptPending = false;
@@ -184,6 +288,9 @@
     }
     updateSendEnabled();
     document.querySelectorAll("[data-suggestion]").forEach((button) => {
+      button.disabled = !enabled || inputMode !== "command";
+    });
+    document.querySelectorAll(".cmd-item").forEach((button) => {
       button.disabled = !enabled || inputMode !== "command";
     });
   }
@@ -452,6 +559,22 @@
   function addActivity(kind, message, timestamp) {
     const text = String(message || "").replace(/\s+/g, " ").trim();
     if (!text) return;
+
+    // Every activity routes through here, so tally metrics at this one point.
+    metrics.kinds.set(kind, (metrics.kinds.get(kind) || 0) + 1);
+    if (kind === "step") {
+      metrics.steps += 1;
+      // updateHud() is already called by handleEvent before dispatching here,
+      // so a second call is redundant — removed to avoid double DOM write.
+    }
+    if (kind === "error" || kind === "warn" || kind === "warning") {
+      addAlert(kind, text, timestamp);
+    }
+    if (activeTab !== "stream") {
+      unseenStream += 1;
+      setTabCount(elements.tabCountStream, unseenStream);
+    }
+
     const shouldFollow = isNearBottom(elements.activityList);
     const empty = elements.activityList.querySelector(".activity-empty");
     if (empty) empty.remove();
@@ -562,9 +685,522 @@
     clearSpeechOverlay();
   }
 
+  // ============================================================
+  // Tabs
+  // ============================================================
+
+  const tabButtons = Array.from(document.querySelectorAll(".panel-tab"));
+
+  function selectTab(name) {
+    const button = tabButtons.find((b) => b.dataset.tab === name);
+    if (!button) return;
+    activeTab = name;
+    tabButtons.forEach((b, i) => {
+      const on = b.dataset.tab === name;
+      b.setAttribute("aria-selected", on ? "true" : "false");
+      b.tabIndex = on ? 0 : -1;
+      const panel = document.getElementById(b.getAttribute("aria-controls"));
+      if (panel) {
+        panel.hidden = !on;
+        panel.classList.toggle("is-active", on);
+      }
+      if (on && elements.tabUnderline) {
+        elements.tabUnderline.style.setProperty(
+          "transform", `translateX(${i * 100}%)`,
+        );
+      }
+    });
+    if (name === "stream") {
+      unseenStream = 0;
+      setTabCount(elements.tabCountStream, 0);
+      followLatest(elements.activityList, elements.activityFollow);
+    }
+    if (name === "vitals") {
+      // Defer one frame so the panel finishes layout before canvas measures itself.
+      requestAnimationFrame(() => renderVitals());
+    }
+  }
+
+  function setTabCount(node, value, alert = false) {
+    if (!node) return;
+    node.textContent = value > 99 ? "99+" : String(value);
+    node.dataset.zero = value === 0 ? "true" : "false";
+    if (alert) node.dataset.alert = value > 0 ? "true" : "false";
+  }
+
+  tabButtons.forEach((button) => {
+    button.addEventListener("click", () => selectTab(button.dataset.tab));
+    button.addEventListener("keydown", (event) => {
+      const dir = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+      if (!dir) return;
+      event.preventDefault();
+      const index = tabButtons.indexOf(button);
+      const next = tabButtons[(index + dir + tabButtons.length) % tabButtons.length];
+      next.focus();
+      selectTab(next.dataset.tab);
+    });
+  });
+
+  // ============================================================
+  // Vitals
+  // ============================================================
+
+  function formatDuration(ms) {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    const pad = (n) => String(n).padStart(2, "0");
+    return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+  }
+
+  function renderBars(container, entries, formatter) {
+    if (!container) return;
+    if (!entries.length) {
+      container.innerHTML = "";
+      const empty = document.createElement("p");
+      empty.className = "vital-empty";
+      empty.textContent = "Nothing recorded yet.";
+      container.append(empty);
+      return;
+    }
+    const max = Math.max(...entries.map(([, value]) => value)) || 1;
+    // Reuse existing rows so the CSS width transition animates instead of
+    // restarting from zero on every repaint.
+    const existing = new Map(
+      Array.from(container.querySelectorAll(".bar-row")).map((r) => [r.dataset.kind, r]),
+    );
+    container.querySelectorAll(".vital-empty").forEach((n) => n.remove());
+
+    entries.forEach(([key, value]) => {
+      let row = existing.get(key);
+      if (!row) {
+        row = document.createElement("div");
+        row.className = "bar-row";
+        row.dataset.kind = key;
+        const name = document.createElement("span");
+        name.className = "bar-name";
+        name.textContent = key.toUpperCase();
+        const track = document.createElement("div");
+        track.className = "bar-track";
+        const fill = document.createElement("i");
+        fill.className = "bar-fill";
+        track.append(fill);
+        const amount = document.createElement("span");
+        amount.className = "bar-value";
+        row.append(name, track, amount);
+      } else {
+        existing.delete(key);
+      }
+      row.querySelector(".bar-fill").style.setProperty(
+        "--bar", `${Math.round((value / max) * 100)}%`,
+      );
+      row.querySelector(".bar-value").textContent = formatter(value);
+      container.append(row);
+    });
+    existing.forEach((row) => row.remove());
+  }
+
+  function renderVitals() {
+    if (activeTab !== "vitals") return;
+    const uptime = Date.now() - sessionStarted;
+    elements.vitalUptime.textContent = formatDuration(uptime);
+    elements.vitalEvents.textContent = metrics.events.toLocaleString();
+    // Use a 5-second minimum to avoid 60× inflated rate in the first second.
+    const minutes = Math.max(uptime / 60000, 5 / 60);
+    elements.vitalRate.textContent = Math.round(metrics.events / minutes);
+    elements.vitalMessages.textContent =
+      `${metrics.userMessages}/${metrics.assistantMessages}`;
+
+    const kinds = [...metrics.kinds.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+    elements.vitalKindTotal.textContent =
+      [...metrics.kinds.values()].reduce((a, b) => a + b, 0);
+    renderBars(elements.kindBars, kinds, (v) => v);
+
+    // Include the in-flight state so the bars keep moving between transitions.
+    const live = new Map(metrics.stateMs);
+    live.set(currentState, (live.get(currentState) || 0) + (Date.now() - lastStateAt));
+    const states = [...live.entries()]
+      .filter(([, ms]) => ms > 400)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8);
+    const totalMs = [...live.values()].reduce((a, b) => a + b, 0);
+    elements.vitalStateTotal.textContent = formatDuration(totalMs);
+    renderBars(elements.stateBars, states, (ms) => `${Math.round(ms / 1000)}s`);
+
+    drawSparkline();
+  }
+
+  function drawSparkline() {
+    const canvas = elements.vitalsSpark;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 2) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const data = metrics.buckets;
+    const peak = Math.max(...data, 1);
+    elements.vitalPeak.textContent = `peak ${peak}`;
+    const accent = getComputedStyle(root).getPropertyValue("--accent-rgb").trim()
+      || "67, 198, 255";
+    const step = rect.width / (data.length - 1);
+    const y = (v) => rect.height - 2 - (v / peak) * (rect.height - 6);
+
+    ctx.beginPath();
+    ctx.moveTo(0, rect.height);
+    data.forEach((v, i) => ctx.lineTo(i * step, y(v)));
+    ctx.lineTo(rect.width, rect.height);
+    ctx.closePath();
+    const gradient = ctx.createLinearGradient(0, 0, 0, rect.height);
+    gradient.addColorStop(0, `rgba(${accent}, 0.36)`);
+    gradient.addColorStop(1, `rgba(${accent}, 0)`);
+    ctx.fillStyle = gradient;
+    ctx.fill();
+
+    ctx.beginPath();
+    data.forEach((v, i) => (i ? ctx.lineTo(i * step, y(v)) : ctx.moveTo(0, y(v))));
+    ctx.strokeStyle = `rgba(${accent}, 0.95)`;
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+  }
+
+  function renderRibbon() {
+    const track = elements.stateRibbon;
+    if (!track) return;
+    track.innerHTML = "";
+    metrics.ribbon.slice(-32).forEach((state) => {
+      const cell = document.createElement("i");
+      cell.className = "ribbon-cell";
+      cell.style.setProperty(
+        "--cell", `rgba(${stateColors[state] || "67, 198, 255"}, 0.75)`,
+      );
+      track.append(cell);
+    });
+  }
+
+  function updateHud() {
+    elements.hudEvents.textContent = metrics.events.toLocaleString();
+    elements.hudUptime.textContent = formatDuration(Date.now() - sessionStarted);
+    elements.hudSteps.textContent = metrics.steps;
+    elements.hudAlerts.textContent = metrics.alerts;
+    elements.hudAlertChip.dataset.active = metrics.alerts > 0 ? "true" : "false";
+  }
+
+  // ============================================================
+  // Alerts (warnings + errors mirrored into the LOGS tab)
+  // ============================================================
+
+  function addAlert(kind, message, timestamp) {
+    const list = elements.alertList;
+    if (!list) return;
+    list.querySelectorAll(".vital-empty").forEach((n) => n.remove());
+
+    const item = document.createElement("div");
+    item.className = "alert-item";
+    item.dataset.kind = kind;
+    const head = document.createElement("div");
+    head.className = "alert-head";
+    const kindNode = document.createElement("span");
+    kindNode.className = "alert-kind";
+    kindNode.textContent = kind;
+    const time = document.createElement("time");
+    time.className = "alert-time";
+    time.textContent = shortTime(timestamp ? new Date(timestamp * 1000) : new Date());
+    head.append(kindNode, time);
+    const text = document.createElement("p");
+    text.className = "alert-text";
+    text.textContent = message;
+    item.append(head, text);
+    list.append(item);
+
+    while (list.children.length > 60) list.firstElementChild.remove();
+    if (activeTab === "logs") list.scrollTop = list.scrollHeight;
+
+    metrics.alerts += 1;
+    setTabCount(elements.tabCountLogs, metrics.alerts, true);
+    updateHud();
+  }
+
+  if (elements.clearAlerts) {
+    elements.clearAlerts.addEventListener("click", () => {
+      elements.alertList.innerHTML =
+        '<p class="vital-empty">No warnings or faults. All clear.</p>';
+      metrics.alerts = 0;
+      setTabCount(elements.tabCountLogs, 0, true);
+      updateHud();
+    });
+  }
+
+  // ============================================================
+  // CMDS tab
+  // ============================================================
+
+  function renderCommands(filter = "") {
+    const list = elements.cmdList;
+    if (!list) return;
+    const needle = filter.trim().toLowerCase();
+    const matches = slashCommands.filter(
+      ([name, desc]) =>
+        !needle || name.includes(needle) || desc.toLowerCase().includes(needle),
+    );
+    list.innerHTML = "";
+    if (!matches.length) {
+      const empty = document.createElement("p");
+      empty.className = "vital-empty";
+      empty.textContent = `No command matches “${filter}”.`;
+      list.append(empty);
+      return;
+    }
+    matches.forEach(([name, desc]) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "cmd-item";
+      item.setAttribute("role", "listitem");
+      const label = document.createElement("span");
+      label.className = "cmd-name";
+      label.textContent = name;
+      const hint = document.createElement("span");
+      hint.className = "cmd-desc";
+      hint.textContent = desc;
+      item.append(label, hint);
+      item.addEventListener("click", () => {
+        // Commands taking an argument are staged in the composer, not fired.
+        if (/\[|e\.g\.|on\|off/.test(desc)) {
+          elements.prompt.value = `${name} `;
+          elements.prompt.focus();
+          autoSizeComposer();
+          updateSendEnabled();
+        } else {
+          runDirective(name);
+        }
+      });
+      list.append(item);
+    });
+    document.querySelectorAll(".cmd-item").forEach((b) => {
+      b.disabled = !(acceptingInput && connected && inputMode === "command");
+    });
+  }
+
+  if (elements.cmdFilter) {
+    elements.cmdFilter.addEventListener("input", () =>
+      renderCommands(elements.cmdFilter.value));
+  }
+
+  // ============================================================
+  // Command palette
+  // ============================================================
+
+  let paletteItems = [];
+  let paletteIndex = 0;
+
+  function paletteOpen() {
+    return !elements.paletteBackdrop.hidden;
+  }
+
+  function buildPaletteItems(query) {
+    const needle = query.trim().toLowerCase();
+    const score = (text) => {
+      const value = text.toLowerCase();
+      if (!needle) return 0;
+      const at = value.indexOf(needle);
+      return at < 0 ? -1 : at;
+    };
+
+    const items = [];
+    slashCommands.forEach(([name, desc]) => {
+      const best = Math.max(score(name), score(desc));
+      if (!needle || score(name) >= 0 || score(desc) >= 0) {
+        items.push({
+          group: "COMMANDS",
+          icon: "/",
+          name,
+          hint: desc,
+          rank: score(name) >= 0 ? score(name) : 100 + best,
+          run: () => {
+            if (/\[|e\.g\.|on\|off/.test(desc)) {
+              elements.prompt.value = `${name} `;
+              elements.prompt.focus();
+              autoSizeComposer();
+              updateSendEnabled();
+            } else {
+              runDirective(name);
+            }
+          },
+        });
+      }
+    });
+
+    const actions = [
+      ["Toggle terminal transcript", "view the raw backend output", "▤",
+        () => toggleTerminal()],
+      ["Open sessions", "browse saved conversations", "☰",
+        () => toggleSessions(true)],
+      ["New session", "start a fresh conversation", "＋",
+        () => createNewSession()],
+      ["Clear conversation", "empty the on-screen session log", "⌫",
+        () => elements.clearMessages.click()],
+      ["Show vitals", "session metrics and activity charts", "◈",
+        () => selectTab("vitals")],
+      ["Show alerts", "warnings and faults this session", "⚠",
+        () => selectTab("logs")],
+    ];
+    actions.forEach(([name, hint, icon, run]) => {
+      if (!needle || score(name) >= 0 || score(hint) >= 0) {
+        items.push({ group: "ACTIONS", icon, name, hint, rank: score(name), run });
+      }
+    });
+
+    cachedSessions.slice(0, 8).forEach((session) => {
+      const title = session.title || "New Session";
+      if (!needle || score(title) >= 0) {
+        items.push({
+          group: "SESSIONS",
+          icon: "◷",
+          name: title,
+          hint: `${session.message_count || 0} messages`,
+          rank: score(title),
+          run: () => loadSession(session.id),
+        });
+      }
+    });
+
+    return items.sort((a, b) => {
+      // Primary: group order keeps COMMANDS before ACTIONS before SESSIONS.
+      const groupOrder = { COMMANDS: 0, ACTIONS: 1, SESSIONS: 2 };
+      const gd = (groupOrder[a.group] ?? 3) - (groupOrder[b.group] ?? 3);
+      if (gd !== 0) return gd;
+      // Secondary: substring position (closer to start = better match).
+      const ra = a.rank < 0 ? 999 : a.rank;
+      const rb = b.rank < 0 ? 999 : b.rank;
+      return ra - rb;
+    });
+  }
+
+  function renderPalette() {
+    const container = elements.paletteResults;
+    container.innerHTML = "";
+    if (!paletteItems.length) {
+      const empty = document.createElement("p");
+      empty.className = "palette-empty";
+      empty.textContent = "No matches.";
+      container.append(empty);
+      return;
+    }
+    let group = "";
+    paletteItems.forEach((item, index) => {
+      if (item.group !== group) {
+        group = item.group;
+        const heading = document.createElement("p");
+        heading.className = "palette-group";
+        heading.textContent = group;
+        container.append(heading);
+      }
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "palette-item";
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", index === paletteIndex ? "true" : "false");
+      const icon = document.createElement("span");
+      icon.className = "palette-icon";
+      icon.textContent = item.icon;
+      const text = document.createElement("span");
+      text.className = "palette-text";
+      const name = document.createElement("span");
+      name.className = "palette-name";
+      name.textContent = item.name;
+      const hint = document.createElement("span");
+      hint.className = "palette-hint";
+      hint.textContent = item.hint;
+      text.append(name, hint);
+      button.append(icon, text);
+      button.addEventListener("click", () => {
+        togglePalette(false);
+        item.run();
+      });
+      button.addEventListener("mousemove", () => {
+        if (paletteIndex === index) return;
+        paletteIndex = index;
+        container.querySelectorAll(".palette-item").forEach((node, i) =>
+          node.setAttribute("aria-selected", i === index ? "true" : "false"));
+      });
+      container.append(button);
+    });
+  }
+
+  function movePalette(delta) {
+    if (!paletteItems.length) return;
+    paletteIndex = (paletteIndex + delta + paletteItems.length) % paletteItems.length;
+    const nodes = elements.paletteResults.querySelectorAll(".palette-item");
+    nodes.forEach((node, i) =>
+      node.setAttribute("aria-selected", i === paletteIndex ? "true" : "false"));
+    nodes[paletteIndex]?.scrollIntoView({ block: "nearest" });
+  }
+
+  function togglePalette(force) {
+    const open = force === undefined ? !paletteOpen() : Boolean(force);
+    elements.paletteBackdrop.hidden = !open;
+    if (open) {
+      elements.paletteInput.value = "";
+      paletteIndex = 0;
+      paletteItems = buildPaletteItems("");
+      renderPalette();
+      elements.paletteInput.focus();
+      fetchSessions();
+    } else if (!elements.prompt.disabled) {
+      elements.prompt.focus({ preventScroll: true });
+    }
+  }
+
+  elements.paletteToggle.addEventListener("click", () => togglePalette());
+  elements.paletteBackdrop.addEventListener("mousedown", (event) => {
+    if (event.target === elements.paletteBackdrop) togglePalette(false);
+  });
+  elements.paletteInput.addEventListener("input", () => {
+    paletteIndex = 0;
+    paletteItems = buildPaletteItems(elements.paletteInput.value);
+    renderPalette();
+  });
+  elements.paletteInput.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      movePalette(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      movePalette(-1);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const item = paletteItems[paletteIndex];
+      if (item) {
+        togglePalette(false);
+        item.run();
+      }
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      togglePalette(false);
+    }
+  });
+
+  /** Send a directive the user picked from a list rather than typed. */
+  function runDirective(text) {
+    if (!acceptingInput || !connected) {
+      toast("Jarvis is busy — try again in a moment.");
+      return;
+    }
+    elements.prompt.value = text;
+    autoSizeComposer();
+    submitDirective();
+  }
+
   function handleEvent(payload) {
-    switch (payload.event) {
-      case "session":
+    metrics.events += 1;
+    metrics.buckets[metrics.buckets.length - 1] += 1;
+    updateHud();
+    switch (payload.event) {      case "session":
         setConnected(Boolean(payload.alive), payload.alive ? "LINKED" : "OFFLINE");
         if (!payload.alive) {
           clearSpeechOverlay();
@@ -594,10 +1230,12 @@
         break;
       case "input":
         acceptingInput = false;
+        metrics.userMessages += 1;
         addMessage("user", payload.message, payload.timestamp);
         updateComposer();
         break;
       case "assistant":
+        metrics.assistantMessages += 1;
         addMessage("assistant", payload.message, payload.timestamp);
         break;
       case "activity":
@@ -621,6 +1259,14 @@
         break;
       default:
         break;
+    }
+    // Debounce vitals repaint: schedule at most one rAF per event burst so
+    // terminal floods (100+ events/sec) don't cause per-event canvas redraws.
+    if (activeTab === "vitals" && vitalsRafId === null) {
+      vitalsRafId = requestAnimationFrame(() => {
+        vitalsRafId = null;
+        renderVitals();
+      });
     }
   }
 
@@ -838,6 +1484,10 @@
       .querySelectorAll(".message, .history-trimmed")
       .forEach((message) => message.remove());
     elements.messageFollow.hidden = true;
+    // Reset the unseen-activity badge so it doesn't show stale count
+    // for messages that no longer exist in the stream.
+    unseenStream = 0;
+    setTabCount(elements.tabCountStream, 0);
     toast("Visible conversation cleared. Jarvis memory is unchanged.");
   });
 
@@ -962,11 +1612,31 @@
     }
   }
 
+  /** Reset all session-scoped metrics. Called on session load/new. */
+  function resetMetrics() {
+    metrics.events = 0;
+    metrics.userMessages = 0;
+    metrics.assistantMessages = 0;
+    metrics.steps = 0;
+    metrics.alerts = 0;
+    metrics.kinds.clear();
+    metrics.stateMs.clear();
+    metrics.ribbon.length = 0;
+    metrics.buckets.fill(0);
+    unseenStream = 0;
+    lastStateAt = Date.now();
+    setTabCount(elements.tabCountStream, 0);
+    setTabCount(elements.tabCountLogs, 0, true);
+    renderRibbon();
+    updateHud();
+  }
+
   async function loadSession(id) {
     try {
       const res = await api(`/api/sessions/load?id=${encodeURIComponent(id)}`);
       if (res.ok && res.session) {
         currentActiveSessionId = res.active_id;
+        resetMetrics();
         elements.messages.querySelectorAll(".message, .welcome-card").forEach(m => m.remove());
         const msgs = res.session.messages || [];
         if (msgs.length === 0) {
@@ -991,6 +1661,7 @@
       const res = await api("/api/sessions/new", {});
       if (res.ok) {
         currentActiveSessionId = res.active_id;
+        resetMetrics();
         elements.messages.querySelectorAll(".message").forEach(m => m.remove());
         elements.messages.appendChild(elements.welcome);
         await fetchSessions();
@@ -1040,7 +1711,9 @@
   document.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
-      if (!elements.prompt.disabled) elements.prompt.focus();
+      togglePalette();
+    } else if (event.key === "Escape" && paletteOpen()) {
+      togglePalette(false);
     } else if (event.key === "Escape" && elements.terminalDrawer.classList.contains("open")) {
       toggleTerminal(false);
     } else if (event.key === "Escape" && elements.sessionsDrawer.classList.contains("open")) {
@@ -1071,8 +1744,16 @@
     const minutes = Math.floor(seconds / 60);
     elements.sessionTimer.textContent =
       `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+    updateHud();
+    renderVitals();
   }, 1000);
   elements.clock.textContent = nowTime();
+
+  // Roll the sparkline window every 2s so it reads as events-over-time.
+  window.setInterval(() => {
+    metrics.buckets.push(0);
+    metrics.buckets.shift();
+  }, 2000);
 
   class EnergyCore {
     constructor(canvas) {
@@ -1120,22 +1801,22 @@
       this.links = [];
       this.sparks = [];
       this.profiles = {
-        // Blue family to match --accent-rgb in styles.css; success/warning/
-        // error keep their semantic colours.
-        booting:       { speed: 0.18, deform: 0.18, energy: 0.42, pulse: 0.38, color: [48, 150, 255] },
-        listening:     { speed: 0.25, deform: 0.3, energy: 0.94, pulse: 1.15, color: [72, 198, 255] },
-        working:       { speed: 0.54, deform: 0.5, energy: 0.79, pulse: 0.72, color: [67, 178, 255] },
-        planning:      { speed: 0.72, deform: 0.42, energy: 0.74, pulse: 0.82, color: [92, 170, 255] },
-        perceiving:    { speed: 0.42, deform: 0.23, energy: 0.72, pulse: 0.48, color: [83, 184, 255] },
-        thinking:      { speed: 1.05, deform: 0.82, energy: 1.0, pulse: 1.05, color: [56, 196, 255] },
-        acting:        { speed: 1.45, deform: 0.58, energy: 1.0, pulse: 1.4, color: [38, 224, 255] },
-        verifying:     { speed: 0.52, deform: 0.16, energy: 0.82, pulse: 0.56, color: [116, 206, 255] },
-        transcribing:  { speed: 0.63, deform: 0.68, energy: 0.78, pulse: 1.3, color: [86, 190, 255] },
-        responding:    { speed: 0.38, deform: 0.37, energy: 0.78, pulse: 0.96, color: [130, 214, 255] },
-        success:       { speed: 0.22, deform: 0.16, energy: 1.0, pulse: 1.55, color: [189, 246, 120] },
-        warning:       { speed: 0.58, deform: 0.7, energy: 0.84, pulse: 0.92, color: [255, 190, 60] },
-        error:         { speed: 0.3, deform: 0.88, energy: 0.68, pulse: 0.6, color: [255, 78, 69] },
-        offline:       { speed: 0.04, deform: 0.08, energy: 0.08, pulse: 0.1, color: [58, 96, 128] },
+        // Colors mirror the Grainient background palette (c1 highlight channel)
+        // so the blob and background always share the same hue family.
+        booting:       { speed: 0.18, deform: 0.18, energy: 0.42, pulse: 0.38, color: [28,  255, 255] },
+        listening:     { speed: 0.25, deform: 0.3,  energy: 0.94, pulse: 1.15, color: [0,   255, 221] },
+        perceiving:    { speed: 0.42, deform: 0.23, energy: 0.72, pulse: 0.48, color: [187,  68, 255] },
+        thinking:      { speed: 1.05, deform: 0.82, energy: 1.0,  pulse: 1.05, color: [124,  58, 255] },
+        planning:      { speed: 0.72, deform: 0.42, energy: 0.74, pulse: 0.82, color: [102,  34, 255] },
+        verifying:     { speed: 0.52, deform: 0.16, energy: 0.82, pulse: 0.56, color: [85,   68, 255] },
+        transcribing:  { speed: 0.63, deform: 0.68, energy: 0.78, pulse: 1.3,  color: [68,  170, 255] },
+        working:       { speed: 0.54, deform: 0.5,  energy: 0.79, pulse: 0.72, color: [0,   136, 255] },
+        acting:        { speed: 1.45, deform: 0.58, energy: 1.0,  pulse: 1.4,  color: [0,   153, 255] },
+        responding:    { speed: 0.38, deform: 0.37, energy: 0.78, pulse: 0.96, color: [85,  204, 255] },
+        success:       { speed: 0.22, deform: 0.16, energy: 1.0,  pulse: 1.55, color: [0,   255, 136] },
+        warning:       { speed: 0.58, deform: 0.7,  energy: 0.84, pulse: 0.92, color: [255, 170,   0] },
+        error:         { speed: 0.3,  deform: 0.88, energy: 0.68, pulse: 0.6,  color: [255,  51,   0] },
+        offline:       { speed: 0.04, deform: 0.08, energy: 0.08, pulse: 0.1,  color: [255,  34,   0] },
       };
       this.resizeObserver = new ResizeObserver(() => this.resize());
       this.resizeObserver.observe(canvas.parentElement);
@@ -1912,5 +2593,9 @@
   setState("booting");
   setConnected(false, "LINKING");
   updateComposer();
+  selectTab("stream");
+  renderCommands();
+  renderRibbon();
+  updateHud();
   connectEvents();
 })();

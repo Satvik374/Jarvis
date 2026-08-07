@@ -575,6 +575,8 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         "/index.html": ("index.html", "text/html; charset=utf-8"),
         "/styles.css": ("styles.css", "text/css; charset=utf-8"),
         "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+        "/aurora.js": ("aurora.js", "text/javascript; charset=utf-8"),
+        "/grainient.js": ("grainient.js", "text/javascript; charset=utf-8"),
         "/vendor/three.min.js": ("vendor/three.min.js", "text/javascript; charset=utf-8"),
     }
 

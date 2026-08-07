@@ -8,6 +8,19 @@ import unittest
 from pathlib import Path
 
 from jarvis import remote
+from jarvis.agent.loop import Agent
+from jarvis.config import Config
+
+
+class _ChatBrain:
+    """Captures the lightweight chat gate's prompt without using a model."""
+
+    def __init__(self) -> None:
+        self.system = ""
+
+    def complete(self, system, messages, image=None):
+        self.system = system
+        return '{"mode":"chat","reply":"Yes, the paired device is available."}'
 
 
 class RemoteCryptoTests(unittest.TestCase):
@@ -75,6 +88,56 @@ class LocalPairingStateTests(unittest.TestCase):
             self.assertEqual(loaded.received_sequence, 4)
             self.assertEqual(loaded.secret_bytes, b"s" * 32)
             self.assertTrue((Path(temp) / "pairings.json").exists())
+
+
+class ChatRemoteContextTests(unittest.TestCase):
+    def test_chat_gate_receives_trusted_device_context(self):
+        """Status questions must not get a stale local-only answer."""
+        with tempfile.TemporaryDirectory() as temp:
+            cfg = Config()
+            cfg.data.collect_trajectories = False
+            cfg.data.trajectory_dir = temp
+            cfg.remote.state_dir = temp
+            remote.PairingStore(temp).save(remote.Pairing(
+                label="Office PC", endpoint="https://relay.example", pair_id="pair-chat",
+                role="controller", peer_name="Office PC", local_name="Laptop",
+                secret=remote._b64(b"s" * 32), sign_private="private", peer_sign_public="public",
+                trusted=True,
+            ))
+            brain = _ChatBrain()
+            reply = Agent(brain, cfg)._maybe_chat("Can you control my second computer?")
+
+        self.assertEqual(reply, "Yes, the paired device is available.")
+        self.assertIn("Trusted remote devices: Office PC", brain.system)
+
+
+class RemoteConfirmationTests(unittest.TestCase):
+    def test_default_remote_policy_runs_automatically(self):
+        cfg = Config()
+        cfg.safety.confirm_each_action = True
+
+        unattended = remote._configure_remote_confirmation(cfg, allow_unattended=False)
+
+        self.assertTrue(unattended)
+        self.assertFalse(cfg.safety.confirm_each_action)
+
+    def test_confirmation_can_be_enabled_per_target_device(self):
+        cfg = Config()
+        cfg.remote.require_confirmation = True
+
+        unattended = remote._configure_remote_confirmation(cfg, allow_unattended=False)
+
+        self.assertFalse(unattended)
+        self.assertTrue(cfg.safety.confirm_each_action)
+
+    def test_launch_override_keeps_legacy_unattended_option_working(self):
+        cfg = Config()
+        cfg.remote.require_confirmation = True
+
+        unattended = remote._configure_remote_confirmation(cfg, allow_unattended=True)
+
+        self.assertTrue(unattended)
+        self.assertFalse(cfg.safety.confirm_each_action)
 
 
 try:

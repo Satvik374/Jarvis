@@ -31,6 +31,11 @@
       </div>
 
       <div class="topbar-actions">
+        <button class="icon-button palette-button" id="paletteToggle" type="button"
+                aria-label="Open command palette" title="Command palette (Ctrl+K)">
+          <span aria-hidden="true">⌘</span>
+          <kbd aria-hidden="true">CTRL K</kbd>
+        </button>
         <button class="icon-button" id="sessionsToggle" type="button"
                 aria-label="Open sessions sidebar" aria-expanded="false" title="Saved Sessions">
           <span class="sessions-glyph" aria-hidden="true">☰</span>
@@ -54,44 +59,148 @@
 
     <main class="workspace">
       <aside class="activity-panel hud-panel" aria-label="Live activity">
-        <div class="panel-heading">
-          <span class="eyebrow">PROCESS STREAM</span>
-          <span class="live-indicator"><i></i> LIVE</span>
+        <div class="panel-tabs" role="tablist" aria-label="Side panel views">
+          <button role="tab" id="tabBtnStream" type="button" class="panel-tab"
+                  aria-selected="true" aria-controls="tabStream" data-tab="stream">
+            <span>STREAM</span><i class="tab-count" id="tabCountStream">0</i>
+          </button>
+          <button role="tab" id="tabBtnVitals" type="button" class="panel-tab"
+                  aria-selected="false" aria-controls="tabVitals" data-tab="vitals" tabindex="-1">
+            <span>VITALS</span>
+          </button>
+          <button role="tab" id="tabBtnCmds" type="button" class="panel-tab"
+                  aria-selected="false" aria-controls="tabCmds" data-tab="cmds" tabindex="-1">
+            <span>CMDS</span>
+          </button>
+          <button role="tab" id="tabBtnLogs" type="button" class="panel-tab"
+                  aria-selected="false" aria-controls="tabLogs" data-tab="logs" tabindex="-1">
+            <span>LOGS</span><i class="tab-count" id="tabCountLogs">0</i>
+          </button>
+          <span class="tab-underline" aria-hidden="true"></span>
         </div>
 
-        <div class="activity-list" id="activityList" role="log"
-             aria-live="polite" aria-label="Live Jarvis activity" tabindex="0">
-          <div class="activity-empty">
-            <span class="mini-loader" aria-hidden="true"></span>
-            Establishing terminal uplink
-          </div>
-        </div>
-        <button class="follow-output activity-follow" id="activityFollow"
-                type="button" hidden>NEW ACTIVITY <span aria-hidden="true">↓</span></button>
+        <div class="tab-panels">
+          <!-- STREAM -->
+          <section class="tab-panel is-active" id="tabStream" role="tabpanel"
+                   aria-labelledby="tabBtnStream" tabindex="0">
+            <div class="panel-heading">
+              <span class="eyebrow">PROCESS STREAM</span>
+              <span class="live-indicator"><i></i> LIVE</span>
+            </div>
+            <div class="activity-list" id="activityList" role="log"
+                 aria-live="polite" aria-label="Live Jarvis activity" tabindex="0">
+              <div class="activity-empty">
+                <span class="mini-loader" aria-hidden="true"></span>
+                Establishing terminal uplink
+              </div>
+            </div>
+            <button class="follow-output activity-follow" id="activityFollow"
+                    type="button" hidden>NEW ACTIVITY <span aria-hidden="true">↓</span></button>
+          </section>
 
-        <div class="telemetry">
-          <div class="telemetry-heading">
-            <span>SYSTEM TELEMETRY</span>
-            <span id="clock">00:00:00</span>
-          </div>
-          <dl>
-            <div>
-              <dt>RUNTIME</dt>
-              <dd><i class="status-led"></i> LOCAL</dd>
+          <!-- VITALS -->
+          <section class="tab-panel" id="tabVitals" role="tabpanel"
+                   aria-labelledby="tabBtnVitals" tabindex="0" hidden>
+            <div class="panel-heading">
+              <span class="eyebrow">SESSION VITALS</span>
+              <span class="live-indicator"><i></i> LIVE</span>
             </div>
-            <div>
-              <dt>CONTROL</dt>
-              <dd>LOOPBACK</dd>
+            <div class="vitals-scroll">
+              <div class="stat-grid">
+                <div class="stat-cell">
+                  <span class="stat-label">UPTIME</span>
+                  <span class="stat-value" id="vitalUptime">00:00</span>
+                </div>
+                <div class="stat-cell">
+                  <span class="stat-label">EVENTS</span>
+                  <span class="stat-value" id="vitalEvents">0</span>
+                </div>
+                <div class="stat-cell">
+                  <span class="stat-label">EVT / MIN</span>
+                  <span class="stat-value" id="vitalRate">0</span>
+                </div>
+                <div class="stat-cell">
+                  <span class="stat-label">MESSAGES</span>
+                  <span class="stat-value" id="vitalMessages">0</span>
+                </div>
+              </div>
+
+              <div class="vital-block">
+                <div class="vital-block-head">
+                  <span>EVENT FLOW</span><span id="vitalPeak">peak 0</span>
+                </div>
+                <canvas id="vitalsSpark" class="vitals-spark" aria-hidden="true"></canvas>
+              </div>
+
+              <div class="vital-block">
+                <div class="vital-block-head">
+                  <span>ACTIVITY BY KIND</span><span id="vitalKindTotal">0</span>
+                </div>
+                <div class="bar-list" id="kindBars">
+                  <p class="vital-empty">No activity recorded yet.</p>
+                </div>
+              </div>
+
+              <div class="vital-block">
+                <div class="vital-block-head">
+                  <span>TIME IN STATE</span><span id="vitalStateTotal">00:00</span>
+                </div>
+                <div class="bar-list" id="stateBars">
+                  <p class="vital-empty">Waiting for the first state change.</p>
+                </div>
+              </div>
+
+              <div class="telemetry">
+                <div class="telemetry-heading">
+                  <span>SYSTEM TELEMETRY</span>
+                  <span id="clock">00:00:00</span>
+                </div>
+                <dl>
+                  <div>
+                    <dt>RUNTIME</dt>
+                    <dd><i class="status-led"></i> LOCAL</dd>
+                  </div>
+                  <div>
+                    <dt>CONTROL</dt>
+                    <dd>LOOPBACK</dd>
+                  </div>
+                  <div>
+                    <dt>CHANNEL</dt>
+                    <dd>TERMINAL</dd>
+                  </div>
+                  <div>
+                    <dt>SESSION</dt>
+                    <dd id="sessionTimer">00:00</dd>
+                  </div>
+                </dl>
+              </div>
             </div>
-            <div>
-              <dt>CHANNEL</dt>
-              <dd>TERMINAL</dd>
+          </section>
+
+          <!-- CMDS -->
+          <section class="tab-panel" id="tabCmds" role="tabpanel"
+                   aria-labelledby="tabBtnCmds" tabindex="0" hidden>
+            <div class="panel-heading">
+              <span class="eyebrow">COMMAND INDEX</span>
+              <span class="live-indicator"><i></i> 17</span>
             </div>
-            <div>
-              <dt>SESSION</dt>
-              <dd id="sessionTimer">00:00</dd>
+            <label class="sr-only" for="cmdFilter">Filter commands</label>
+            <input class="cmd-filter" id="cmdFilter" type="search"
+                   placeholder="Filter commands…" autocomplete="off" spellcheck="false">
+            <div class="cmd-list" id="cmdList" role="list"></div>
+          </section>
+
+          <!-- LOGS -->
+          <section class="tab-panel" id="tabLogs" role="tabpanel"
+                   aria-labelledby="tabBtnLogs" tabindex="0" hidden>
+            <div class="panel-heading">
+              <span class="eyebrow">ALERTS</span>
+              <button class="text-button" id="clearAlerts" type="button">CLEAR</button>
             </div>
-          </dl>
+            <div class="alert-list" id="alertList" role="log" aria-live="polite" tabindex="0">
+              <p class="vital-empty">No warnings or faults. All clear.</p>
+            </div>
+          </section>
         </div>
       </aside>
 
@@ -136,6 +245,33 @@
           <i></i>
           <span data-mode="acting">ACT</span>
         </div>
+
+        <div class="stage-hud stage-hud-tl" aria-hidden="true">
+          <div class="hud-chip">
+            <span class="hud-chip-label">EVENTS</span>
+            <span class="hud-chip-value" id="hudEvents">0</span>
+          </div>
+          <div class="hud-chip">
+            <span class="hud-chip-label">UPTIME</span>
+            <span class="hud-chip-value" id="hudUptime">00:00</span>
+          </div>
+        </div>
+
+        <div class="stage-hud stage-hud-tr" aria-hidden="true">
+          <div class="hud-chip">
+            <span class="hud-chip-label">STEPS</span>
+            <span class="hud-chip-value" id="hudSteps">0</span>
+          </div>
+          <div class="hud-chip hud-chip-alert">
+            <span class="hud-chip-label">ALERTS</span>
+            <span class="hud-chip-value" id="hudAlerts">0</span>
+          </div>
+        </div>
+
+        <div class="stage-ribbon" aria-hidden="true">
+          <span class="ribbon-label">STATE HISTORY</span>
+          <div class="ribbon-track" id="stateRibbon"></div>
+        </div>
       </section>
 
       <section class="dialogue-panel hud-panel" aria-label="Conversation">
@@ -155,11 +291,19 @@
             <h2>Your terminal.<br>Your Jarvis.</h2>
             <p>The same local agent is running underneath. This interface only
               gives its work a visual pulse.</p>
+            <div class="welcome-stats" aria-hidden="true">
+              <div><strong>17</strong><span>COMMANDS</span></div>
+              <div><strong>100%</strong><span>LOCAL</span></div>
+              <div><strong>0</strong><span>TELEMETRY</span></div>
+            </div>
             <div class="suggestions" aria-label="Suggested commands">
               <button type="button" data-suggestion="/help">Show commands</button>
               <button type="button" data-suggestion="/vision on">Enable vision</button>
               <button type="button" data-suggestion="/confirm on">Confirm actions</button>
+              <button type="button" data-suggestion="/memory">View memory</button>
+              <button type="button" data-suggestion="/config">Show config</button>
             </div>
+            <p class="welcome-hint">Press <kbd>Ctrl</kbd><kbd>K</kbd> for the command palette</p>
           </div>
         </div>
         <button class="follow-output message-follow" id="messageFollow"
@@ -231,8 +375,30 @@
 
   <div class="toast-region" id="toastRegion" aria-live="polite"></div>
 
+  <div class="palette-backdrop" id="paletteBackdrop" hidden>
+    <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+      <div class="palette-input-row">
+        <span class="palette-prompt" aria-hidden="true">&gt;</span>
+        <label class="sr-only" for="paletteInput">Search commands and sessions</label>
+        <input id="paletteInput" type="text" autocomplete="off" spellcheck="false"
+               placeholder="Search commands, sessions, actions…"
+               aria-controls="paletteResults" aria-expanded="true"
+               role="combobox" aria-autocomplete="list">
+        <kbd class="palette-esc" aria-hidden="true">ESC</kbd>
+      </div>
+      <div class="palette-results" id="paletteResults" role="listbox"
+           aria-label="Palette results"></div>
+      <div class="palette-footer" aria-hidden="true">
+        <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+        <span><kbd>↵</kbd> run</span>
+        <span><kbd>ESC</kbd> close</span>
+      </div>
+    </div>
+  </div>
+
 
   <script src="/vendor/three.min.js"></script>
+  <script src="/grainient.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -454,6 +454,27 @@ def install_event_bridge() -> None:
 
     console._read_input = lambda prompt: builtins.input(prompt)
 
+    # Slash-command output (/help, /config, /memory, etc.) goes to print() →
+    # stdout → "terminal" event, which only populates the terminal drawer.
+    # Wrap _command so its stdout is also emitted as an "assistant" event so
+    # the response appears in the browser chatbox.
+    _original_command = console._command
+
+    def _browser_command(cmd: str, cfg: Any) -> bool:
+        buf = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = buf
+        try:
+            result = _original_command(cmd, cfg)
+        finally:
+            sys.stdout = old_stdout
+        output = _ANSI_RE.sub("", buf.getvalue()).strip()
+        if output:
+            emit("assistant", message=output)
+        return result
+
+    console._command = _browser_command
+
 
 def main(argv: list[str] | None = None) -> int:
     install_event_bridge()

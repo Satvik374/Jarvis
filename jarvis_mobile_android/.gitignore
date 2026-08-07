@@ -1,0 +1,7 @@
+.gradle/
+.gradle-user/
+build/
+app/build/
+local.properties
+build-output.log
+build-error.log

@@ -124,9 +124,9 @@ command or read task contents.
 3. On the other computer run the displayed `--remote-accept <code>` command.
 4. Compare the fingerprint printed on both computers, then run the displayed
    `--remote-trust ...` command on **both**. Do not trust a mismatch.
-5. Start the recipient with `python run.py --remote-agent`. It asks for local
-   approval of every action by default. Use `--remote-allow-unattended` only on
-   a physically secured device you own and intend to control without someone at it.
+5. Start the recipient with `python run.py --remote-agent`. Trusted tasks run
+   automatically. Set `remote.require_confirmation: true` on that device if
+   you ever want to restore local approval for every action.
 6. Send a task with `python run.py --remote-send "Office PC" "open Notepad and type hello"`,
    or from the normal Jarvis console: `:remote send Office PC | open Notepad and type hello`.
 

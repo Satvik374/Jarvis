@@ -566,13 +566,24 @@ def send_task(cfg: "Config", label: str, task: str, *, timeout: int | None = Non
                    "awaiting a local confirmation, or still working.")
 
 
+def _configure_remote_confirmation(cfg: "Config", allow_unattended: bool) -> bool:
+    """Apply the target device's confirmation policy and return its mode."""
+    unattended = allow_unattended or not cfg.remote.require_confirmation
+    # Remote policy wins over the ordinary desktop preference: a target
+    # configured for unattended operation must not inherit a stray local
+    # ``safety.confirm_each_action: true`` and stop waiting for every click.
+    cfg.safety.confirm_each_action = not unattended
+    return unattended
+
+
 def run_remote_agent(cfg: "Config", *, allow_unattended: bool = False,
                      printer: Callable[[str], None] = print) -> int:
     """Run the opt-in remote agent on a paired device until Ctrl+C.
 
-    By default every action still requires a person at the remote computer to
-    approve it. ``--remote-allow-unattended`` is an explicit owner opt-in for
-    devices that are physically secured and intended for unattended control.
+    Trusted remote tasks run without local prompts by default. Set
+    ``remote.require_confirmation: true`` on a particular device to restore
+    per-action approval; ``--remote-allow-unattended`` still overrides that
+    setting for a single launch.
     """
     store = PairingStore(cfg.remote.state_dir)
     pairings = [p for p in store.list(role="agent") if p.trusted]
@@ -581,8 +592,7 @@ def run_remote_agent(cfg: "Config", *, allow_unattended: bool = False,
         if untrusted:
             raise RemoteSecurityError("pairing exists but is not trusted; compare and trust its fingerprint first")
         raise RemoteError("this device has no paired controller; accept a pairing code first")
-    if cfg.remote.require_confirmation and not allow_unattended:
-        cfg.safety.confirm_each_action = True
+    unattended = _configure_remote_confirmation(cfg, allow_unattended)
     from .agent.brain import BrainError, make_brain
     from .agent.loop import Agent
     from . import scheduler
@@ -590,7 +600,7 @@ def run_remote_agent(cfg: "Config", *, allow_unattended: bool = False,
         agent = Agent(make_brain(cfg.brain), cfg)
     except BrainError as exc:
         raise RemoteError(str(exc)) from exc
-    mode = "UNATTENDED" if allow_unattended else "local confirmation required"
+    mode = "UNATTENDED" if unattended else "local confirmation required"
     printer(f"Jarvis Remote agent online ({mode}); press Ctrl+C to stop.")
 
     def asker(question: str) -> str | None:

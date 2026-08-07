@@ -129,6 +129,25 @@ def _resolve_point(args: dict, obs: Observation, cfg=None,
                   "(preferred) or on-screen x,y")
 
 
+def _num(args: dict, key: str, default: float, lo: float, hi: float) -> float:
+    """Clamped numeric arg that tolerates what models actually emit.
+
+    A JSON ``null`` for an optional param, or a stray unit ("3s", "down"),
+    otherwise reaches ``int()``/``float()`` and raises - costing a whole step
+    to the loop's crash-recovery path and feeding the stuck-action guard.
+    """
+    raw = args.get(key)
+    if raw is None or isinstance(raw, bool):
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if val != val:                 # NaN survives float() and breaks min/max
+        return default
+    return max(lo, min(hi, val))
+
+
 def _target_desc(args: dict, obs: Observation, el_key: str = "element",
                  x_key: str = "x", y_key: str = "y") -> str:
     """Model-facing echo of a resolved target. Element clicks echo the label
@@ -156,7 +175,7 @@ def _h_click(args, obs, cfg):
     pt, err = _resolve_point(args, obs, cfg)
     if pt is None:
         return ActionResult(False, f"click failed: {err}")
-    count = max(1, min(10, int(args.get("count", 1))))
+    count = int(_num(args, "count", 1, 1, 10))
     mouse.click(*pt, clicks=count)
     return ActionResult(True, "left-clicked " + _target_desc(args, obs)
                         + (f" x{count}" if count > 1 else ""))
@@ -210,8 +229,8 @@ def _h_drag(args, obs, cfg):
 def _h_scroll(args, obs, cfg):
     # Clamp: dy*120 goes raw into mouse_event's C int dwData - a huge model
     # value overflows it the same way as bad coordinates.
-    dy = max(-50, min(50, int(args.get("dy", 3))))
-    dx = max(-50, min(50, int(args.get("dx", 0))))
+    dy = int(_num(args, "dy", 3, -50, 50))
+    dx = int(_num(args, "dx", 0, -50, 50))
     return ActionResult(True, mouse.scroll(dy, dx))
 
 
@@ -769,7 +788,7 @@ def _h_remote_task(args, obs, cfg):
 
 
 def _h_wait(args, obs, cfg):
-    secs = max(0.0, min(10.0, float(args.get("seconds", 1.0))))
+    secs = _num(args, "seconds", 1.0, 0.0, 10.0)
     time.sleep(secs)
     return ActionResult(True, f"waited {secs}s")
 

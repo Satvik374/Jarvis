@@ -260,6 +260,11 @@ class Agent:
 
         final_message = "All candidate plans failed to complete the task."
         successful_plan = None
+        # Only a VERIFIED success may be written to permanent memory. An
+        # inconclusive verdict (verifier disabled, call failed, unparseable)
+        # still reports the result to the user but must not be learned - that
+        # is exactly the false-positive reward verification exists to prevent.
+        rewardable = False
         last_failure = ""      # why the previous plan failed (feeds next attempt)
         abort_run = False      # ask/cancel/brain-error: stop everything
 
@@ -472,6 +477,7 @@ class Agent:
                     traj.outcome = "finish"
                     traj.summary = final_message
                     plan_succeeded = True
+                    rewardable = verdict is True
                     break
 
                 if result.needs_observe:
@@ -539,8 +545,8 @@ class Agent:
             # Refresh observation for the next plan start
             obs = self._perceive()
 
-        # Reward: persist the verified-successful plan so it's reused next time.
-        if successful_plan:
+        # Reward: persist the plan only when the verifier CONFIRMED it worked.
+        if successful_plan and rewardable:
             self._append_memory(task, successful_plan)
 
         # Remember the exchange (prompt + response only - no thoughts/plans).
@@ -856,6 +862,12 @@ class Agent:
         """
         if not self.cfg.brain.conversational:
             return None
+        # The conversational gate normally avoids loading task-only context,
+        # but it must know about paired devices.  Otherwise a question such as
+        # "can you control my Office PC?" can receive the outdated local-only
+        # answer before the normal task loop gets a chance to use remote_task.
+        from .. import remote
+        remote_note = remote.note(self.cfg)
         system = (
             "You are JARVIS - a warm, quick-witted personal assistant with the "
             "easy polish of a trusted aide and a dry sense of humour, who can "
@@ -873,6 +885,7 @@ class Agent:
             "Reply with ONE JSON object and nothing else:\n"
             '  {"mode":"chat","reply":"<friendly reply>","remember":"<optional fact to store forever>"}\n'
             '   or   {"mode":"task"}'
+            + remote_note
         )
         messages: list[dict] = []
         if chat_note:
@@ -914,7 +927,9 @@ class Agent:
         """Recent conversation, injected so Jarvis has continuity across tasks
         and sessions. Contains only what the user said and what Jarvis replied.
         """
-        pairs = self._load_chat()[-self.cfg.data.chat_history_turns:]
+        turns = max(0, int(self.cfg.data.chat_history_turns or 0))
+        # `[-0:]` is the whole list, so 0 turns must short-circuit to none.
+        pairs = self._load_chat()[-turns:] if turns else []
         lines = []
         for p in pairs:
             u, j = (p.get("user") or "").strip(), (p.get("jarvis") or "").strip()
