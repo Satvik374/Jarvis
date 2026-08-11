@@ -45,7 +45,7 @@ _SLASH_COMMANDS = (
     ("/wake", 'hands-free mode: say "Hey Jarvis" to command'),
     ("/cron", "list/add/remove scheduled jobs"),
     ("/connect", "Gmail/Discord/WhatsApp connector status and test"),
-    ("/remote", "list paired devices, trust one, or send it a task"),
+    ("/remote", "list, remove, trust, or send tasks to paired devices"),
     ("/mcp", "list/add/remove MCP servers (extra tool connectors)"),
     ("/startup", "on|off - launch Jarvis when Windows starts"),
     ("/confirm", "on|off - confirm each action"),

@@ -117,6 +117,19 @@ class TerminalBridgeInputTests(unittest.TestCase):
         bridge = self.bridge()
         self.assertFalse(bridge.request_interrupt()[0])
 
+    def test_remote_agent_shutdown_interrupts_the_waiting_loop(self):
+        bridge = TerminalBridge(token="test-token", interface_mode="remote-agent")
+        bridge.process = _FakeProcess()
+        ok, message = bridge.request_shutdown()
+        expected_signal = (
+            getattr(signal, "CTRL_BREAK_EVENT", signal.SIGINT)
+            if sys.platform == "win32"
+            else signal.SIGINT
+        )
+        self.assertTrue(ok)
+        self.assertIn("remote agent", message)
+        self.assertEqual(bridge.process.signal, expected_signal)
+
     def test_blank_confirmation_preserves_terminal_default_yes(self):
         bridge = self.bridge(mode="confirmation")
         self.assertTrue(bridge.submit("")[0])
@@ -547,6 +560,7 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertTrue(body["accepting_input"])
         self.assertFalse(body["speech"]["active"])
+        self.assertEqual(body["interface"]["mode"], "console")
 
     def test_static_assets_include_speech_spectrum_overlay(self):
         with self.request("/app.js") as response:
@@ -663,6 +677,26 @@ class BrowserHTTPTests(unittest.TestCase):
 
 
 class CLIRoutingTests(unittest.TestCase):
+    def test_remove_pair_command_routes_device_name(self):
+        cfg = Config()
+        with (
+            patch.object(run, "load_config", return_value=cfg),
+            patch("jarvis.remote.remove_pairing", return_value="removed") as remove,
+        ):
+            result = run.main(["--remove", "pair", "Mobile"])
+        self.assertEqual(result, 0)
+        remove.assert_called_once_with(cfg, "Mobile")
+
+    def test_list_devices_command_uses_detailed_remote_listing(self):
+        cfg = Config()
+        with (
+            patch.object(run, "load_config", return_value=cfg),
+            patch("jarvis.remote.devices_text", return_value="devices") as listing,
+        ):
+            result = run.main(["--list-devices"])
+        self.assertEqual(result, 0)
+        listing.assert_called_once_with(cfg)
+
     def test_browser_flag_forwards_overrides_and_initial_task(self):
         cfg = Config()
         with (
@@ -689,6 +723,31 @@ class CLIRoutingTests(unittest.TestCase):
                 "--steps", "9",
             ],
             initial_task="open notepad",
+        )
+
+    def test_remote_agent_and_browser_launch_the_dashboard_worker(self):
+        cfg = Config()
+        with (
+            patch.object(run, "load_config", return_value=cfg),
+            patch("jarvis.browser.run_browser", return_value=29) as browser,
+        ):
+            result = run.main([
+                "--browser",
+                "--remote-agent",
+                "--remote-url", "https://relay.example",
+                "--remote-allow-unattended",
+                "--vision",
+            ])
+        self.assertEqual(result, 29)
+        browser.assert_called_once_with(
+            child_args=[
+                "--remote-agent",
+                "--remote-url", "https://relay.example",
+                "--vision",
+                "--remote-allow-unattended",
+            ],
+            initial_task=None,
+            remote_agent=True,
         )
 
     def test_check_keeps_precedence_over_browser(self):

@@ -97,10 +97,14 @@ class TerminalBridge:
         child_args: list[str] | None = None,
         initial_task: str | None = None,
         token: str | None = None,
+        interface_mode: str = "console",
     ):
         self.child_args = list(child_args or [])
         self.initial_task = initial_task
         self.token = token or secrets.token_urlsafe(32)
+        self.interface_mode = (
+            "remote-agent" if interface_mode == "remote-agent" else "console"
+        )
         self.launch_cwd = Path.cwd()
         self.broker = EventBroker()
         self.process: subprocess.Popen[bytes] | None = None
@@ -162,7 +166,12 @@ class TerminalBridge:
             "session",
             alive=True,
             pid=self.process.pid,
-            message="Local terminal runtime started",
+            interface_mode=self.interface_mode,
+            message=(
+                "Remote agent runtime started"
+                if self.interface_mode == "remote-agent"
+                else "Local terminal runtime started"
+            ),
         )
         threading.Thread(
             target=self._read_stdout,
@@ -442,6 +451,27 @@ class TerminalBridge:
     def request_shutdown(self) -> tuple[bool, str]:
         if not self.alive:
             return True, "already stopped"
+        if self.interface_mode == "remote-agent":
+            # A remote agent normally waits inside a relay long-poll and has
+            # no command prompt at which to submit :quit.  Interrupting that
+            # opt-in loop is its graceful shutdown path.
+            process = self.process
+            assert process is not None
+            interrupt_signal = (
+                getattr(signal, "CTRL_BREAK_EVENT", signal.SIGINT)
+                if os.name == "nt"
+                else signal.SIGINT
+            )
+            try:
+                process.send_signal(interrupt_signal)
+            except (OSError, ValueError) as exc:
+                return False, f"could not stop remote agent: {exc}"
+            self.broker.publish(
+                "activity",
+                kind="warning",
+                message="Remote agent shutdown requested",
+            )
+            return True, "remote agent shutdown requested"
         with self._state_lock:
             self._shutdown_pending = True
         ok, message = self._advance_shutdown()
@@ -519,15 +549,56 @@ class TerminalBridge:
         self.broker.publish(
             "state",
             state="offline",
-            label="Terminal session ended",
+            label=(
+                "Remote agent session ended"
+                if self.interface_mode == "remote-agent"
+                else "Terminal session ended"
+            ),
         )
         self.broker.publish(
             "session",
             alive=False,
             exit_code=code,
-            message="Terminal runtime stopped",
+            interface_mode=self.interface_mode,
+            message=(
+                "Remote agent runtime stopped"
+                if self.interface_mode == "remote-agent"
+                else "Terminal runtime stopped"
+            ),
         )
         self.stopped.set()
+
+    def interface_snapshot(self) -> dict[str, Any]:
+        """Return display-safe metadata for the active browser surface."""
+        snapshot: dict[str, Any] = {
+            "mode": self.interface_mode,
+            "pairings": [],
+            "unattended": False,
+        }
+        if self.interface_mode != "remote-agent":
+            return snapshot
+        try:
+            from .config import load_config
+            from .remote import PairingStore
+
+            cfg = load_config()
+            snapshot["unattended"] = (
+                "--remote-allow-unattended" in self.child_args
+                or not cfg.remote.require_confirmation
+            )
+            for pairing in PairingStore(cfg.remote.state_dir).list(role="agent"):
+                endpoint = urlparse(pairing.endpoint)
+                snapshot["pairings"].append({
+                    "label": pairing.label,
+                    "peer_name": pairing.peer_name,
+                    "local_name": pairing.local_name,
+                    "trusted": pairing.trusted,
+                    "relay": endpoint.hostname or endpoint.netloc or "configured relay",
+                })
+        except Exception:
+            # Status metadata must never interfere with the encrypted worker.
+            pass
+        return snapshot
 
     def _cleanup_attachments(self) -> None:
         for path in self._attachments:
@@ -712,6 +783,12 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             if not self._require_api_access():
                 return
             bridge = self.server.bridge
+            interface = (
+                bridge.interface_snapshot()
+                if hasattr(bridge, "interface_snapshot")
+                else {"mode": getattr(bridge, "interface_mode", "console"),
+                      "pairings": [], "unattended": False}
+            )
             self._json(
                 HTTPStatus.OK,
                 {
@@ -722,6 +799,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                     "input_mode": bridge.input_mode,
                     "input_prompt": bridge.input_prompt,
                     "speech": bridge.speech_snapshot(),
+                    "interface": interface,
                 },
             )
             return
@@ -938,8 +1016,9 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
 def run_browser(
     child_args: list[str] | None = None,
     initial_task: str | None = None,
+    remote_agent: bool = False,
 ) -> int:
-    """Start the loopback UI, open it, and wait for the terminal REPL."""
+    """Start the loopback UI and its console or remote-agent worker."""
     if not all((STATIC_DIR / name).is_file()
                for name in ("index.html", "styles.css", "app.js")):
         print("Jarvis browser UI assets are missing.", file=sys.stderr)
@@ -950,6 +1029,7 @@ def run_browser(
         child_args=child_args,
         initial_task=initial_task,
         token=token,
+        interface_mode="remote-agent" if remote_agent else "console",
     )
     try:
         configured_port = int(os.getenv("JARVIS_BROWSER_PORT", "0") or 0)
@@ -982,7 +1062,8 @@ def run_browser(
     base_url = f"http://{HOST}:{port}/"
     browser_url = f"{base_url}#token={quote(token)}"
     print()
-    print("  JARVIS browser interface online")
+    label = "remote agent dashboard" if remote_agent else "browser interface"
+    print(f"  JARVIS {label} online")
     print(f"  {browser_url}")
     print("  Keep this terminal open. Press Ctrl+C here to end the session.")
     print()

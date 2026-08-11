@@ -1,10 +1,8 @@
 """Fixes for the top failure modes found in 189 real trajectories:
 
-  * stuck_loop (20% of runs): RESULT echoed translated screen pixels, the
+  * coordinate feedback loops: RESULT echoed translated screen pixels, the
     model copied them back, and values <=1000 were re-read as Gemini-normalized
     -> the same intended click landed elsewhere. Echoes are now model-space.
-  * loop-detector evasion: jiggled coordinates ((300,655) -> (250,655)) never
-    matched the exact-args signature. Coordinates are now bucketed (200px).
   * unhelpful click failures: stale element ids and corrupted coordinates now
     get distinct, actionable error messages.
   * brain error kills run (11%): 429/network errors now retry with a real
@@ -15,7 +13,6 @@ import unittest
 from unittest.mock import Mock, patch
 
 from jarvis.agent.brain import complete_with_retry
-from jarvis.agent.loop import _sig_args
 from jarvis.config import Config
 from jarvis.perception.elements import Element, Observation
 from jarvis.tools.registry import _norm_to_pixels, _resolve_point, _target_desc
@@ -106,21 +103,6 @@ class TargetDescTests(unittest.TestCase):
         # pixels. Echoing 1609/842 poisons the model's coordinate space.
         desc = _target_desc({"x": 838, "y": 780}, _obs())
         self.assertEqual(desc, "(838,780)")
-
-
-class SigArgsTests(unittest.TestCase):
-    def test_jiggled_coords_share_a_bucket(self):
-        # real stuck-loop jiggle: (300,655) -> (250,655) -> (300,655)
-        self.assertEqual(_sig_args({"x": 300, "y": 655}),
-                         _sig_args({"x": 250, "y": 655}))
-
-    def test_distant_coords_differ(self):
-        self.assertNotEqual(_sig_args({"x": 100, "y": 100}),
-                            _sig_args({"x": 900, "y": 900}))
-
-    def test_non_coord_args_untouched(self):
-        self.assertEqual(_sig_args({"text": "hi", "element": 5}),
-                         {"text": "hi", "element": 5})
 
 
 class RetryBudgetTests(unittest.TestCase):

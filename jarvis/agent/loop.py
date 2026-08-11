@@ -303,11 +303,14 @@ class Agent:
             plan_succeeded = False
             off_script = 0     # consecutive non-action replies from the model
             last_changed = True    # did the previous action change the screen?
-            from collections import deque
-            recent_sigs: deque = deque(maxlen=8)   # loop detection window
+            remote_image = None   # authenticated image returned by a paired device
 
             for step_i in range(1, self.cfg.safety.max_steps + 1):
-                image = self._maybe_image(obs, step_i)
+                local_image = self._maybe_image(obs, step_i)
+                # Once a remote device returns a screenshot, keep that image in
+                # view instead of the unrelated controller desktop. This avoids
+                # grounding a mobile decision against the wrong screen.
+                image = remote_image if remote_image is not None else local_image
                 if user_image is not None:
                     image = [user_image] + ([image] if image is not None else [])
                 messages_for_turn = self._with_observation(messages, obs)
@@ -357,46 +360,6 @@ class Agent:
                     continue
                 off_script = 0
 
-                # Loop detection over a sliding window: catches both the same
-                # action repeated back-to-back AND two actions alternating
-                # A-B-A-B (e.g. clicking a stale element, focus jumps to
-                # another app, clicking back - forever). Block the 3rd
-                # occurrence of the same action within the window with
-                # corrective feedback; abandon the plan on the 5th.
-                sig = (decision.action,
-                       json.dumps(_sig_args(decision.args), sort_keys=True,
-                                  default=str))
-                repeat_count = recent_sigs.count(sig)
-                recent_sigs.append(sig)
-                # Scrolling through a long list repeats the SAME scroll on
-                # purpose; while each scroll still reveals new content it is
-                # progress, not a stuck loop. Only once a scroll stops changing
-                # the screen (bottom reached) does the stuck-guard apply.
-                progressing_scroll = decision.action == "scroll" and last_changed
-                if (repeat_count >= 2 and not progressing_scroll
-                        and decision.action not in {"finish", "ask", "wait", "observe"}):
-                    if repeat_count >= 4:
-                        log.warn("stuck repeating the same action; abandoning this plan.")
-                        traj.outcome = "stuck_loop"
-                        last_failure = (f"it kept repeating {decision.action} with the "
-                                        f"same arguments without progress")
-                        break
-                    log.warn("repeated action blocked; nudging the model to try "
-                             "something different.")
-                    messages.append({"role": "assistant",
-                                     "content": format_decision(decision.thought,
-                                                                decision.action,
-                                                                decision.args)})
-                    messages.append({"role": "user", "content":
-                                     "RESULT: BLOCKED - you keep coming back to this exact "
-                                     "action and it is not making progress (possibly the "
-                                     "element's coordinates are wrong or focus keeps "
-                                     "jumping to another window). Do something DIFFERENT: "
-                                     "focus_window the app you need first, press a key, "
-                                     "scroll, pick another element, or use open_url for "
-                                     "websites."})
-                    continue
-
                 if not self._confirm(decision):
                     final_message = "Cancelled by user."
                     traj.outcome = "cancelled"
@@ -423,6 +386,17 @@ class Agent:
                         False, f"the {decision.action} action crashed with an "
                                f"internal error: {exc}. Try a different "
                                f"approach or different arguments.")
+                if result.clear_image:
+                    remote_image = None
+                if result.image_path:
+                    loaded_remote_image = _find_image(f'"{result.image_path}"')
+                    if loaded_remote_image is not None and self.cfg.brain.use_vision:
+                        remote_image = loaded_remote_image
+                        result.message += (
+                            " The authenticated image on the next turn is the REMOTE DEVICE "
+                            "screen; ignore the local desktop observation when interpreting it "
+                            "and continue through remote_task only."
+                        )
                 log.act(f"{decision.action}({_fmt_args(decision.args)}) -> {result.message}")
 
                 traj.add(Step(
@@ -1025,23 +999,6 @@ class Agent:
         except EOFError:
             return True
         return ans in {"", "y", "yes"}
-
-
-_COORD_KEYS = frozenset({"x", "y", "x1", "y1", "x2", "y2"})
-
-
-def _sig_args(args: dict) -> dict:
-    """Loop-detection signature: raw coordinates are bucketed to a 200px grid.
-    Stuck runs jiggle coordinates ((300,655) -> (250,655) -> (300,655)) and
-    evade exact-args matching, burning dozens of steps; nearby re-clicks must
-    count as the same repeated attempt."""
-    out = {}
-    for k, v in (args or {}).items():
-        if k in _COORD_KEYS and isinstance(v, (int, float)):
-            out[k] = int(v // 200)
-        else:
-            out[k] = v
-    return out
 
 
 def _is_failsafe(exc: BaseException) -> bool:

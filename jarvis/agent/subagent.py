@@ -116,7 +116,16 @@ def agents_note() -> str:
                 "fixes whole projects (also reachable via code_task)")
     return ("\n\n=== SUB-AGENTS (delegate with the 'agent' action) ===\n"
             + "\n".join(rows)
-            + "\n=====================================================")
+            + "\n\nDELEGATION POLICY:\n"
+              "  * Act as an orchestrator for difficult headless work: delegate "
+              "a bounded specialist task before doing deep research, long-form "
+              "writing/analysis, or complex software work yourself.\n"
+              "  * A sub-agent has an isolated context and cannot see this "
+              "conversation or use the desktop. Put every needed detail and the "
+              "expected deliverable in agent.task.\n"
+              "  * Keep desktop interaction, simple requests, and tasks needing "
+              "an immediate user answer in the main loop.\n"
+            + "=====================================================")
 
 
 def _contract(allowed: frozenset) -> str:

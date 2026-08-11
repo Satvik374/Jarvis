@@ -20,14 +20,14 @@
         </span>
         <span>
           <strong>JARVIS</strong>
-          <small>LOCAL INTELLIGENCE</small>
+          <small id="brandSubtitle">LOCAL INTELLIGENCE</small>
         </span>
       </a>
 
       <div class="topbar-center" aria-hidden="true">
-        <span>NEURAL LINK</span>
+        <span id="topbarPrimary">NEURAL LINK</span>
         <i></i>
-        <span>TERMINAL CORE</span>
+        <span id="topbarSecondary">TERMINAL CORE</span>
       </div>
 
       <div class="topbar-actions">
@@ -70,7 +70,7 @@
           </button>
           <button role="tab" id="tabBtnCmds" type="button" class="panel-tab"
                   aria-selected="false" aria-controls="tabCmds" data-tab="cmds" tabindex="-1">
-            <span>CMDS</span>
+            <span id="tabCmdsLabel">CMDS</span>
           </button>
           <button role="tab" id="tabBtnLogs" type="button" class="panel-tab"
                   aria-selected="false" aria-controls="tabLogs" data-tab="logs" tabindex="-1">
@@ -158,15 +158,15 @@
                 <dl>
                   <div>
                     <dt>RUNTIME</dt>
-                    <dd><i class="status-led"></i> LOCAL</dd>
+                    <dd id="telemetryRuntime"><i class="status-led"></i> LOCAL</dd>
                   </div>
                   <div>
                     <dt>CONTROL</dt>
-                    <dd>LOOPBACK</dd>
+                    <dd id="telemetryControl">LOOPBACK</dd>
                   </div>
                   <div>
                     <dt>CHANNEL</dt>
-                    <dd>TERMINAL</dd>
+                    <dd id="telemetryChannel">TERMINAL</dd>
                   </div>
                   <div>
                     <dt>SESSION</dt>
@@ -181,8 +181,8 @@
           <section class="tab-panel" id="tabCmds" role="tabpanel"
                    aria-labelledby="tabBtnCmds" tabindex="0" hidden>
             <div class="panel-heading">
-              <span class="eyebrow">COMMAND INDEX</span>
-              <span class="live-indicator"><i></i> 17</span>
+              <span class="eyebrow" id="cmdPanelEyebrow">COMMAND INDEX</span>
+              <span class="live-indicator"><i></i> <span id="cmdPanelCount">17</span></span>
             </div>
             <label class="sr-only" for="cmdFilter">Filter commands</label>
             <input class="cmd-filter" id="cmdFilter" type="search"
@@ -216,14 +216,14 @@
           <div class="corner corner-bl" aria-hidden="true"></div>
           <div class="corner corner-br" aria-hidden="true"></div>
           <div class="coordinate coordinate-top" aria-hidden="true">SYS.04 // ARC</div>
-          <div class="coordinate coordinate-bottom" aria-hidden="true">LOCAL NODE 127.0.0.1</div>
+          <div class="coordinate coordinate-bottom" id="nodeCoordinate" aria-hidden="true">LOCAL NODE 127.0.0.1</div>
 
           <canvas id="coreCanvas" aria-hidden="true"></canvas>
           <div id="fluidBlob" aria-hidden="true"></div>
 
           <div class="core-center-label" aria-hidden="true">
             <span class="core-mark">J</span>
-            <span class="core-caption">VOICE CORE</span>
+            <span class="core-caption" id="coreCaption">VOICE CORE</span>
           </div>
 
           <div class="state-readout" role="status" aria-live="polite" aria-atomic="true">
@@ -277,8 +277,8 @@
       <section class="dialogue-panel hud-panel" aria-label="Conversation">
         <div class="panel-heading dialogue-heading">
           <div>
-            <span class="eyebrow">DIRECTIVE CHANNEL</span>
-            <strong>SESSION LOG</strong>
+            <span class="eyebrow" id="dialogueEyebrow">DIRECTIVE CHANNEL</span>
+            <strong id="dialogueTitle">SESSION LOG</strong>
           </div>
           <button class="text-button" id="clearMessages" type="button">CLEAR</button>
         </div>
@@ -287,14 +287,14 @@
              aria-label="Conversation messages" tabindex="0">
           <div class="welcome-card" id="welcomeCard">
             <span class="welcome-symbol" aria-hidden="true">J</span>
-            <p class="eyebrow">INTERFACE READYING</p>
-            <h2>Your terminal.<br>Your Jarvis.</h2>
-            <p>The same local agent is running underneath. This interface only
+            <p class="eyebrow" id="welcomeEyebrow">INTERFACE READYING</p>
+            <h2 id="welcomeTitle">Your terminal.<br>Your Jarvis.</h2>
+            <p id="welcomeCopy">The same local agent is running underneath. This interface only
               gives its work a visual pulse.</p>
             <div class="welcome-stats" aria-hidden="true">
-              <div><strong>17</strong><span>COMMANDS</span></div>
-              <div><strong>100%</strong><span>LOCAL</span></div>
-              <div><strong>0</strong><span>TELEMETRY</span></div>
+              <div><strong id="welcomeStatOne">17</strong><span id="welcomeStatOneLabel">COMMANDS</span></div>
+              <div><strong id="welcomeStatTwo">100%</strong><span id="welcomeStatTwoLabel">LOCAL</span></div>
+              <div><strong id="welcomeStatThree">0</strong><span id="welcomeStatThreeLabel">TELEMETRY</span></div>
             </div>
             <div class="suggestions" aria-label="Suggested commands">
               <button type="button" data-suggestion="/help">Show commands</button>
@@ -316,7 +316,7 @@
         </div>
 
         <form class="composer" id="composer">
-          <label class="sr-only" for="promptInput">Send a directive to Jarvis</label>
+          <label class="sr-only" id="promptLabel" for="promptInput">Send a directive to Jarvis</label>
           <textarea id="promptInput" rows="1" maxlength="200000"
                     placeholder="Waiting for terminal link…" disabled></textarea>
           <div class="composer-tools">
@@ -337,9 +337,9 @@
     </main>
 
     <footer class="footer-bar" aria-hidden="true">
-      <span>JARVIS INTERFACE // V5</span>
+      <span id="footerPrimary">JARVIS INTERFACE // V5</span>
       <span class="footer-line"></span>
-      <span>PRIVATE · LOCAL · ACTIVE</span>
+      <span id="footerSecondary">PRIVATE · LOCAL · ACTIVE</span>
     </footer>
   </div>
 

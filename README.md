@@ -72,6 +72,7 @@ ollama pull ornith:9b
 ```bash
 python run.py                       # interactive console
 python run.py --browser             # animated browser UI, same terminal backend
+python run.py --remote-agent --browser  # remote-agent monitor in your browser
 python run.py "open notepad and type Hello, then save as hello.txt"
 python run.py --check               # verify environment + backend
 ```
@@ -94,6 +95,7 @@ Then, in a **new** terminal:
 ```bash
 jarvis                       # interactive console, from any directory
 jarvis --browser             # cyber UI in your default browser
+jarvis --remote-agent --browser  # encrypted remote-agent dashboard
 jarvis "open notepad and type Hello"
 jarvis --check               # verify environment + backend
 ```
@@ -127,8 +129,41 @@ command or read task contents.
 5. Start the recipient with `python run.py --remote-agent`. Trusted tasks run
    automatically. Set `remote.require_confirmation: true` on that device if
    you ever want to restore local approval for every action.
+   Add `--browser` to open the local remote-agent dashboard, where you can
+   monitor trusted controllers, incoming tasks, results, relay warnings, and
+   answer any local confirmation or follow-up prompts.
 6. Send a task with `python run.py --remote-send "Office PC" "open Notepad and type hello"`,
    or from the normal Jarvis console: `:remote send Office PC | open Notepad and type hello`.
+
+List every local pairing with its ID and names:
+
+```powershell
+python run.py --list-devices
+# or, after adding bin/ to PATH:
+jarvis --list-devices
+```
+
+Remove a stale local pairing by its device name (quote names containing spaces)
+or by the ID shown above:
+
+```powershell
+python run.py --remove pair "My Phone"
+python run.py --remove-pair pair-id-from-list
+```
+
+Inside the interactive console, use `:remote list` and
+`:remote remove My Phone` for the same operations.
+
+For an Android phone, install the companion APK and follow
+[`jarvis_mobile_android/README.md`](jarvis_mobile_android/README.md). The mobile
+agent reports its exact supported commands, so Jarvis does not invent desktop
+tools for the phone. In addition to opening apps/URLs and accessibility-driven
+touch/text actions, Android 11+ supports `mobile: screenshot`; the small signed,
+encrypted preview is saved locally and attached to Jarvis's next vision turn.
+The same response carries a numbered Accessibility element menu with native
+bounds. Jarvis uses `tap element <id>`, `type element <id> <text>`, and bounded
+scroll/swipe commands instead of estimating pixels from the compressed image;
+element IDs are invalidated after each action so the next step uses fresh state.
 
 `--remote-status` lists the local pairings. The remote relay uses long polling,
 so neither device needs an open inbound port or a public IP. Render's free web

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import base64
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 from jarvis import remote
 from jarvis.agent.loop import Agent
 from jarvis.config import Config
+from jarvis.tools import registry
 
 
 class _ChatBrain:
@@ -80,14 +82,118 @@ class LocalPairingStateTests(unittest.TestCase):
                 label="Office PC", endpoint="https://relay.example", pair_id="pair-state",
                 role="controller", peer_name="Office PC", local_name="Laptop",
                 secret=remote._b64(b"s" * 32), sign_private="private", peer_sign_public="public",
-                trusted=True, received_sequence=4,
+                trusted=True, received_sequence=4, peer_kind="android",
+                peer_capabilities=["open <app or URL>", "screenshot"],
+                peer_status={"accessibility_ready": True},
             )
             store.save(pair)
             loaded = store.get("office pc", role="controller")
             self.assertTrue(loaded.trusted)
             self.assertEqual(loaded.received_sequence, 4)
             self.assertEqual(loaded.secret_bytes, b"s" * 32)
+            self.assertEqual(loaded.peer_kind, "android")
+            self.assertIn("screenshot", loaded.peer_capabilities)
+            self.assertTrue(loaded.peer_status["accessibility_ready"])
             self.assertTrue((Path(temp) / "pairings.json").exists())
+
+    def test_authenticated_mobile_screenshot_is_saved_and_returned(self):
+        # Valid 1x1 PNG; the transport intentionally caps remote image bytes.
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+            "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            store = remote.PairingStore(temp)
+            pair = remote.Pairing(
+                label="Mobile", endpoint="https://relay.example", pair_id="pair-mobile",
+                role="controller", peer_name="Pixel", local_name="Laptop",
+                secret=remote._b64(b"s" * 32), sign_private="private",
+                peer_sign_public="public", trusted=True,
+            )
+            ok, message, image_path = remote._task_response(store, pair, "task-shot", {
+                "type": "task_result", "task_id": "task-shot", "ok": True,
+                "result": "Captured.", "device_kind": "android",
+                "capabilities": ["screenshot", "open <app or URL>"],
+                "device_status": {"accessibility_ready": True, "screenshot_ready": True},
+                "attachment": {"mime_type": "image/png", "width": 1080, "height": 2400,
+                               "data": remote._b64(png)},
+            })
+
+            self.assertTrue(ok)
+            self.assertIsNotNone(image_path)
+            self.assertTrue(Path(image_path).is_file())
+            self.assertEqual(Path(image_path).read_bytes(), png)
+            self.assertIn("mobile screenshot (1080x2400) saved", message)
+            self.assertEqual(pair.peer_kind, "android")
+            self.assertTrue(pair.peer_status["screenshot_ready"])
+
+    def test_oversized_remote_screenshot_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = remote.PairingStore(temp)
+            pair = remote.Pairing(
+                label="Mobile", endpoint="https://relay.example", pair_id="pair-mobile",
+                role="controller", peer_name="Pixel", local_name="Laptop",
+                secret=remote._b64(b"s" * 32), sign_private="private",
+                peer_sign_public="public", trusted=True,
+            )
+            ok, message, image_path = remote._task_response(store, pair, "task-shot", {
+                "ok": True, "result": "Captured.",
+                "attachment": {"mime_type": "image/jpeg",
+                               "data": remote._b64(b"\xff\xd8\xff" + b"x" * remote.MAX_REMOTE_IMAGE_BYTES)},
+            })
+
+            self.assertFalse(ok)
+            self.assertIsNone(image_path)
+            self.assertIn("exceeds", message)
+
+    def test_store_removes_pairing_by_name_or_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = remote.PairingStore(temp)
+            for label, pair_id in (("Mobile", "pair-mobile"), ("Office PC", "pair-office")):
+                store.save(remote.Pairing(
+                    label=label, endpoint="https://relay.example", pair_id=pair_id,
+                    role="controller", peer_name=label, local_name="Laptop",
+                    secret=remote._b64(b"s" * 32), sign_private="private",
+                    peer_sign_public="public", trusted=True,
+                ))
+
+            removed = store.remove("mobile")
+            self.assertEqual([pair.pair_id for pair in removed], ["pair-mobile"])
+            self.assertEqual([pair.label for pair in store.list()], ["Office PC"])
+            self.assertEqual(store.remove("pair-office")[0].label, "Office PC")
+            self.assertEqual(store.list(), [])
+
+    def test_device_list_includes_pairing_id_name_role_and_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cfg = Config()
+            cfg.remote.state_dir = temp
+            remote.PairingStore(temp).save(remote.Pairing(
+                label="Mobile", endpoint="https://relay.example", pair_id="pair-mobile-123",
+                role="controller", peer_name="Pixel 8", local_name="Laptop",
+                secret=remote._b64(b"s" * 32), sign_private="private",
+                peer_sign_public="public", trusted=True,
+            ))
+
+            output = remote.devices_text(cfg)
+            self.assertIn("id: pair-mobile-123", output)
+            self.assertIn("name: Mobile", output)
+            self.assertIn("local: Laptop | peer: Pixel 8", output)
+            self.assertIn("role: controller | state: trusted", output)
+
+    def test_console_remove_deletes_local_pairing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cfg = Config()
+            cfg.remote.state_dir = temp
+            remote.PairingStore(temp).save(remote.Pairing(
+                label="My Phone", endpoint="https://relay.example", pair_id="pair-phone",
+                role="controller", peer_name="Pixel", local_name="Laptop",
+                secret=remote._b64(b"s" * 32), sign_private="private",
+                peer_sign_public="public", trusted=True,
+            ))
+
+            output = remote.console_command(":remote remove My Phone", cfg)
+            self.assertIn("Removed local pairing", output)
+            self.assertEqual(remote.PairingStore(temp).list(), [])
 
 
 class ChatRemoteContextTests(unittest.TestCase):
@@ -109,6 +215,28 @@ class ChatRemoteContextTests(unittest.TestCase):
 
         self.assertEqual(reply, "Yes, the paired device is available.")
         self.assertIn("Trusted remote devices: Office PC", brain.system)
+
+    def test_android_context_lists_only_reported_mobile_commands(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cfg = Config()
+            cfg.remote.state_dir = temp
+            remote.PairingStore(temp).save(remote.Pairing(
+                label="Mobile", endpoint="https://relay.example", pair_id="pair-chat-mobile",
+                role="controller", peer_name="Pixel", local_name="Laptop",
+                secret=remote._b64(b"s" * 32), sign_private="private",
+                peer_sign_public="public", trusted=True, peer_kind="android",
+                peer_capabilities=["open <app or URL>", "screenshot", "capabilities"],
+                peer_status={"accessibility_ready": True, "screenshot_ready": True},
+            ))
+
+            context = remote.note(cfg)
+
+        self.assertIn("Mobile: Android", context)
+        self.assertIn("Supported commands: open <app or URL>, screenshot, capabilities", context)
+        self.assertIn("never invent a remote tool", context.lower())
+        self.assertIn("ALWAYS act with that element ID", context)
+        self.assertIn("never estimate coordinates", context)
+        self.assertIn("IDs expire after any screen-changing action", context)
 
 
 class RemoteConfirmationTests(unittest.TestCase):
@@ -139,6 +267,31 @@ class RemoteConfirmationTests(unittest.TestCase):
         self.assertTrue(unattended)
         self.assertFalse(cfg.safety.confirm_each_action)
 
+
+class RemoteActionImageTests(unittest.TestCase):
+    def test_remote_action_without_new_screenshot_invalidates_old_image(self):
+        from unittest.mock import patch
+        cfg = Config()
+        with patch("jarvis.remote.send_task",
+                   return_value=(True, "Mobile: clicked element 7", None)):
+            result = registry._h_remote_task(
+                {"device": "Mobile", "task": "tap element 7"}, None, cfg)
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.clear_image)
+        self.assertIsNone(result.image_path)
+
+    def test_remote_screenshot_replaces_instead_of_clearing_image(self):
+        from unittest.mock import patch
+        cfg = Config()
+        cfg.brain.use_vision = True
+        with patch("jarvis.remote.send_task",
+                   return_value=(True, "Mobile: captured", "C:/tmp/mobile.jpg")):
+            result = registry._h_remote_task(
+                {"device": "Mobile", "task": "screenshot"}, None, cfg)
+
+        self.assertFalse(result.clear_image)
+        self.assertEqual(result.image_path, "C:/tmp/mobile.jpg")
 
 try:
     import fastapi  # noqa: F401 - relay-only dependency

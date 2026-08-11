@@ -496,6 +496,50 @@ def main(argv: list[str] | None = None) -> int:
     browser_argv = list(sys.argv[1:] if argv is None else argv)
     browser_argv = [value for value in browser_argv if value != "--voice"]
 
+    if "--remote-agent" in browser_argv:
+        # Add a structured observer to the normal encrypted remote loop.  The
+        # worker remains the authority; the page receives display-only state
+        # and can answer only the same confirmation/question prompts exposed
+        # by the terminal implementation.
+        from jarvis import remote
+
+        original_remote_agent = remote.run_remote_agent
+
+        def browser_remote_agent(
+            cfg: Any,
+            *,
+            allow_unattended: bool = False,
+            printer: Callable[[str], None] = print,
+            event_sink: Callable[[str, dict[str, Any]], None] | None = None,
+        ) -> int:
+            del printer, event_sink
+
+            def dashboard_event(status: str, payload: dict[str, Any]) -> None:
+                emit("remote", status=status, **payload)
+                if status in {"ready", "idle"}:
+                    emit("state", state="listening", label="Awaiting encrypted directives")
+                elif status in {"task_received", "task_started"}:
+                    emit("state", state="working", label="Executing remote directive")
+                elif status == "task_result":
+                    emit(
+                        "state",
+                        state="success" if payload.get("ok") else "warning",
+                        label="Remote directive complete" if payload.get("ok") else "Remote directive ended",
+                    )
+                elif status == "task_error":
+                    emit("state", state="warning", label=str(payload.get("message", "Remote task issue"))[:120])
+                elif status == "stopped":
+                    emit("state", state="offline", label="Remote agent stopped")
+
+            return original_remote_agent(
+                cfg,
+                allow_unattended=allow_unattended,
+                printer=print,
+                event_sink=dashboard_event,
+            )
+
+        remote.run_remote_agent = browser_remote_agent
+
     try:
         return run.main(browser_argv)
     except KeyboardInterrupt:

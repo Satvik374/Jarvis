@@ -2062,6 +2062,178 @@ html[data-state="planning"] .composer-line::after {
   }
 }
 
+/* ============================================================
+   REMOTE AGENT MODE
+   The same loopback shell becomes a read-mostly encrypted task monitor.
+   ============================================================ */
+
+html[data-interface="remote-agent"] {
+  --panel: rgba(3, 17, 23, 0.8);
+  --panel-strong: rgba(3, 20, 27, 0.96);
+  --line: rgba(0, 255, 209, 0.17);
+  --line-strong: rgba(95, 255, 226, 0.42);
+}
+
+html[data-interface="remote-agent"] body {
+  background:
+    radial-gradient(circle at 48% 43%, rgba(var(--accent-rgb), 0.09), transparent 29rem),
+    radial-gradient(circle at 88% 4%, rgba(0, 255, 209, 0.07), transparent 30rem),
+    linear-gradient(135deg, rgba(0, 80, 95, 0.05), transparent 42%),
+    #02080d;
+}
+
+html[data-interface="remote-agent"] #paletteToggle,
+html[data-interface="remote-agent"] #sessionsToggle,
+html[data-interface="remote-agent"] .attach-button {
+  display: none;
+}
+
+html[data-interface="remote-agent"] .brand-mark {
+  filter: drop-shadow(0 0 9px rgba(var(--accent-rgb), 0.5));
+}
+
+html[data-interface="remote-agent"] .core-frame::after {
+  content: "END-TO-END ENCRYPTED";
+  position: absolute;
+  top: 17px;
+  left: 50%;
+  z-index: 4;
+  padding: 5px 10px;
+  color: var(--accent-bright);
+  border: 1px solid rgba(var(--accent-rgb), 0.22);
+  background: rgba(1, 10, 16, 0.68);
+  font: 650 7px/1 var(--mono);
+  letter-spacing: 0.2em;
+  transform: translateX(-50%);
+}
+
+html[data-interface="remote-agent"] .composer-tools {
+  justify-content: flex-end;
+}
+
+html[data-interface="remote-agent"] .welcome-card {
+  border-color: rgba(var(--accent-rgb), 0.24);
+  background:
+    linear-gradient(145deg, rgba(var(--accent-rgb), 0.07), transparent 52%),
+    rgba(3, 13, 20, 0.72);
+}
+
+html[data-interface="remote-agent"] .welcome-symbol {
+  color: rgba(var(--accent-rgb), 0.22);
+}
+
+.remote-link-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 8px 10px;
+  padding: 11px 11px 12px;
+  overflow: hidden;
+  border: 1px solid rgba(var(--accent-rgb), 0.18);
+  border-left: 2px solid var(--accent);
+  background:
+    linear-gradient(115deg, rgba(var(--accent-rgb), 0.075), transparent 72%),
+    rgba(0, 0, 0, 0.22);
+}
+
+.remote-link-card::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 28px;
+  height: 1px;
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.7);
+}
+
+.remote-link-card.needs-trust {
+  border-left-color: #ffaa00;
+  background: rgba(255, 170, 0, 0.045);
+}
+
+.remote-link-card > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.remote-link-card strong {
+  overflow: hidden;
+  color: var(--text);
+  font: 650 9px/1.2 var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-link-card > div > span {
+  padding: 3px 5px;
+  color: var(--success);
+  border: 1px solid rgba(200, 255, 139, 0.22);
+  font: 700 6px/1 var(--mono);
+  letter-spacing: 0.11em;
+}
+
+.remote-link-card.needs-trust > div > span {
+  color: #ffcf69;
+  border-color: rgba(255, 170, 0, 0.28);
+}
+
+.remote-link-signal {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 9px rgba(200, 255, 139, 0.7);
+}
+
+.needs-trust .remote-link-signal {
+  background: #ffaa00;
+  box-shadow: 0 0 9px rgba(255, 170, 0, 0.55);
+}
+
+.remote-link-card p,
+.remote-link-card small {
+  margin: 0 0 0 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-link-card p {
+  color: var(--muted);
+  font: 500 8px/1.35 var(--body);
+}
+
+.remote-link-card small {
+  color: var(--dim);
+  font: 500 7px/1.2 var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.remote-links-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 12px 10px;
+  padding: 14px 12px;
+  border: 1px dashed rgba(var(--accent-rgb), 0.22);
+  background: rgba(var(--accent-rgb), 0.035);
+}
+
+.remote-links-empty strong {
+  color: var(--accent-bright);
+  font: 650 9px/1.2 var(--mono);
+  letter-spacing: 0.06em;
+}
+
+.remote-links-empty span {
+  color: var(--dim);
+  font: 500 8px/1.5 var(--body);
+}
+
 /* -------------------------------------------------------------------------- */
 /* SESSIONS DRAWER & CARDS                                                    */
 /* -------------------------------------------------------------------------- */

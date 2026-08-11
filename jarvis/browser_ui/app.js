@@ -39,6 +39,31 @@
     terminalToggle: $("#terminalToggle"),
     toastRegion: $("#toastRegion"),
     welcome: $("#welcomeCard"),
+    brandSubtitle: $("#brandSubtitle"),
+    topbarPrimary: $("#topbarPrimary"),
+    topbarSecondary: $("#topbarSecondary"),
+    tabCmdsLabel: $("#tabCmdsLabel"),
+    cmdPanelEyebrow: $("#cmdPanelEyebrow"),
+    cmdPanelCount: $("#cmdPanelCount"),
+    telemetryRuntime: $("#telemetryRuntime"),
+    telemetryControl: $("#telemetryControl"),
+    telemetryChannel: $("#telemetryChannel"),
+    nodeCoordinate: $("#nodeCoordinate"),
+    coreCaption: $("#coreCaption"),
+    dialogueEyebrow: $("#dialogueEyebrow"),
+    dialogueTitle: $("#dialogueTitle"),
+    welcomeEyebrow: $("#welcomeEyebrow"),
+    welcomeTitle: $("#welcomeTitle"),
+    welcomeCopy: $("#welcomeCopy"),
+    welcomeStatOne: $("#welcomeStatOne"),
+    welcomeStatOneLabel: $("#welcomeStatOneLabel"),
+    welcomeStatTwo: $("#welcomeStatTwo"),
+    welcomeStatTwoLabel: $("#welcomeStatTwoLabel"),
+    welcomeStatThree: $("#welcomeStatThree"),
+    welcomeStatThreeLabel: $("#welcomeStatThreeLabel"),
+    promptLabel: $("#promptLabel"),
+    footerPrimary: $("#footerPrimary"),
+    footerSecondary: $("#footerSecondary"),
     // Tabs
     tabUnderline: $(".tab-underline"),
     tabCountStream: $("#tabCountStream"),
@@ -85,7 +110,7 @@
     ["/wake", 'hands-free mode: say "Hey Jarvis" to command'],
     ["/cron", "list/add/remove scheduled jobs"],
     ["/connect", "Gmail/Discord/WhatsApp connector status and test"],
-    ["/remote", "list paired devices, trust one, or send it a task"],
+    ["/remote", "list, remove, trust, or send tasks to paired devices"],
     ["/mcp", "list/add/remove MCP servers (extra tool connectors)"],
     ["/startup", "on|off - launch Jarvis when Windows starts"],
     ["/confirm", "on|off - confirm each action"],
@@ -111,6 +136,23 @@
     warning: ["11", "ATTENTION", "Reviewing an unexpected condition"],
     error: ["12", "FAULT", "The terminal reported an error"],
     offline: ["13", "OFFLINE", "Terminal session ended"],
+  };
+
+  const remoteStateMeta = {
+    booting: ["00", "SECURING LINK", "Preparing the encrypted relay channel"],
+    listening: ["01", "REMOTE AGENT ONLINE", "Awaiting encrypted directives"],
+    working: ["02", "REMOTE TASK ACTIVE", "Executing an authorized directive"],
+    planning: ["03", "PLANNING", "Plotting the remote execution path"],
+    perceiving: ["04", "PERCEIVING", "Reading this device's environment"],
+    thinking: ["05", "THINKING", "Resolving the next safe action"],
+    acting: ["06", "ACTING", "Operating this device"],
+    verifying: ["07", "VERIFYING", "Confirming the remote result"],
+    transcribing: ["08", "TRANSCRIBING", "Resolving a local answer"],
+    responding: ["09", "REPORTING", "Preparing the encrypted result"],
+    success: ["10", "TASK DELIVERED", "Result returned to the controller"],
+    warning: ["11", "ATTENTION", "The remote channel needs review"],
+    error: ["12", "LINK FAULT", "The remote agent reported an error"],
+    offline: ["13", "AGENT OFFLINE", "Remote control is no longer available"],
   };
 
   const generatingStates = new Set([
@@ -142,6 +184,9 @@
   let speechIdWatermark = 0;
   let speechExpiryTimer = null;
   let interruptPending = false;
+  let interfaceMode = "console";
+  let remotePairings = [];
+  let remoteUnattended = false;
 
   // ---- Live metrics, all derived from events the UI already receives ----
   const metrics = {
@@ -227,15 +272,20 @@
       `Connection status: ${status.toLowerCase()}`,
     );
     elements.connectionPill.title = value
-      ? "Connected to the local terminal runtime"
-      : "Terminal link unavailable";
+      ? interfaceMode === "remote-agent"
+        ? "Connected to the local remote-agent runtime"
+        : "Connected to the local terminal runtime"
+      : interfaceMode === "remote-agent"
+        ? "Remote-agent link unavailable"
+        : "Terminal link unavailable";
   }
 
   function setState(name, detail) {
     if (!(name in stateMeta)) name = "working";
     const previous = currentState;
     currentState = name;
-    const [index, title, fallback] = stateMeta[name];
+    const meta = interfaceMode === "remote-agent" ? remoteStateMeta : stateMeta;
+    const [index, title, fallback] = meta[name];
     root.dataset.state = name;
     elements.stateIndex.textContent = index;
     elements.stateTitle.textContent = title;
@@ -267,7 +317,8 @@
 
   function updateComposer(promptText) {
     if (promptText !== undefined) inputPrompt = String(promptText || "");
-    const enabled = connected && acceptingInput && currentState !== "offline";
+    const remoteReply = interfaceMode !== "remote-agent" || inputMode !== "command";
+    const enabled = connected && acceptingInput && remoteReply && currentState !== "offline";
     elements.prompt.disabled = !enabled;
     elements.fileInput.disabled = !enabled;
     elements.attachButton.disabled = !enabled;
@@ -282,7 +333,13 @@
         elements.prompt.placeholder = inputPrompt || "Issue a directive…";
       }
     } else if (currentState === "offline") {
-      elements.prompt.placeholder = "Terminal session has ended";
+      elements.prompt.placeholder = interfaceMode === "remote-agent"
+        ? "Remote agent session has ended"
+        : "Terminal session has ended";
+    } else if (interfaceMode === "remote-agent") {
+      elements.prompt.placeholder = remotePairings.some((pair) => pair.trusted)
+        ? "Waiting for a trusted controller…"
+        : "Pair and trust a controller before starting";
     } else {
       elements.prompt.placeholder = "Jarvis is working…";
     }
@@ -374,6 +431,101 @@
       throw new Error(body.error || body.message || `HTTP ${response.status}`);
     }
     return body;
+  }
+
+  function applyInterface(next = {}) {
+    const mode = next.mode === "remote-agent" ? "remote-agent" : "console";
+    interfaceMode = mode;
+    root.dataset.interface = mode;
+    remotePairings = Array.isArray(next.pairings) ? next.pairings : remotePairings;
+    remoteUnattended = Boolean(next.unattended);
+
+    if (mode !== "remote-agent") return;
+
+    document.title = "JARVIS // REMOTE AGENT";
+    elements.brandSubtitle.textContent = "REMOTE AGENT";
+    elements.topbarPrimary.textContent = "ENCRYPTED RELAY";
+    elements.topbarSecondary.textContent = "AUTHORIZED CONTROL";
+    elements.tabCmdsLabel.textContent = "LINKS";
+    elements.cmdPanelEyebrow.textContent = "TRUSTED CONTROLLERS";
+    elements.cmdPanelCount.textContent = String(remotePairings.length);
+    elements.cmdFilter.placeholder = "Filter controllers…";
+    elements.telemetryRuntime.innerHTML = '<i class="status-led"></i> REMOTE';
+    elements.telemetryControl.textContent = remoteUnattended ? "UNATTENDED" : "CONFIRM";
+    elements.telemetryChannel.textContent = "E2E RELAY";
+    elements.nodeCoordinate.textContent = "LOCAL AGENT // OUTBOUND ONLY";
+    elements.coreCaption.textContent = "REMOTE CORE";
+    elements.dialogueEyebrow.textContent = "ENCRYPTED TASK CHANNEL";
+    elements.dialogueTitle.textContent = "REMOTE ACTIVITY";
+    elements.promptLabel.textContent = "Answer a remote task prompt";
+    elements.footerPrimary.textContent = "JARVIS REMOTE // AGENT NODE";
+    elements.footerSecondary.textContent = "ENCRYPTED · OPT-IN · LOCAL";
+    elements.endSession.setAttribute("aria-label", "Stop remote agent");
+    elements.terminalToggle.setAttribute("aria-label", "Open remote agent transcript");
+
+    if (elements.welcome) {
+      elements.welcomeEyebrow.textContent = "ENCRYPTED NODE READY";
+      elements.welcomeTitle.innerHTML = "This device is ready.<br>Control stays yours.";
+      elements.welcomeCopy.textContent = remotePairings.some((pair) => pair.trusted)
+        ? "Trusted controllers can send encrypted tasks through the relay. Every action runs here; task contents never belong to the relay."
+        : "No trusted controller is available yet. Accept and verify a pairing in the terminal before this device can receive tasks.";
+      const trustedCount = remotePairings.filter((pair) => pair.trusted).length;
+      elements.welcomeStatOne.textContent = String(trustedCount);
+      elements.welcomeStatOneLabel.textContent = "TRUSTED";
+      elements.welcomeStatTwo.textContent = "E2E";
+      elements.welcomeStatTwoLabel.textContent = "ENCRYPTED";
+      elements.welcomeStatThree.textContent = remoteUnattended ? "AUTO" : "ASK";
+      elements.welcomeStatThreeLabel.textContent = "APPROVAL";
+      elements.welcome.querySelector(".suggestions")?.setAttribute("hidden", "");
+      const hint = elements.welcome.querySelector(".welcome-hint");
+      if (hint) hint.textContent = "Keep this page open to monitor incoming work.";
+    }
+
+    renderCommands(elements.cmdFilter.value);
+    setState(currentState);
+    updateComposer();
+  }
+
+  function handleRemoteEvent(payload) {
+    const controller = String(payload.controller || "Trusted controller");
+    switch (payload.status) {
+      case "ready":
+        addActivity("remote", `Encrypted agent online for ${(payload.controllers || []).join(", ") || "trusted controllers"}`, payload.timestamp);
+        break;
+      case "task_received":
+        metrics.userMessages += 1;
+        addMessage("user", `${controller}\n${String(payload.task || "Remote directive received")}`, payload.timestamp);
+        addActivity("remote", `Directive received from ${controller}`, payload.timestamp);
+        break;
+      case "task_started":
+        addActivity("act", `Executing ${controller}'s directive`, payload.timestamp);
+        break;
+      case "task_result":
+        metrics.assistantMessages += 1;
+        addMessage(
+          "assistant",
+          `${payload.ok ? "Delivered to" : "Task ended for"} ${controller}\n${String(payload.result || "No result was returned.")}`,
+          payload.timestamp,
+        );
+        break;
+      case "relay_error":
+        addActivity("warning", `Relay unavailable for ${controller}: ${String(payload.message || "connection failed")}`, payload.timestamp);
+        break;
+      case "task_error":
+        addActivity("error", String(payload.message || "Remote task failed"), payload.timestamp);
+        break;
+      case "replay_ignored":
+        addActivity("warning", `Blocked a replayed directive from ${controller}`, payload.timestamp);
+        break;
+      case "idle":
+        addActivity("remote", "Encrypted channel idle and ready", payload.timestamp);
+        break;
+      case "stopped":
+        addActivity("system", "Remote agent stopped", payload.timestamp);
+        break;
+      default:
+        break;
+    }
   }
 
   function hideWelcome() {
@@ -943,6 +1095,10 @@
   function renderCommands(filter = "") {
     const list = elements.cmdList;
     if (!list) return;
+    if (interfaceMode === "remote-agent") {
+      renderRemoteLinks(filter);
+      return;
+    }
     const needle = filter.trim().toLowerCase();
     const matches = slashCommands.filter(
       ([name, desc]) =>
@@ -983,6 +1139,51 @@
     });
     document.querySelectorAll(".cmd-item").forEach((b) => {
       b.disabled = !(acceptingInput && connected && inputMode === "command");
+    });
+  }
+
+  function renderRemoteLinks(filter = "") {
+    const list = elements.cmdList;
+    const needle = filter.trim().toLowerCase();
+    const matches = remotePairings.filter((pair) => {
+      const haystack = `${pair.label || ""} ${pair.peer_name || ""} ${pair.relay || ""}`.toLowerCase();
+      return !needle || haystack.includes(needle);
+    });
+    list.innerHTML = "";
+    elements.cmdPanelCount.textContent = String(remotePairings.length);
+    if (!matches.length) {
+      const empty = document.createElement("div");
+      empty.className = "remote-links-empty";
+      const title = document.createElement("strong");
+      title.textContent = remotePairings.length ? "No matching controller" : "No controller paired";
+      const copy = document.createElement("span");
+      copy.textContent = remotePairings.length
+        ? "Try another name or relay."
+        : "Use --remote-accept and verify the fingerprint on both devices.";
+      empty.append(title, copy);
+      list.append(empty);
+      return;
+    }
+    matches.forEach((pair) => {
+      const card = document.createElement("article");
+      card.className = `remote-link-card ${pair.trusted ? "is-trusted" : "needs-trust"}`;
+      card.setAttribute("role", "listitem");
+
+      const header = document.createElement("div");
+      const signal = document.createElement("i");
+      signal.className = "remote-link-signal";
+      const name = document.createElement("strong");
+      name.textContent = pair.label || pair.peer_name || "Controller";
+      const badge = document.createElement("span");
+      badge.textContent = pair.trusted ? "TRUSTED" : "VERIFY";
+      header.append(signal, name, badge);
+
+      const peer = document.createElement("p");
+      peer.textContent = `Controller · ${pair.peer_name || pair.label || "Unknown"}`;
+      const relay = document.createElement("small");
+      relay.textContent = `Relay · ${pair.relay || "configured endpoint"}`;
+      card.append(header, peer, relay);
+      list.append(card);
     });
   }
 
@@ -1201,6 +1402,9 @@
     metrics.buckets[metrics.buckets.length - 1] += 1;
     updateHud();
     switch (payload.event) {      case "session":
+        if (payload.interface_mode) {
+          applyInterface({ mode: payload.interface_mode });
+        }
         setConnected(Boolean(payload.alive), payload.alive ? "LINKED" : "OFFLINE");
         if (!payload.alive) {
           clearSpeechOverlay();
@@ -1250,6 +1454,9 @@
       case "speech":
         applySpeech(payload);
         break;
+      case "remote":
+        handleRemoteEvent(payload);
+        break;
       case "session_list":
         renderSessionsList(payload.sessions || [], payload.active_id);
         break;
@@ -1284,6 +1491,7 @@
       const generationAtRequest = eventGeneration;
       try {
         const snapshot = await api("/api/state");
+        applyInterface(snapshot.interface || { mode: interfaceMode });
         if (generationAtRequest === eventGeneration) {
           acceptingInput = Boolean(snapshot.accepting_input);
           inputMode = snapshot.input_mode || "command";

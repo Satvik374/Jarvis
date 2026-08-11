@@ -35,6 +35,7 @@ PROTOCOL = "jarvis-remote-v1"
 STATE_VERSION = 1
 MAX_TASK_CHARS = 8_000
 MAX_RESULT_CHARS = 10_000
+MAX_REMOTE_IMAGE_BYTES = 8_000
 
 
 class RemoteError(RuntimeError):
@@ -193,6 +194,9 @@ class Pairing:
     received_sequence: int = 0
     inbox: list[dict[str, Any]] = field(default_factory=list)
     processed_message_ids: list[str] = field(default_factory=list)
+    peer_kind: str = ""
+    peer_capabilities: list[str] = field(default_factory=list)
+    peer_status: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
     @property
@@ -215,6 +219,9 @@ class Pairing:
             "peer_sign_public": self.peer_sign_public, "trusted": self.trusted,
             "received_sequence": self.received_sequence, "inbox": self.inbox[-50:],
             "processed_message_ids": self.processed_message_ids[-200:],
+            "peer_kind": self.peer_kind,
+            "peer_capabilities": self.peer_capabilities,
+            "peer_status": self.peer_status,
             "created_at": self.created_at,
         }
 
@@ -237,6 +244,11 @@ class Pairing:
             inbox=inbox if isinstance(inbox, list) else [],
             processed_message_ids=[str(x) for x in data.get("processed_message_ids", [])
                                    if isinstance(x, str)][-200:],
+            peer_kind=str(data.get("peer_kind", ""))[:40],
+            peer_capabilities=[str(x)[:80] for x in data.get("peer_capabilities", [])
+                               if isinstance(x, str)][:100],
+            peer_status=data.get("peer_status", {})
+            if isinstance(data.get("peer_status", {}), dict) else {},
             created_at=float(data.get("created_at", time.time()) or time.time()),
         )
 
@@ -308,6 +320,36 @@ class PairingStore:
                 return
         values.append(replacement)
         self._write(data)
+
+    def remove(self, device: str, role: str | None = None) -> list[Pairing]:
+        """Delete local pairing material by label, peer name, or pairing ID."""
+        wanted = device.strip().casefold()
+        if not wanted:
+            raise RemoteError("choose a device name or pairing id to remove")
+        data = self._read()
+        kept: list[dict[str, Any]] = []
+        removed: list[Pairing] = []
+        for item in data["pairings"]:
+            try:
+                pairing = Pairing.from_dict(item)
+            except RemoteError:
+                kept.append(item)
+                continue
+            matches = wanted in {
+                pairing.label.casefold(),
+                pairing.peer_name.casefold(),
+                pairing.pair_id.casefold(),
+            }
+            if matches and (role is None or pairing.role == role):
+                removed.append(pairing)
+            else:
+                kept.append(item)
+        if not removed:
+            suffix = f" with role '{role}'" if role else ""
+            raise RemoteError(f"no paired device named or identified by '{device}'{suffix}")
+        data["pairings"] = kept
+        self._write(data)
+        return removed
 
 
 def _endpoint(value: str) -> str:
@@ -505,6 +547,104 @@ def _take_inbox(pairing: Pairing, request_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _update_peer_info(pairing: Pairing, message: dict[str, Any]) -> bool:
+    """Persist a peer's self-declared command contract from signed messages."""
+    changed = False
+    kind = str(message.get("device_kind", "")).strip().lower()[:40]
+    if kind and kind != pairing.peer_kind:
+        pairing.peer_kind = kind
+        changed = True
+    capabilities = message.get("capabilities")
+    if isinstance(capabilities, list):
+        clean = [str(item).strip()[:80] for item in capabilities
+                 if isinstance(item, str) and item.strip()][:100]
+        if clean != pairing.peer_capabilities:
+            pairing.peer_capabilities = clean
+            changed = True
+    status = message.get("device_status")
+    if isinstance(status, dict):
+        # Only retain compact JSON scalar status flags. A signed peer must not
+        # be able to turn the local pairing file into an unbounded data sink.
+        clean_status = {
+            str(key)[:80]: value
+            for key, value in status.items()
+            if isinstance(key, str) and isinstance(value, (str, int, float, bool, type(None)))
+        }
+        if clean_status != pairing.peer_status:
+            pairing.peer_status = clean_status
+            changed = True
+    return changed
+
+
+def _save_result_image(store: PairingStore, pairing: Pairing, request_id: str,
+                       result: dict[str, Any]) -> tuple[str | None, str]:
+    """Validate and save a small authenticated image attached to a task result."""
+    attachment = result.get("attachment")
+    if attachment is None:
+        return None, ""
+    if not isinstance(attachment, dict):
+        return None, "remote image was rejected: invalid attachment metadata"
+    mime = str(attachment.get("mime_type", "")).strip().lower()
+    encoded = attachment.get("data")
+    if mime not in {"image/jpeg", "image/png"} or not isinstance(encoded, str):
+        return None, "remote image was rejected: only JPEG or PNG is accepted"
+    try:
+        raw = _unb64(encoded, field="remote image")
+    except RemoteSecurityError as exc:
+        return None, f"remote image was rejected: {exc}"
+    if not raw or len(raw) > MAX_REMOTE_IMAGE_BYTES:
+        return None, ("remote image was rejected: decoded image exceeds the "
+                      f"{MAX_REMOTE_IMAGE_BYTES}-byte safety limit")
+    extension = ".jpg" if mime == "image/jpeg" else ".png"
+    signature_ok = (raw.startswith(b"\xff\xd8\xff") if extension == ".jpg"
+                    else raw.startswith(b"\x89PNG\r\n\x1a\n"))
+    if not signature_ok:
+        return None, "remote image was rejected: file signature does not match its media type"
+
+    safe_label = "".join(ch if ch.isalnum() or ch in "-_" else "-"
+                         for ch in pairing.label).strip("-")[:48] or "device"
+    safe_request = "".join(ch for ch in request_id if ch.isalnum())[:12] or "task"
+    directory = store.directory / "screenshots"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{safe_label}-{int(time.time())}-{safe_request}{extension}"
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        temporary.write_bytes(raw)
+        os.replace(temporary, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+    width = max(0, int(attachment.get("width", 0) or 0))
+    height = max(0, int(attachment.get("height", 0) or 0))
+    dimensions = f" ({width}x{height})" if width and height else ""
+    return str(path.resolve()), f"mobile screenshot{dimensions} saved to {path.resolve()}"
+
+
+def _task_response(store: PairingStore, pairing: Pairing, request_id: str,
+                   result: dict[str, Any]) -> tuple[bool, str, str | None]:
+    _update_peer_info(pairing, result)
+    ok = bool(result.get("ok", False))
+    text = str(result.get("result", "remote device returned no result"))[:MAX_RESULT_CHARS]
+    try:
+        image_path, image_note = _save_result_image(store, pairing, request_id, result)
+    except OSError as exc:
+        image_path, image_note = None, f"could not save remote screenshot: {exc}"
+    if image_note:
+        text = f"{text} {image_note}"
+    if pairing.peer_kind == "android" and pairing.peer_capabilities:
+        text += (" Android device contract (use only these remote_task commands): "
+                 + ", ".join(pairing.peer_capabilities) + ".")
+    return ok and (image_path is not None or result.get("attachment") is None), \
+        f"{pairing.label}: {text}", image_path
+
+
 def _already_processed(pairing: Pairing, message: dict[str, Any]) -> bool:
     """Persist task IDs before execution to make relay replays harmless.
 
@@ -524,13 +664,14 @@ def _already_processed(pairing: Pairing, message: dict[str, Any]) -> bool:
     return False
 
 
-def send_task(cfg: "Config", label: str, task: str, *, timeout: int | None = None) -> tuple[bool, str]:
+def send_task(cfg: "Config", label: str, task: str, *,
+              timeout: int | None = None) -> tuple[bool, str, str | None]:
     """Send a natural-language task and wait for that device's final result."""
     task = task.strip()
     if not task:
-        return False, "remote task needs a task description"
+        return False, "remote task needs a task description", None
     if len(task) > MAX_TASK_CHARS:
-        return False, f"remote task is too long (limit {MAX_TASK_CHARS} characters)"
+        return False, f"remote task is too long (limit {MAX_TASK_CHARS} characters)", None
     store = PairingStore(cfg.remote.state_dir)
     pairing = store.get(label, role="controller")
     _require_trusted(pairing)
@@ -547,23 +688,22 @@ def send_task(cfg: "Config", label: str, task: str, *, timeout: int | None = Non
     while time.monotonic() < deadline:
         result = _take_inbox(pairing, request_id)
         if result is not None:
+            response = _task_response(store, pairing, request_id, result)
             store.save(pairing)
-            ok = bool(result.get("ok", False))
-            text = str(result.get("result", "remote device returned no result"))
-            return ok, f"{pairing.label}: {text[:MAX_RESULT_CHARS]}"
+            return response
         remaining = deadline - time.monotonic()
         messages = client.receive(pairing, timeout=min(20, max(0, int(remaining))))
         for message in messages:
+            _update_peer_info(pairing, message)
             if message.get("type") == "task_result" and message.get("task_id") == request_id:
+                response = _task_response(store, pairing, request_id, message)
                 store.save(pairing)  # save sequence before returning: no replay on restart
-                ok = bool(message.get("ok", False))
-                text = str(message.get("result", "remote device returned no result"))
-                return ok, f"{pairing.label}: {text[:MAX_RESULT_CHARS]}"
+                return response
             pairing.inbox.append(message)
             pairing.inbox = pairing.inbox[-50:]
         store.save(pairing)
     return False, (f"{pairing.label} did not finish within {wait_seconds}s. It may be offline, "
-                   "awaiting a local confirmation, or still working.")
+                   "awaiting a local confirmation, or still working."), None
 
 
 def _configure_remote_confirmation(cfg: "Config", allow_unattended: bool) -> bool:
@@ -577,7 +717,8 @@ def _configure_remote_confirmation(cfg: "Config", allow_unattended: bool) -> boo
 
 
 def run_remote_agent(cfg: "Config", *, allow_unattended: bool = False,
-                     printer: Callable[[str], None] = print) -> int:
+                     printer: Callable[[str], None] = print,
+                     event_sink: Callable[[str, dict[str, Any]], None] | None = None) -> int:
     """Run the opt-in remote agent on a paired device until Ctrl+C.
 
     Trusted remote tasks run without local prompts by default. Set
@@ -603,6 +744,22 @@ def run_remote_agent(cfg: "Config", *, allow_unattended: bool = False,
     mode = "UNATTENDED" if unattended else "local confirmation required"
     printer(f"Jarvis Remote agent online ({mode}); press Ctrl+C to stop.")
 
+    def event(status: str, **payload: Any) -> None:
+        if event_sink is None:
+            return
+        try:
+            event_sink(status, payload)
+        except Exception:
+            # The browser dashboard is an observer.  It must never be able to
+            # interrupt encrypted task handling on this computer.
+            pass
+
+    event(
+        "ready",
+        mode="unattended" if unattended else "confirmation",
+        controllers=[p.peer_name for p in pairings],
+    )
+
     def asker(question: str) -> str | None:
         try:
             return input(f"\nRemote task asks: {question}\nanswer (blank cancels) > ").strip() or None
@@ -622,6 +779,7 @@ def run_remote_agent(cfg: "Config", *, allow_unattended: bool = False,
                     messages = client.receive(pairing, timeout=2 if len(pairings) > 1 else 20)
                 except RemoteError as exc:
                     printer(f"Remote relay for {pairing.peer_name} is unavailable: {exc}")
+                    event("relay_error", controller=pairing.peer_name, message=str(exc))
                     continue
                 if messages or pairing.received_sequence != previous_sequence:
                     store.save(pairing)  # acknowledge before executing: no duplicate command after a crash
@@ -634,18 +792,32 @@ def run_remote_agent(cfg: "Config", *, allow_unattended: bool = False,
                         continue
                     if _already_processed(pairing, message):
                         printer(f"Ignored replayed remote task {task_id} from {pairing.peer_name}.")
+                        event("replay_ignored", controller=pairing.peer_name, task_id=task_id)
                         continue
                     # Durable before execution: a crash/restart cannot turn a
                     # replayed signed envelope into a second desktop action.
                     store.save(pairing)
                     handled = True
                     printer(f"Remote task from {pairing.peer_name}: {task[:180]}")
+                    event(
+                        "task_received",
+                        controller=pairing.peer_name,
+                        task_id=task_id,
+                        task=task[:MAX_TASK_CHARS],
+                    )
                     try:
                         client.send(pairing, {"type": "task_started", "task_id": task_id,
                                               "started_at": int(time.time())})
                     except RemoteError as exc:
                         printer(f"Could not acknowledge remote task: {exc}")
+                        event(
+                            "task_error",
+                            controller=pairing.peer_name,
+                            task_id=task_id,
+                            message=f"Could not acknowledge task: {exc}",
+                        )
                         continue
+                    event("task_started", controller=pairing.peer_name, task_id=task_id)
                     try:
                         with scheduler.desktop():
                             result = agent.run(task, asker=asker)
@@ -658,28 +830,65 @@ def run_remote_agent(cfg: "Config", *, allow_unattended: bool = False,
                         client.send(pairing, {"type": "task_result", "task_id": task_id,
                                               "ok": ok, "result": str(result)[:MAX_RESULT_CHARS],
                                               "finished_at": int(time.time())})
+                        event(
+                            "task_result",
+                            controller=pairing.peer_name,
+                            task_id=task_id,
+                            ok=ok,
+                            result=str(result)[:MAX_RESULT_CHARS],
+                        )
+                        event("idle", controller=pairing.peer_name)
                     except RemoteError as exc:
                         # The command already ran, so never repeat it. The
                         # sender times out safely and the owner can inspect the
                         # remote computer; a later task starts fresh.
                         printer(f"Could not send remote task result: {exc}")
+                        event(
+                            "task_error",
+                            controller=pairing.peer_name,
+                            task_id=task_id,
+                            message=f"Task finished but its result could not be sent: {exc}",
+                        )
             if not handled:
                 # The long poll already avoids a busy loop; this small pause is
                 # only relevant with multiple pairings that all return quickly.
                 time.sleep(0.1)
     except KeyboardInterrupt:
         printer("Jarvis Remote agent stopped.")
+        event("stopped")
         return 0
 
 
-def status_text(cfg: "Config", *, role: str | None = None) -> str:
+def devices_text(cfg: "Config", *, role: str | None = None) -> str:
+    """List display-safe local pairing metadata, including IDs and names."""
     pairings = PairingStore(cfg.remote.state_dir).list(role=role)
     if not pairings:
         return "No remote devices are paired on this computer."
-    lines = ["Remote pairings:"]
+    lines = [f"Remote devices ({len(pairings)}):"]
     for pair in pairings:
         state = "trusted" if pair.trusted else "VERIFY FINGERPRINT"
-        lines.append(f"- {pair.label} ({pair.role}; peer: {pair.peer_name}; {state})")
+        lines.extend((
+            f"- id: {pair.pair_id}",
+            f"  name: {pair.label}",
+            f"  local: {pair.local_name} | peer: {pair.peer_name}",
+            f"  role: {pair.role} | state: {state}",
+            f"  kind: {pair.peer_kind or 'unknown'} | capabilities: "
+            + (", ".join(pair.peer_capabilities) if pair.peer_capabilities else "not reported yet"),
+        ))
+    return "\n".join(lines)
+
+
+def status_text(cfg: "Config", *, role: str | None = None) -> str:
+    return devices_text(cfg, role=role)
+
+
+def remove_pairing(cfg: "Config", device: str, *, role: str | None = None) -> str:
+    """Remove matching local pairing secrets and return a human-readable receipt."""
+    removed = PairingStore(cfg.remote.state_dir).remove(device, role=role)
+    lines = ["Removed local pairing" + ("s" if len(removed) != 1 else "") + ":"]
+    for pairing in removed:
+        lines.append(f"- {pairing.label} (id: {pairing.pair_id}; role: {pairing.role})")
+    lines.append("The remote peer was not changed. Pair the devices again before sending new tasks.")
     return "\n".join(lines)
 
 
@@ -691,12 +900,35 @@ def note(cfg: "Config") -> str:
         return ""
     if not pairings:
         return ""
-    names = ", ".join(p.label for p in pairings)
-    return ("\n\n=== PAIRED REMOTE DEVICES ===\n"
-            f"Trusted remote devices: {names}. When, and ONLY when, the user explicitly says "
-            "to do something on one of those named devices, use remote_task with that exact "
-            "device label and their requested task. It runs through the Jarvis agent on that "
-            "device; never use it for a task on this computer.\n================================")
+    lines = [
+        "\n\n=== PAIRED REMOTE DEVICES ===",
+        "Trusted remote devices: " + ", ".join(pairing.label for pairing in pairings) + ".",
+        "Use remote_task only when the user explicitly asks to act on one of these exact "
+        "device labels. Never invent a remote tool or use remote_task for this computer.",
+    ]
+    for pairing in pairings:
+        if pairing.peer_kind == "android":
+            status = pairing.peer_status
+            readiness = (f"accessibility_ready={str(bool(status.get('accessibility_ready'))).lower()}, "
+                         f"screenshot_ready={str(bool(status.get('screenshot_ready'))).lower()}")
+            commands = ", ".join(pairing.peer_capabilities) or "not reported"
+            lines.append(
+                f"- {pairing.label}: Android ({readiness}). Supported commands: {commands}. "
+                "Send one exact command as the task. Before any tap, type, scroll, long-press, "
+                "or swipe, use 'screenshot' to receive a numbered MOBILE UI ELEMENTS list with "
+                "native bounds. ALWAYS act with that element ID (for example 'tap element 7'), "
+                "never estimate coordinates from the compressed image. IDs expire after any "
+                "screen-changing action, so request another screenshot before the next action. "
+                "Use raw coordinates only if the snapshot explicitly reports zero elements."
+            )
+        elif pairing.peer_capabilities:
+            lines.append(f"- {pairing.label}: {pairing.peer_kind or 'remote device'}; supported "
+                         f"capabilities: {', '.join(pairing.peer_capabilities)}.")
+        else:
+            lines.append(f"- {pairing.label}: desktop/unknown Jarvis agent; natural-language "
+                         "tasks are allowed until the signed peer reports a stricter contract.")
+    lines.append("================================")
+    return "\n".join(lines)
 
 
 def console_command(raw: str, cfg: "Config") -> str:
@@ -704,9 +936,14 @@ def console_command(raw: str, cfg: "Config") -> str:
     body = raw[1:].strip() if raw.startswith(":") else raw.strip()
     if body[:6].lower() == "remote":
         body = body[6:].strip()
-    if not body or body.lower() == "list":
-        return status_text(cfg, role="controller")
+    if not body or body.lower() in {"list", "list devices", "devices"}:
+        return devices_text(cfg)
     low = body.lower()
+    if low.startswith(("remove ", "delete ")):
+        device = body.split(" ", 1)[1].strip()
+        if not device:
+            return "usage: :remote remove <device name or pairing id>"
+        return remove_pairing(cfg, device)
     if low.startswith("trust "):
         parts = body[6:].strip().rsplit(" ", 1)
         if len(parts) != 2:
@@ -719,4 +956,5 @@ def console_command(raw: str, cfg: "Config") -> str:
             return "usage: :remote send <device name> | <task>"
         label, task = (part.strip() for part in spec.split("|", 1))
         return send_task(cfg, label, task)[1]
-    return "usage: :remote [list | trust <device> <fingerprint> | send <device> | <task>]"
+    return ("usage: :remote [list | remove <device> | trust <device> <fingerprint> | "
+            "send <device> | <task>]")

@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from . import mouse, keyboard, apps, files, system
+from . import mouse, keyboard, apps, files, system, mouse_control
 from .schema import ACTIONS_BY_NAME
 from ..config import Config
 from ..perception.elements import Observation
@@ -29,6 +29,10 @@ class ActionResult:
     # Set for terminal actions (finish / ask).
     finished: bool = False
     ask: str | None = None
+    # A tool can attach an authenticated remote image to the next vision turn.
+    image_path: str | None = None
+    # Remote UI actions invalidate a previously attached device screenshot.
+    clear_image: bool = False
 
 
 class UnknownAction(Exception):
@@ -232,6 +236,22 @@ def _h_scroll(args, obs, cfg):
     dy = int(_num(args, "dy", 3, -50, 50))
     dx = int(_num(args, "dx", 0, -50, 50))
     return ActionResult(True, mouse.scroll(dy, dx))
+
+
+def _h_mouse_control(args, obs, cfg):
+    raw = args.get("enabled")
+    if isinstance(raw, bool):
+        enabled = raw
+    elif isinstance(raw, str) and raw.strip().lower() in {"true", "on", "1"}:
+        enabled = True
+    elif isinstance(raw, str) and raw.strip().lower() in {"false", "off", "0"}:
+        enabled = False
+    else:
+        return ActionResult(False, "mouse_control needs enabled=true or false",
+                            needs_observe=False)
+    camera = int(_num(args, "camera", 0, 0, 9))
+    ok, message = mouse_control.set_enabled(enabled, camera_index=camera)
+    return ActionResult(ok, message, needs_observe=False)
 
 
 def _h_type(args, obs, cfg):
@@ -781,10 +801,14 @@ def _h_remote_task(args, obs, cfg):
         timeout = None
     from .. import remote
     try:
-        ok, message = remote.send_task(cfg, device, task, timeout=timeout)
+        ok, message, image_path = remote.send_task(cfg, device, task, timeout=timeout)
     except remote.RemoteError as exc:
         return ActionResult(False, str(exc), needs_observe=False)
-    return ActionResult(ok, message, needs_observe=False)
+    if image_path and not cfg.brain.use_vision:
+        message += (" Vision is off, so the pixel preview cannot be inspected in this run; "
+                    "the exact MOBILE UI ELEMENTS list is still available and must be used.")
+    return ActionResult(ok, message, needs_observe=False, image_path=image_path,
+                        clear_image=image_path is None)
 
 
 def _h_wait(args, obs, cfg):
@@ -820,6 +844,7 @@ _HANDLERS = {
     "move": _h_move,
     "drag": _h_drag,
     "scroll": _h_scroll,
+    "mouse_control": _h_mouse_control,
     "type": _h_type,
     "press": _h_press,
     "key_sequence": _h_key_sequence,

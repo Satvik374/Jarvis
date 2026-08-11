@@ -208,6 +208,34 @@ test("Escape closes the palette", () => {
   assert.equal($("#paletteBackdrop").hidden, true);
 });
 
+// --- The same surface becomes a read-mostly remote-agent dashboard. ---
+test("remote-agent session switches the interface mode", () => {
+  fire({ event: "session", alive: true, interface_mode: "remote-agent" });
+  assert.equal(document.documentElement.dataset.interface, "remote-agent");
+  assert.equal($("#brandSubtitle").textContent, "REMOTE AGENT");
+  assert.equal($("#tabCmdsLabel").textContent, "LINKS");
+  assert.match($("#promptInput").placeholder, /controller/i);
+});
+
+test("remote task events render controller work and results", () => {
+  fire({
+    event: "remote",
+    status: "task_received",
+    controller: "Studio PC",
+    task: "Open the release notes",
+  });
+  fire({
+    event: "remote",
+    status: "task_result",
+    controller: "Studio PC",
+    ok: true,
+    result: "Release notes opened.",
+  });
+  const text = $("#messages").textContent;
+  assert.match(text, /Studio PC/);
+  assert.match(text, /Release notes opened/);
+});
+
 // --- Offline must not throw and must still be reflected. ---
 test("session end sets the offline state cleanly", () => {
   fire({ event: "session", alive: false, message: "Terminal exited" });

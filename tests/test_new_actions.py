@@ -390,6 +390,15 @@ class SubAgentTests(unittest.TestCase):
         self.assertIn("researcher", note)
         self.assertIn("coder", note)
         self.assertIn("writer", note)            # the sample agents/writer.yaml
+        self.assertIn("DELEGATION POLICY", note)
+        self.assertIn("bounded specialist task", note)
+
+    def test_main_prompt_prioritises_subagents_for_hard_headless_work(self):
+        from jarvis.agent.prompts import build_system_prompt
+        prompt = build_system_prompt()
+        self.assertIn("DELEGATE EARLY FOR HARD WORK", prompt)
+        self.assertIn("use the agent action EARLY", prompt)
+        self.assertIn("mouse, keyboard, screen, or", prompt)
 
     def test_run_agent_blocks_foreign_actions_and_recovers(self):
         import json

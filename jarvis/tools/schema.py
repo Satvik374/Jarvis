@@ -108,6 +108,21 @@ ACTIONS: tuple[Action, ...] = (
                required=False, default=0)),
         category="pointer", examples=({"dy": 5}, {"dy": -3}),
     ),
+    Action(
+        "mouse_control", "Turn camera hand control on or off. While on, the "
+        "index fingertip moves the mouse and touching thumb to index finger "
+        "once produces one left-click. Touch index and middle fingertips "
+        "together and move them up/down to scroll up/down. Hold thumb, index, "
+        "and middle fingers open with ring and pinky closed, then move the "
+        "hand right/left to increase/decrease system volume. Always turn it off when the user "
+        "asks to stop hand/mouse camera control.",
+        (Param("enabled", "bool", "True to start hand control; false to stop."),
+         Param("camera", "int", "Camera index (default 0).",
+               required=False, default=0)),
+        category="pointer",
+        examples=({"enabled": True}, {"enabled": False},
+                  {"enabled": True, "camera": 1}),
+    ),
     # ---- keyboard --------------------------------------------------------
     Action(
         "type", "Type literal text at the current keyboard focus.",
@@ -468,10 +483,19 @@ ACTIONS: tuple[Action, ...] = (
     ),
     # ---- remote devices --------------------------------------------------
     Action(
-        "remote_task", "Send a natural-language task to an explicitly named, "
-        "trusted paired device. The task runs only in that device's locally "
-        "started Jarvis Remote agent; use this ONLY when the user clearly asks "
-        "to control that named remote device.",
+        "remote_task", "Send a task to an explicitly named, trusted paired "
+        "device. The task runs only in that device's locally started Jarvis "
+        "Remote agent; use this ONLY when the user clearly asks to control that "
+        "named remote device. Obey the device capabilities shown in the paired-"
+        "device prompt and never invent remote tools. Android accepts only: "
+        "open <app or URL>, screenshot, capabilities, tap element <id>, long "
+        "press element <id>, type element <id> <text>, scroll element <id> "
+        "<forward|backward>, swipe element <id> <direction>, raw-coordinate "
+        "fallbacks, back, and home. ALWAYS request an Android screenshot before "
+        "a UI action, use an ID from its exact MOBILE UI ELEMENTS list, and "
+        "request a fresh screenshot after the screen changes. Never estimate "
+        "mobile coordinates from the compressed preview. A successful Android "
+        "screenshot is attached to the next vision turn automatically.",
         (Param("device", "str", "Exact name of the paired remote device."),
          Param("task", "str", "The task to perform on that remote device."),
          Param("timeout", "int", "Seconds to wait for its result (5-600; default configured).",

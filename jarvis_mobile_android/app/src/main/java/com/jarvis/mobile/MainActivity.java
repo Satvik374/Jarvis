@@ -1,12 +1,17 @@
 package com.jarvis.mobile;
 
 import android.Manifest;
+import android.accessibilityservice.AccessibilityServiceInfo;
+import android.app.AlertDialog;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.view.View;
+import android.view.accessibility.AccessibilityManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.TextView;
@@ -17,6 +22,7 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -28,6 +34,9 @@ public final class MainActivity extends AppCompatActivity {
     private EditText pairingCode;
     private EditText fingerprint;
     private TextView status;
+    private TextView accessibilityStatus;
+    private Button accessibilityButton;
+    private Button restrictedSettingsButton;
     private final ActivityResultLauncher<String> notificationPermission = registerForActivityResult(
             new ActivityResultContracts.RequestPermission(), ignored -> { });
 
@@ -39,12 +48,15 @@ public final class MainActivity extends AppCompatActivity {
         pairingCode = findViewById(R.id.pairingCodeInput);
         fingerprint = findViewById(R.id.fingerprintInput);
         status = findViewById(R.id.statusText);
+        accessibilityStatus = findViewById(R.id.accessibilityStatusText);
+        accessibilityButton = findViewById(R.id.accessibilityButton);
+        restrictedSettingsButton = findViewById(R.id.restrictedSettingsButton);
         deviceName.setText(Build.MANUFACTURER + " " + Build.MODEL);
 
         findViewById(R.id.pairButton).setOnClickListener(view -> pair());
         findViewById(R.id.trustButton).setOnClickListener(view -> trust());
-        findViewById(R.id.accessibilityButton).setOnClickListener(view ->
-                startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+        restrictedSettingsButton.setOnClickListener(view -> openAppInfo());
+        accessibilityButton.setOnClickListener(view -> openAccessibilitySetup());
         findViewById(R.id.startButton).setOnClickListener(view -> startAgent());
         findViewById(R.id.stopButton).setOnClickListener(view -> stopAgent());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
@@ -52,6 +64,12 @@ public final class MainActivity extends AppCompatActivity {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS);
         }
         refreshStatus();
+        refreshAccessibilityStatus();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (accessibilityStatus != null) refreshAccessibilityStatus();
     }
 
     private void pair() {
@@ -79,7 +97,7 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void trust() {
-        String supplied = fingerprint.getText().toString().replace("-", "").trim().toUpperCase();
+        String supplied = fingerprint.getText().toString().replace("-", "").trim().toUpperCase(Locale.ROOT);
         io.execute(() -> {
             try {
                 PairingStore store = new PairingStore(this);
@@ -104,7 +122,8 @@ public final class MainActivity extends AppCompatActivity {
                 Intent intent = new Intent(this, RemoteAgentService.class).setAction(RemoteAgentService.ACTION_START);
                 ContextCompat.startForegroundService(this, intent);
                 setStatus("Phone agent started. It will execute mobile commands from " + paired.peerName + "."
-                        + (JarvisAccessibilityService.isAvailable() ? " Accessibility control is ready." : " Enable Accessibility to tap, swipe, type, and navigate."));
+                        + (isAccessibilityEnabled() ? " Accessibility control is ready."
+                        : " App and URL launching works now; enable Accessibility for tap, swipe, type, and navigation."));
             } catch (Exception e) {
                 setStatus("Could not start agent: " + message(e));
             }
@@ -131,6 +150,68 @@ public final class MainActivity extends AppCompatActivity {
                 setStatus("Could not read secure pairing state: " + message(e));
             }
         });
+    }
+
+    private void openAccessibilitySetup() {
+        if (isAccessibilityEnabled()) {
+            setStatus("Android accessibility control is already enabled.");
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Allow Jarvis Mobile control")
+                    .setMessage("Android may block a sideloaded app with ‘Restricted setting’ or call Accessibility dangerous. "
+                            + "This is Android’s protection, not an app permission that Jarvis can bypass.\n\n"
+                            + "1. Open App info.\n"
+                            + "2. Tap the three-dot menu (⋮).\n"
+                            + "3. Choose ‘Allow restricted settings’.\n"
+                            + "4. Return here and open Accessibility.\n\n"
+                            + "Only continue if you trust this APK: Accessibility can read the screen and control taps for tasks from your trusted paired computer.")
+                    .setPositiveButton("OPEN APP INFO", (dialog, which) -> openAppInfo())
+                    .setNeutralButton("OPEN ACCESSIBILITY", (dialog, which) -> openAccessibilitySettings())
+                    .setNegativeButton("CANCEL", null)
+                    .show();
+            return;
+        }
+        openAccessibilitySettings();
+    }
+
+    private void openAppInfo() {
+        Intent details = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:" + getPackageName()));
+        startActivity(details);
+    }
+
+    private void openAccessibilitySettings() {
+        startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+    }
+
+    private boolean isAccessibilityEnabled() {
+        if (JarvisAccessibilityService.isAvailable()) return true;
+        AccessibilityManager manager = (AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
+        if (manager == null) return false;
+        ComponentName wanted = new ComponentName(this, JarvisAccessibilityService.class);
+        for (AccessibilityServiceInfo info : manager.getEnabledAccessibilityServiceList(
+                AccessibilityServiceInfo.FEEDBACK_ALL_MASK)) {
+            if (info.getResolveInfo() == null || info.getResolveInfo().serviceInfo == null) continue;
+            ComponentName enabled = new ComponentName(
+                    info.getResolveInfo().serviceInfo.packageName,
+                    info.getResolveInfo().serviceInfo.name);
+            if (wanted.equals(enabled)) return true;
+        }
+        return false;
+    }
+
+    private void refreshAccessibilityStatus() {
+        boolean enabled = isAccessibilityEnabled();
+        accessibilityStatus.setText(enabled
+                ? "Accessibility control: ENABLED — tap, swipe, type, back, and home are ready."
+                : "Accessibility control: OFF — app and URL launching still works, but screen control needs this permission.");
+        accessibilityButton.setText(enabled ? "Android accessibility control enabled" : "2. Enable Android accessibility control");
+        accessibilityButton.setEnabled(!enabled);
+        restrictedSettingsButton.setVisibility(
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !enabled
+                        ? View.VISIBLE : View.GONE);
     }
 
     private String safeFingerprint(PairingRecord pairing) {

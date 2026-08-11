@@ -5,10 +5,13 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
+import android.os.Build;
 import android.os.IBinder;
+import android.util.Base64;
 
 import androidx.core.app.NotificationCompat;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.List;
@@ -52,6 +55,11 @@ public final class RemoteAgentService extends Service {
             if (pairing == null || !pairing.trusted) return;
             RelayClient relay = new RelayClient(pairing.endpoint);
             MobileCommandExecutor commands = new MobileCommandExecutor(this);
+            try {
+                relay.send(pairing, withDeviceInfo(new JSONObject().put("type", "device_info")));
+            } catch (Exception ignored) {
+                // The same signed metadata is included with every later task response.
+            }
             while (running) {
                 try {
                     List<JSONObject> messages = relay.receive(pairing, 20);
@@ -61,10 +69,24 @@ public final class RemoteAgentService extends Service {
                         String taskId = message.optString("id");
                         String task = message.optString("task").trim();
                         if (taskId.isBlank() || task.isBlank()) continue;
-                        relay.send(pairing, new JSONObject().put("type", "task_started").put("task_id", taskId));
+                        relay.send(pairing, withDeviceInfo(new JSONObject()
+                                .put("type", "task_started").put("task_id", taskId)));
                         MobileCommandExecutor.Result result = commands.execute(task);
-                        relay.send(pairing, new JSONObject().put("type", "task_result").put("task_id", taskId)
+                        JSONObject response = withDeviceInfo(new JSONObject()
+                                .put("type", "task_result").put("task_id", taskId)
                                 .put("ok", result.ok).put("result", result.message));
+                        if (result.screenshot != null) {
+                            JarvisAccessibilityService.ScreenshotCapture screenshot = result.screenshot;
+                            response.put("attachment", new JSONObject()
+                                    .put("mime_type", "image/jpeg")
+                                    .put("width", screenshot.width)
+                                    .put("height", screenshot.height)
+                                    .put("preview_width", screenshot.previewWidth)
+                                    .put("preview_height", screenshot.previewHeight)
+                                    .put("data", Base64.encodeToString(screenshot.jpeg,
+                                            Base64.URL_SAFE | Base64.NO_WRAP)));
+                        }
+                        relay.send(pairing, response);
                     }
                 } catch (Exception e) {
                     // A transient relay failure must not end an owner-started agent.
@@ -88,6 +110,20 @@ public final class RemoteAgentService extends Service {
         if (executor != null) executor.shutdownNow();
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
+    }
+
+    private JSONObject withDeviceInfo(JSONObject message) throws Exception {
+        JSONArray capabilities = new JSONArray();
+        for (String capability : MobileCommandExecutor.CAPABILITIES) {
+            capabilities.put(capability);
+        }
+        JSONObject status = new JSONObject()
+                .put("android_sdk", Build.VERSION.SDK_INT)
+                .put("accessibility_ready", JarvisAccessibilityService.isAvailable())
+                .put("screenshot_ready", JarvisAccessibilityService.canTakeScreenshot());
+        return message.put("device_kind", "android")
+                .put("capabilities", capabilities)
+                .put("device_status", status);
     }
 
     private Notification notification(String text) {

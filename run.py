@@ -67,6 +67,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--remote-trust", nargs=2, metavar=("DEVICE", "FINGERPRINT"),
                         help="trust a pairing after comparing fingerprints on both devices")
     parser.add_argument("--remote-status", action="store_true", help="list local remote pairings")
+    parser.add_argument("--list-devices", action="store_true",
+                        help="list paired devices with their pairing id and name")
+    parser.add_argument("--remove", nargs=2, metavar=("pair", "DEVICE"),
+                        help='remove pair <device name>; quote names containing spaces')
+    parser.add_argument("--remove-pair", dest="remote_remove_pair", metavar="DEVICE",
+                        help="remove a local pairing by device name or pairing id")
     parser.add_argument("--remote-send", nargs=2, metavar=("DEVICE", "TASK"),
                         help="send one task to a trusted paired device and wait for its result")
     parser.add_argument("--remote-agent", action="store_true",
@@ -74,6 +80,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--remote-allow-unattended", action="store_true",
                         help="with --remote-agent, force unattended execution for this launch")
     args = parser.parse_args(argv)
+
+    remove_device = args.remote_remove_pair
+    if args.remove:
+        operation, device = args.remove
+        if operation.casefold() != "pair":
+            parser.error("--remove supports: --remove pair <device name>")
+        if remove_device:
+            parser.error("choose either --remove pair or --remove-pair")
+        remove_device = device
+    args.remote_remove = remove_device
 
     cfg = load_config()
     if args.backend:
@@ -97,11 +113,43 @@ def main(argv: list[str] | None = None) -> int:
 
     remote_modes = [bool(args.remote_pair), bool(args.remote_accept),
                     bool(args.remote_trust), bool(args.remote_status),
+                    bool(args.list_devices), bool(args.remote_remove),
                     bool(args.remote_send), bool(args.remote_agent)]
     if args.remote_allow_unattended and not args.remote_agent:
         parser.error("--remote-allow-unattended only applies with --remote-agent")
     if sum(remote_modes) > 1:
         parser.error("choose exactly one remote mode per command")
+    if args.browser and args.remote_agent:
+        # Remote-agent browser mode keeps the encrypted worker on this
+        # computer and exposes only its loopback dashboard.  The child still
+        # runs the exact same remote-agent lifecycle as the CLI.
+        child_args: list[str] = ["--remote-agent"]
+        for flag, value in (
+            ("--backend", args.backend),
+            ("--model", args.model),
+            ("--adapter", args.adapter),
+            ("--base-url", args.base_url),
+            ("--remote-url", args.remote_url),
+        ):
+            if value:
+                child_args.extend((flag, value))
+        if args.vision:
+            child_args.append("--vision")
+        if args.confirm:
+            child_args.append("--confirm")
+        if args.steps:
+            child_args.extend(("--steps", str(args.steps)))
+        if args.remote_allow_unattended:
+            child_args.append("--remote-allow-unattended")
+
+        from jarvis.browser import run_browser
+
+        return run_browser(
+            child_args=child_args,
+            initial_task=None,
+            remote_agent=True,
+        )
+
     if any(remote_modes):
         return _run_remote_mode(args, cfg)
 
@@ -192,11 +240,15 @@ def _run_remote_mode(args, cfg) -> int:
             remote.trust_pairing(cfg, pairing.label, supplied, role=pairing.role)
             print(f"Trusted {pairing.label} ({pairing.role}).")
             return 0
-        if args.remote_status:
-            print(remote.status_text(cfg))
+        if args.remote_status or args.list_devices:
+            print(remote.devices_text(cfg))
+            return 0
+        if args.remote_remove:
+            print(remote.remove_pairing(cfg, args.remote_remove))
             return 0
         if args.remote_send:
-            ok, message = remote.send_task(cfg, args.remote_send[0], args.remote_send[1])
+            ok, message, _image_path = remote.send_task(
+                cfg, args.remote_send[0], args.remote_send[1])
             print(message)
             return 0 if ok else 1
         if args.remote_agent:

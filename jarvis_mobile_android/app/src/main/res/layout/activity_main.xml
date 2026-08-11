@@ -82,12 +82,37 @@
             android:layout_height="wrap_content"
             android:text="Trust paired computer" />
 
+        <TextView
+            android:id="@+id/accessibilityStatusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:background="#102A35"
+            android:padding="12dp"
+            android:text="Accessibility control: checking…"
+            android:textColor="#D9F7FF"
+            android:textSize="14sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="Android 13+: if Accessibility says this sideloaded app is restricted or dangerous, open App info, tap ⋮, and choose Allow restricted settings first. Only allow it if you trust this APK."
+            android:textColor="#FFC96B"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/restrictedSettingsButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="1. Open App info / allow restricted settings" />
+
         <Button
             android:id="@+id/accessibilityButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:text="Enable Android accessibility control" />
+            android:text="2. Enable Android accessibility control" />
 
         <Button
             android:id="@+id/startButton"
@@ -106,7 +131,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="24dp"
-            android:text="Computer command format for this first version:\nmobile: open com.android.settings\nmobile: tap 500 700\nmobile: swipe 500 1400 500 400\nmobile: type hello\nmobile: back\n\nThe Android accessibility permission is required for tap, swipe, type, and back."
+            android:text="Computer command examples:\nmobile: open YouTube\nmobile: open https://youtube.com\nmobile: open Chrome to https://youtube.com\nmobile: open com.android.settings\nmobile: tap 500 700\nmobile: swipe 500 1400 500 400\nmobile: type hello\nmobile: back\n\nOpening apps and URLs does not require Accessibility. Tap, swipe, type, back, and home do."
             android:textColor="#A9CCD6"
             android:textSize="14sp" />
     </LinearLayout>

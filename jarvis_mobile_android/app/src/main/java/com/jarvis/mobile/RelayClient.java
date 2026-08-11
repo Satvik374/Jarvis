@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 
 /** Thin HTTP client for the relay_server FastAPI API. */
 final class RelayClient {
@@ -29,7 +30,7 @@ final class RelayClient {
     static String normalizeEndpoint(String raw) {
         String value = raw == null ? "" : raw.trim().replaceAll("/+$", "");
         Uri uri = Uri.parse(value);
-        String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase();
+        String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(Locale.ROOT);
         boolean local = host.equals("localhost") || host.equals("127.0.0.1") || host.equals("::1");
         if ((!"https".equalsIgnoreCase(uri.getScheme()) && !(local && "http".equalsIgnoreCase(uri.getScheme())))
                 || host.isEmpty()) {
@@ -41,7 +42,7 @@ final class RelayClient {
     PairingRecord claim(String code, String phoneName) throws Exception {
         Protocol.Identity identity = Protocol.Identity.create();
         JSONObject body = new JSONObject()
-                .put("code", code.trim().toUpperCase())
+                .put("code", code.trim().toUpperCase(Locale.ROOT))
                 .put("name", phoneName)
                 .put("kx_public", identity.kxPublic)
                 .put("sign_public", identity.signPublic);

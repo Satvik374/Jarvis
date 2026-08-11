@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Arrays;
+import java.util.Locale;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -80,7 +81,7 @@ final class Protocol {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         byte[] prefix = "Jarvis Remote fingerprint\0".getBytes(StandardCharsets.UTF_8);
         digest.update(prefix);
-        String hex = hex(digest.digest(secret)).substring(0, 20).toUpperCase();
+        String hex = hex(digest.digest(secret)).substring(0, 20).toUpperCase(Locale.ROOT);
         return hex.substring(0, 4) + "-" + hex.substring(4, 8) + "-" + hex.substring(8, 12)
                 + "-" + hex.substring(12, 16) + "-" + hex.substring(16, 20);
     }
