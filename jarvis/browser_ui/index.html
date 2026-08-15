@@ -234,6 +234,19 @@
               <p id="stateDetail">Calibrating neural interface</p>
             </div>
           </div>
+
+          <div class="hologram-toolbar" role="toolbar" aria-label="3D Holographic controls">
+            <div class="hologram-modes">
+              <button type="button" class="holo-btn is-active" data-holo-mode="hologram" title="Full 3D Holographic Arc Reactor">HOLOGRAM</button>
+              <button type="button" class="holo-btn" data-holo-mode="orbit" title="Free Orbital Rotation">ORBIT</button>
+              <button type="button" class="holo-btn" data-holo-mode="wireframe" title="Geodesic Neural Lattice">WIREFRAME</button>
+              <button type="button" class="holo-btn" data-holo-mode="quantum" title="Volumetric Quantum Swarm">QUANTUM</button>
+            </div>
+            <div class="hologram-actions">
+              <button type="button" class="holo-action-btn" id="holoResetBtn" title="Reset Camera Perspective">⟲ RESET</button>
+              <button type="button" class="holo-action-btn" id="holoPulseBtn" title="Emit Holographic Energy Pulse">⚡ PULSE</button>
+            </div>
+          </div>
         </div>
 
         <div class="mode-strip" aria-label="Jarvis processing cycle">
@@ -262,7 +275,7 @@
             <span class="hud-chip-label">STEPS</span>
             <span class="hud-chip-value" id="hudSteps">0</span>
           </div>
-          <div class="hud-chip hud-chip-alert">
+          <div class="hud-chip hud-chip-alert" id="hudAlertChip">
             <span class="hud-chip-label">ALERTS</span>
             <span class="hud-chip-value" id="hudAlerts">0</span>
           </div>
@@ -399,6 +412,7 @@
 
   <script src="/vendor/three.min.js"></script>
   <script src="/grainient.js"></script>
+  <script src="/hologram.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

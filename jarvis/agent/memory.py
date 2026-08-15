@@ -113,132 +113,56 @@ def format_memory_text(facts: list[str], learned_plans: list[str]) -> str:
 
 
 def remember_fact(memory_path: Path | str | None = None, fact: str = "",
-                  category: str = "fact") -> str:
-    """Store a fact permanently in memory.txt so it is kept forever."""
+                  category: str = "fact", entity: str | None = None,
+                  relation: str | None = None, target_entity: str | None = None) -> str:
+    """Store a fact permanently in Vector Store, Knowledge Graph, and memory.txt."""
     path = Path(memory_path) if memory_path else get_default_memory_path()
     fact_str = fact.strip()
     if not fact_str:
         return "No fact provided to remember."
 
-    existing_text = path.read_text(encoding="utf-8") if path.exists() else ""
-    facts, plans = parse_memory_text(existing_text)
-
-    # Clean category tag
-    cat = (category or "fact").strip().lower()
-    entry = f"[{cat}] {fact_str}" if cat and not fact_str.startswith("[") else fact_str
-
-    # Check if entry or fact content already exists (case insensitive)
-    updated = False
-    norm_fact = fact_str.lower()
-    for i, f in enumerate(facts):
-        f_norm = f.lower()
-        if norm_fact in f_norm or f_norm in norm_fact:
-            facts[i] = entry
-            updated = True
-            break
-
-    if not updated:
-        facts.append(entry)
-
-    new_text = format_memory_text(facts, plans)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(new_text, encoding="utf-8")
-    action_type = "Updated" if updated else "Remembered"
-    log.ok(f"{action_type} memory: {entry}")
-    return f"{action_type} permanent memory: {entry}"
+    from ..memory.manager import get_memory_manager
+    mgr = get_memory_manager(memory_path=path)
+    return mgr.remember(
+        fact=fact_str,
+        category=category,
+        entity=entity,
+        relation=relation,
+        target_entity=target_entity,
+        sync_file=True,
+    )
 
 
 def forget_fact(memory_path: Path | str | None = None, target: str = "") -> str:
-    """Remove facts matching target from permanent memory."""
+    """Remove facts matching target from Vector Store and permanent memory."""
     path = Path(memory_path) if memory_path else get_default_memory_path()
     target_str = target.strip().lower()
     if not target_str:
         return "No target provided to forget."
 
-    existing_text = path.read_text(encoding="utf-8") if path.exists() else ""
-    facts, plans = parse_memory_text(existing_text)
-
-    kept_facts = []
-    removed = []
-    for f in facts:
-        if target_str in f.lower():
-            removed.append(f)
-        else:
-            kept_facts.append(f)
-
-    if not removed:
-        return f"No permanent memory found matching '{target}'."
-
-    new_text = format_memory_text(kept_facts, plans)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(new_text, encoding="utf-8")
-    log.ok(f"Forgot memory: {removed}")
-    return f"Forgot {len(removed)} memory item(s) matching '{target}': {', '.join(removed)}"
+    from ..memory.manager import get_memory_manager
+    mgr = get_memory_manager(memory_path=path)
+    return mgr.forget(target=target_str, sync_file=True)
 
 
 def append_learned_plan(memory_path: Path | str | None = None, task: str = "",
                         plan: dict | None = None, max_chars: int = 4000) -> None:
-    """Append a verified-successful plan to memory.txt, capping plans if needed without touching permanent facts."""
+    """Append a verified-successful plan to Vector Store and memory.txt."""
     if not task or not plan:
         return
     path = Path(memory_path) if memory_path else get_default_memory_path()
-    existing_text = path.read_text(encoding="utf-8") if path.exists() else ""
-    facts, plans = parse_memory_text(existing_text)
-
-    entry = (f"- Learned Task: {task.strip()}\n"
-             f"  Successful Plan: {plan.get('name', '')}\n"
-             f"  Approach: {plan.get('description', '')}")
-
-    # Check deduplication
-    want = task.strip().lower()
-    for p in plans:
-        lines = p.lower().splitlines()
-        for line in lines:
-            if line.strip().startswith("- learned task:"):
-                stored = line.split("- learned task:")[1].strip()
-                if stored and (want in stored or stored in want):
-                    return  # Already learned
-
-    plans.append(entry)
-
-    # Size-capping: drop OLDEST learned plans if total formatted size exceeds max_chars
-    new_text = format_memory_text(facts, plans)
-    while len(new_text) > max_chars and len(plans) > 1:
-        plans.pop(0)  # Drop oldest learned plan
-        new_text = format_memory_text(facts, plans)
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(new_text, encoding="utf-8")
-    log.ok("Saved verified-successful plan to memory.txt (learned).")
+    from ..memory.manager import get_memory_manager
+    mgr = get_memory_manager(memory_path=path)
+    mgr.append_learned_plan(task=task, plan=plan, max_chars=max_chars, sync_file=True)
 
 
 def evict_learned_plan(memory_path: Path | str | None = None, task: str = "") -> None:
     """Evict a learned plan that failed."""
-    path = Path(memory_path) if memory_path else get_default_memory_path()
     target = task.strip().lower()
-    if not target or not path.exists():
+    if not target:
         return
+    path = Path(memory_path) if memory_path else get_default_memory_path()
+    from ..memory.manager import get_memory_manager
+    mgr = get_memory_manager(memory_path=path)
+    mgr.evict_learned_plan(task=target, sync_file=True)
 
-    existing_text = path.read_text(encoding="utf-8")
-    facts, plans = parse_memory_text(existing_text)
-
-    kept_plans = []
-    dropped = False
-    for p in plans:
-        lines = p.lower().splitlines()
-        matched = False
-        for line in lines:
-            if line.strip().startswith("- learned task:"):
-                stored = line.split("- learned task:")[1].strip()
-                if stored and (target in stored or stored in target):
-                    matched = True
-                    break
-        if matched and not dropped:
-            dropped = True
-            continue
-        kept_plans.append(p)
-
-    if dropped:
-        new_text = format_memory_text(facts, kept_plans)
-        path.write_text(new_text, encoding="utf-8")
-        log.info(f"Un-learned stale plan for task: {task[:50]}")

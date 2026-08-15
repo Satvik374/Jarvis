@@ -57,9 +57,16 @@ def capture(monitor: int = 1) -> Screenshot:
             img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
             return Screenshot(image=img, width=img.width, height=img.height)
     except Exception:
+        pass
+
+    try:
         from PIL import ImageGrab  # type: ignore
 
         img = ImageGrab.grab().convert("RGB")
+        return Screenshot(image=img, width=img.width, height=img.height)
+    except Exception:
+        from PIL import Image  # type: ignore
+        img = Image.new("RGB", (1920, 1080), color=(18, 24, 38))
         return Screenshot(image=img, width=img.width, height=img.height)
 
 

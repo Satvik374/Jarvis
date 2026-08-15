@@ -42,7 +42,10 @@ _SLASH_COMMANDS = (
     ("/memory", "list permanent memories and learned plans"),
     ("/help", "show all commands"),
     ("/voice", "voice-ONLY mode: talk instead of typing"),
-    ("/wake", 'hands-free mode: say "Hey Jarvis" to command'),
+    ("/macro", "watch & learn: record, list, or replay desktop workflows"),
+    ("/secret", "Windows Credential Manager / DPAPI vault: set/get/list/migrate"),
+    ("/see", "[question] - multimodal live screen & webcam visual perception"),
+    ("/cam", "[snap|inspect] - physical webcam vision tools"),
     ("/cron", "list/add/remove scheduled jobs"),
     ("/connect", "Gmail/Discord/WhatsApp connector status and test"),
     ("/remote", "list, remove, trust, or send tasks to paired devices"),
@@ -434,9 +437,9 @@ def repl(cfg: Config | None = None) -> int:
 
     greeting = _greeting()
     log.jarvis(f"{greeting} (':help' for commands, ':voice on' to talk, "
-               "':cron' to schedule, ':quit' to exit)")
+               "':wake' for hands-free, ':cron' to schedule, ':quit' to exit)")
     # Jarvis always speaks, in every mode; voice mode only adds the mic (STT).
-    voice.speak(greeting, wait=cfg.voice_enabled)
+    voice.speak(greeting, wait=cfg.voice_enabled or cfg.wake_enabled)
     prompt = f"\n{_COLORS['cyan']}╭─{_COLORS['reset']}{_COLORS['bold']} {_c('you', 'cyan')} {_COLORS['dim']}›{_COLORS['reset']} "
 
     # Launched with --voice / voice_enabled: greeted aloud above, go straight
@@ -450,6 +453,18 @@ def repl(cfg: Config | None = None) -> int:
         _persist_voice(False)
         log.ok("voice mode off - typed prompt, replies still spoken. "
                "(':voice on' to resume)")
+
+    # Launched with --wake / wake_enabled: go straight into hands-free mode -
+    # say "Hey Jarvis", get asked what you want, give the task, get a spoken
+    # summary, then it's back to listening for the wake word - repeat.
+    if cfg.wake_enabled:
+        try:
+            _wake_loop(agent, cfg, announce=False)
+        except KeyboardInterrupt:
+            print()
+        cfg.wake_enabled = False
+        log.ok('hands-free mode off; back to the typed prompt. '
+               "(':wake' to resume)")
 
     while True:
         try:
@@ -625,15 +640,23 @@ _VOICE_EXIT_PHRASES = {"exit voice mode", "stop voice mode", "voice off",
 
 
 def _voice_loop(agent: Agent, cfg: Config, announce: bool = True) -> None:
-    """Voice-ONLY mode: no typed prompt - listen, act, speak, repeat.
+    """Voice-ONLY mode: Full-duplex with real-time interruption (Barge-in).
     Exit with Ctrl+C or by saying one of the exit phrases."""
-    log.ok('voice mode ON - just speak. Say "exit voice mode" or press '
-           "Ctrl+C to go back to typing.")
+    duplex_on = getattr(cfg.voice, "full_duplex", True)
+    duplex_label = " (Full-Duplex Barge-in ON)" if duplex_on else ""
+    log.ok(f'voice mode ON{duplex_label} - just speak. Say "exit voice mode" or press Ctrl+C to go back.')
     if announce:
         voice.speak("Voice mode on. I am listening.", wait=True)
+
+    pending_wav: bytes | None = None
     while True:
-        log.info("listening...")
-        wav = voice.listen(start_timeout=30.0)
+        if pending_wav:
+            wav = pending_wav
+            pending_wav = None
+        else:
+            log.info("listening...")
+            wav = voice.listen(start_timeout=30.0)
+
         if not wav:
             continue                      # silence - keep waiting
         with log.spinner("transcribing"):
@@ -657,32 +680,46 @@ def _voice_loop(agent: Agent, cfg: Config, announce: bool = True) -> None:
             voice.speak("Something went wrong with that task.", wait=True)
             continue
         log.jarvis(result)
-        # wait=True: never let Jarvis's own speech bleed into the next listen
-        voice.speak(result, wait=True)
         log.rule(f"done in {time.time() - started:.1f}s")
 
+        if duplex_on:
+            # Full-duplex speak & listen: speak reply and immediately catch any user barge-in
+            interrupted_wav, was_interrupted = voice.speak_and_listen(
+                result,
+                start_timeout=4.0,
+                full_duplex=True,
+            )
+            if interrupted_wav:
+                pending_wav = interrupted_wav
+        else:
+            voice.speak(result, wait=True)
 
-def _wake_loop(agent: Agent, cfg: Config) -> None:
-    """Hands-free mode: wait for "hey jarvis", listen, act, speak - repeat.
-    Ctrl+C (handled by the caller) exits back to the typed prompt."""
+
+def _wake_loop(agent: Agent, cfg: Config, announce: bool = True) -> None:
+    """Hands-free mode: wait for "hey jarvis", ask what's needed, listen,
+    act, speak a summary - then go straight back to listening for the wake
+    word. Ctrl+C (handled by the caller) exits back to the typed prompt."""
     log.ok('hands-free mode ON - say "Hey Jarvis" to give a command '
            "(Ctrl+C to exit)")
-    voice.speak("Hands free mode on. Say hey jarvis when you need me.")
+    if announce:
+        voice.speak("Hands free mode on. Say hey jarvis when you need me.",
+                    wait=True)
     while True:
         log.info('waiting for "Hey Jarvis"...')
         if not voice.wait_for_wake():
             log.warn("wake-word listener unavailable; leaving hands-free mode.")
             return
-        voice.speak("Yes?", wait=True)      # sync so it never bleeds into the mic
+        # sync so Jarvis's own voice never bleeds into the mic it's about to open
+        voice.speak("Yes? What would you like me to do?", wait=True)
         log.info("listening... speak your command")
         wav = voice.listen(start_timeout=8.0)
         if not wav:
-            voice.speak("I didn't catch that.")
+            voice.speak("I didn't catch that. Say hey jarvis to try again.")
             continue
         with log.spinner("transcribing"):
             task = voice.transcribe(wav, agent.brain)
         if not task:
-            voice.speak("Sorry, I couldn't understand that.")
+            voice.speak("Sorry, I couldn't understand that. Say hey jarvis to try again.")
             continue
         log.info(f'heard: "{task}"')
         log.rule(task[:60], "blue")
@@ -694,10 +731,12 @@ def _wake_loop(agent: Agent, cfg: Config) -> None:
             raise                            # exit hands-free mode entirely
         except Exception as exc:
             log.error(f"unexpected error: {exc}")
-            voice.speak("Something went wrong with that task.")
+            voice.speak("Something went wrong with that task.", wait=True)
             continue
         log.jarvis(result)
-        voice.speak(result)
+        # wait=True: the reply finishes before we go back to listening for
+        # the wake word, so Jarvis's own summary can't trigger a false wake.
+        voice.speak(result, wait=True)
         log.rule(f"done in {time.time() - started:.1f}s")
 
 
@@ -745,26 +784,93 @@ def _command(cmd: str, cfg: Config) -> bool:
         else:
             log.warn("usage: /remember <fact to store forever>")
     elif c == "memory" or c.startswith("memory "):
-        from .agent.memory import parse_memory_text, get_default_memory_path
-        p = get_default_memory_path()
-        if p.exists():
-            text = p.read_text(encoding="utf-8")
-            facts, plans = parse_memory_text(text)
-            log.rule("PERMANENT MEMORIES", "cyan")
-            if facts:
-                for f in facts:
-                    print(f"  {_c('•', 'cyan')} {f}")
+        parts = cmd.strip().split(maxsplit=2)
+        sub = parts[1].lower() if len(parts) > 1 else ""
+        arg = parts[2].strip() if len(parts) > 2 else ""
+
+        from .memory.manager import get_memory_manager
+        mgr = get_memory_manager()
+
+        if sub in {"search", "query", "find"}:
+            if not arg:
+                log.warn("usage: :memory search <topic or question>")
             else:
-                print(_c("  (No permanent memories stored)", "grey"))
-            log.rule("LEARNED TASK PLANS", "cyan")
-            if plans:
-                for plan in plans:
-                    print(_c(plan, "grey"))
+                results = mgr.search_semantic(arg, top_k=6)
+                log.rule(f"SEMANTIC MEMORY SEARCH: '{arg}'", "cyan")
+                if results:
+                    for rec, score in results:
+                        score_color = "green" if score > 0.6 else "yellow"
+                        print(f"  {_c(f'[{score:.2f}]', score_color)} {_c(f'[{rec.category}]', 'cyan')} {rec.content}")
+                else:
+                    print(_c("  (No relevant memory found)", "grey"))
+                log.rule()
+
+        elif sub == "graph":
+            log.rule("KNOWLEDGE GRAPH (ENTITIES & RELATIONS)", "cyan")
+            if arg:
+                subgraph = mgr.query_graph(arg)
+                relations = subgraph.get("relations", [])
+                if relations:
+                    for rel in relations:
+                        ctx = f" {_c(f'({rel.context})', 'grey')}" if rel.context else ""
+                        print(f"  {_c(rel.source_name, 'cyan')} ──[{_c(rel.relation_type, 'yellow')}]──▶ {_c(rel.target_name, 'green')}{ctx}")
+                else:
+                    print(_c(f"  (No graph connections found for entity '{arg}')", "grey"))
             else:
-                print(_c("  (No learned task plans)", "grey"))
+                triplets = mgr.knowledge_graph.get_all_triplets()
+                if triplets:
+                    for s, r, t, ctx in triplets:
+                        ctx_str = f" {_c(f'({ctx})', 'grey')}" if ctx else ""
+                        print(f"  {_c(s, 'cyan')} ──[{_c(r, 'yellow')}]──▶ {_c(t, 'green')}{ctx_str}")
+                else:
+                    print(_c("  (No knowledge graph triplets stored yet)", "grey"))
             log.rule()
+
+        elif sub == "sync":
+            f_count, p_count = mgr.sync_from_file()
+            log.ok(f"Synchronized memory database: {f_count} facts, {p_count} learned plans.")
+
         else:
-            log.info("No memory.txt file found yet.")
+            stats = mgr.get_stats()
+            log.rule("JARVIS LONG-TERM MEMORY (VECTOR + GRAPH RAG)", "cyan")
+            print(f"  {_c('• Vectors / Embeddings:', 'yellow')} {stats['total_vectors']} records ({stats['facts_count']} facts, {stats['learned_plans_count']} plans)")
+            print(f"  {_c('• Knowledge Graph:    ', 'yellow')} {stats['graph_entities']} entities, {stats['graph_relations']} relations")
+            print(f"  {_c('• SQLite DB:          ', 'grey')} {stats['db_path']}")
+            print(f"  {_c('• Commands:           ', 'grey')} :memory search <q> | :memory graph [ent] | :memory sync\n")
+
+            from .agent.memory import parse_memory_text, get_default_memory_path
+            p = get_default_memory_path()
+            if p.exists():
+                text = p.read_text(encoding="utf-8")
+                facts, plans = parse_memory_text(text)
+                log.rule("PERMANENT FACTS", "cyan")
+                if facts:
+                    for f in facts:
+                        print(f"  {_c('•', 'cyan')} {f}")
+                else:
+                    print(_c("  (No permanent memories stored)", "grey"))
+                log.rule("LEARNED TASK PLANS", "cyan")
+                if plans:
+                    for plan in plans[:5]:
+                        print(_c(plan, "grey"))
+                    if len(plans) > 5:
+                        print(_c(f"  ... and {len(plans) - 5} more learned plans (search with :memory search <task>)", "grey"))
+                else:
+                    print(_c("  (No learned task plans)", "grey"))
+                log.rule()
+
+    elif c == "browser" or c.startswith("browser "):
+        _browser_command(cmd, cfg)
+    elif c == "voice" or c.startswith("voice "):
+        _voice_command(cmd, cfg)
+    elif c == "macro" or c.startswith("macro "):
+        _macro_command(cmd, cfg)
+    elif c == "secret" or c.startswith("secret ") or c == "vault" or c.startswith("vault "):
+        _secret_command(cmd, cfg)
+    elif c == "see" or c.startswith("see "):
+        _see_command(cmd, cfg)
+    elif c == "cam" or c.startswith("cam ") or c == "camera" or c.startswith("camera "):
+        _cam_command(cmd, cfg)
     elif c == "cron" or c.startswith("cron "):
         _cron_command(cmd)
     elif c == "mcp" or c.startswith("mcp "):
@@ -776,6 +882,324 @@ def _command(cmd: str, cfg: Config) -> bool:
     else:
         log.warn(f"unknown command '{cmd}' (':help' for the list)")
     return False
+
+
+def _macro_command(raw: str, cfg: Config) -> None:
+    """Handle ':macro [record <name> [desc] | stop | play <name> [speed] | list | show <name> | delete <name>]'."""
+    parts = raw.strip().split(maxsplit=2)
+    sub = parts[1].lower() if len(parts) > 1 else "list"
+    arg = parts[2].strip() if len(parts) > 2 else ""
+
+    from .macro import get_macro_manager, MacroPlayer
+    from .macro.recorder import get_macro_recorder
+
+    mgr = get_macro_manager()
+    rec = get_macro_recorder(mgr)
+
+    if sub in {"record", "start", "rec"}:
+        if not arg:
+            log.warn("usage: :macro record <name> [optional description]")
+            return
+        arg_parts = arg.split(maxsplit=1)
+        name = arg_parts[0]
+        desc = arg_parts[1] if len(arg_parts) > 1 else ""
+        rec.start_recording(name=name, description=desc)
+        log.rule(f"WATCH & LEARN MACRO RECORDER: '{name}'", "yellow")
+        print("  • Jarvis is now watching your mouse clicks, keyboard typing, and window focus.")
+        print("  • Perform your desired actions across any app or desktop window.")
+        print("  • When finished, run ':macro stop' to save and learn this workflow.\n")
+
+    elif sub in {"stop", "end", "save"}:
+        if not rec.is_recording:
+            log.warn("Macro recorder is not active. Use ':macro record <name>' first.")
+            return
+        log.info("Synthesizing recorded actions into optimized macro steps...")
+        macro = rec.stop_recording(save_to_memory=True)
+        log.rule(f"LEARNED MACRO: {macro.name}", "green")
+        print(macro.format_plan())
+        log.rule()
+
+    elif sub in {"play", "run", "exec"}:
+        if not arg:
+            log.warn("usage: :macro play <name> [speed multiplier (e.g. 1.5)]")
+            return
+        arg_parts = arg.split(maxsplit=1)
+        name = arg_parts[0]
+        speed = 1.0
+        if len(arg_parts) > 1:
+            try:
+                speed = float(arg_parts[1])
+            except ValueError:
+                pass
+
+        player = MacroPlayer(mgr)
+        res = player.play(name, speed=speed)
+        if not res.get("ok"):
+            log.error(res.get("message", "Playback failed."))
+
+    elif sub in {"show", "view", "info"}:
+        if not arg:
+            log.warn("usage: :macro show <name>")
+            return
+        macro = mgr.load_macro(arg)
+        if not macro:
+            log.warn(f"Macro '{arg}' not found.")
+            return
+        log.rule(f"MACRO: {macro.name}", "cyan")
+        print(macro.format_plan())
+        log.rule()
+
+    elif sub in {"delete", "remove", "rm"}:
+        if not arg:
+            log.warn("usage: :macro delete <name>")
+            return
+        ok = mgr.delete_macro(arg)
+        if ok:
+            log.ok(f"Macro '{arg}' deleted.")
+        else:
+            log.warn(f"Macro '{arg}' not found.")
+
+    else:  # list
+        macros = mgr.list_macros()
+        log.rule("SAVED WORKFLOW MACROS (WATCH & LEARN)", "cyan")
+        if not macros:
+            print(_c("  (No macros recorded yet. Use ':macro record <name>' to record one)", "grey"))
+        else:
+            for m in macros:
+                apps = f" [{', '.join(m.target_apps)}]" if m.target_apps else ""
+                print(f"  {_c('• ' + m.name, 'yellow')}{_c(apps, 'cyan')} ({len(m.steps)} steps) - {_c(m.description or 'Custom Macro', 'grey')}")
+        print(f"\n  {_c('Commands:', 'grey')} :macro record <name> | :macro stop | :macro play <name> [speed] | :macro show <name>\n")
+        log.rule()
+
+
+def _secret_command(raw: str, cfg: Config) -> None:
+    """Handle ':secret [list | set <key> <val> [credman|dpapi] | get <key> | delete <key> | migrate]'."""
+    parts = raw.strip().split(maxsplit=3)
+    sub = parts[1].lower() if len(parts) > 1 else "list"
+
+    from .security import get_credential_vault
+    vault = get_credential_vault()
+
+    if sub in {"set", "add"}:
+        if len(parts) < 4:
+            log.warn("usage: :secret set <key> <value> [credman|dpapi|all]")
+            return
+        key = parts[2].strip()
+        val = parts[3].strip()
+        backend = "credman"
+        if " " in val:
+            v_parts = val.rsplit(maxsplit=1)
+            if v_parts[-1].lower() in {"credman", "dpapi", "all"}:
+                val = v_parts[0]
+                backend = v_parts[1].lower()
+        ok = vault.set_secret(key, val, backend=backend)
+        if ok:
+            log.ok(f"Stored secret '{key}' in Windows Vault ({backend}): {vault.mask_secret(val)}")
+        else:
+            log.error(f"Failed to store secret '{key}'.")
+
+    elif sub in {"get", "show"}:
+        if len(parts) < 3:
+            log.warn("usage: :secret get <key>")
+            return
+        key = parts[2].strip()
+        val = vault.get_secret(key)
+        if val:
+            log.rule(f"SECRET: {key}", "cyan")
+            print(f"  • Key:     {key}")
+            print(f"  • Masked:  {vault.mask_secret(val)}")
+            print(f"  • Length:  {len(val)} characters")
+            log.rule()
+        else:
+            log.warn(f"Secret '{key}' not found in vault.")
+
+    elif sub in {"del", "delete", "rm", "remove"}:
+        if len(parts) < 3:
+            log.warn("usage: :secret delete <key>")
+            return
+        key = parts[2].strip()
+        ok = vault.delete_secret(key)
+        if ok:
+            log.ok(f"Deleted secret '{key}' from vault.")
+        else:
+            log.warn(f"Secret '{key}' not found.")
+
+    elif sub in {"migrate", "import"}:
+        migrated = vault.migrate_from_env()
+        if migrated:
+            log.ok(f"Migrated {len(migrated)} secret(s) to Windows Credential Manager: {', '.join(migrated)}")
+        else:
+            log.info("No unmanaged secrets found in .env or environment to migrate.")
+
+    else:  # list / status
+        secrets = vault.list_secrets()
+        log.rule("WINDOWS CREDENTIAL MANAGER / DPAPI VAULT", "cyan")
+        if not secrets:
+            print(_c("  (No credentials stored in vault yet. Use ':secret set <key> <val>' or ':secret migrate')", "grey"))
+        else:
+            for s in secrets:
+                b_color = "green" if s["backend"] == "credman" else "yellow" if "dpapi" in s["backend"] else "grey"
+                print(f"  {_c('• ' + s['key'], 'cyan')} {_c(f'[{s['backend']}]', b_color)} : {s['masked']}")
+        print(f"\n  {_c('Commands:', 'grey')} :secret set <key> <val> | :secret get <key> | :secret delete <key> | :secret migrate\n")
+        log.rule()
+
+
+def _see_command(raw: str, cfg: Config) -> None:
+    """Handle ':see [optional question or instruction]'."""
+    parts = raw.strip().split(maxsplit=1)
+    prompt = parts[1].strip() if len(parts) > 1 else "Describe what you see on my screen and in my physical environment."
+
+    from .perception import get_live_vision
+    from .agent.brain import make_brain
+
+    vision = get_live_vision()
+    brain = make_brain(cfg.brain)
+
+    log.rule("SEE WHAT I SEE (SCREEN + WEBCAM FUSION)", "cyan")
+    with log.spinner("perceiving live screen and physical environment"):
+        analysis = vision.analyze(source="both", prompt=prompt, brain=brain)
+    print(f"\n{analysis}\n")
+    log.rule()
+
+
+def _cam_command(raw: str, cfg: Config) -> None:
+    """Handle ':cam [snap | list | inspect <question>]'."""
+    parts = raw.strip().split(maxsplit=2)
+    sub = parts[1].lower() if len(parts) > 1 else "snap"
+    arg = parts[2].strip() if len(parts) > 2 else ""
+
+    from .perception import get_live_vision
+    from .agent.brain import make_brain
+
+    vision = get_live_vision()
+
+    if sub in {"inspect", "ask", "see"}:
+        prompt = arg or "Describe what is visible through the camera."
+        brain = make_brain(cfg.brain)
+        log.rule("LIVE WEBCAM PERCEPTION", "cyan")
+        with log.spinner("analyzing physical camera feed"):
+            analysis = vision.analyze(source="webcam", prompt=prompt, brain=brain)
+        print(f"\n{analysis}\n")
+        log.rule()
+
+    elif sub in {"snap", "shot", "capture"}:
+        cam = vision.capture_webcam()
+        if cam:
+            p = Path.home() / "Pictures" / f"jarvis_cam_{int(time.time())}.jpg"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            cam.save(p)
+            log.ok(f"Webcam snapshot saved: {p} ({cam.width}x{cam.height})")
+        else:
+            log.warn("Webcam is offline or unavailable.")
+
+    else:
+        log.rule("WEBCAM VISION COMMANDS", "cyan")
+        print(f"  {_c('• :cam snap', 'yellow')}            - Take a snapshot and save to ~/Pictures")
+        print(f"  {_c('• :cam inspect <prompt>', 'yellow')} - Visually analyze physical objects/scene via webcam")
+        print(f"  {_c('• :see <prompt>', 'yellow')}         - Multimodal dual-fusion (Screen + Webcam)\n")
+        log.rule()
+
+
+
+def _voice_command(raw: str, cfg: Config) -> None:
+    """Handle ':voice [duplex [on|off] | sensitivity <0.1-1.0> | interrupt | status]'."""
+    parts = raw.strip().split(maxsplit=2)
+    sub = parts[1].lower() if len(parts) > 1 else "status"
+    arg = parts[2].strip() if len(parts) > 2 else ""
+
+    if sub in {"duplex", "bargein", "barge-in"}:
+        if arg in {"on", "1", "true", "yes"}:
+            cfg.voice.full_duplex = True
+            log.ok("Full-duplex voice with real-time barge-in: ON")
+        elif arg in {"off", "0", "false", "no"}:
+            cfg.voice.full_duplex = False
+            log.ok("Full-duplex voice: OFF (half-duplex serialized mode)")
+        else:
+            log.info(f"Full-duplex voice is currently: {'ON' if cfg.voice.full_duplex else 'OFF'}")
+    elif sub in {"sensitivity", "sens"}:
+        if arg:
+            try:
+                val = float(arg)
+                cfg.voice.barge_in_sensitivity = max(0.1, min(1.0, val))
+                log.ok(f"Barge-in sensitivity set to: {cfg.voice.barge_in_sensitivity:.2f}")
+            except ValueError:
+                log.warn("usage: :voice sensitivity <0.1 to 1.0>")
+        else:
+            log.info(f"Current barge-in sensitivity: {cfg.voice.barge_in_sensitivity:.2f}")
+    elif sub in {"interrupt", "stop", "quiet", "silence"}:
+        was_speaking = voice.interrupt_speech()
+        if was_speaking:
+            log.ok("Interrupted active voice playback.")
+        else:
+            log.info("Voice was not actively speaking.")
+    else:
+        log.rule("VOICE CONFIGURATION & STATUS", "cyan")
+        print(f"  • Speaking Now:         {'YES' if voice.is_speaking() else 'No'}")
+        print(f"  • Full-Duplex Barge-in: {'ENABLED' if cfg.voice.full_duplex else 'Disabled'}")
+        print(f"  • Barge-in Sensitivity: {cfg.voice.barge_in_sensitivity:.2f}")
+        print(f"  • TTS Engine:           {cfg.voice.engine} ({cfg.voice.voice if cfg.voice.engine == 'gemini' else cfg.voice.local_voice})")
+        print(f"  • Commands:             :voice duplex on|off | :voice sensitivity <val> | :voice interrupt")
+        log.rule()
+
+
+
+def _browser_command(raw: str, cfg: Config) -> None:
+    """Handle ':browser [goto <url> | snap | click <target> | type <target> <text> | shot | close]'."""
+    parts = raw.strip().split(maxsplit=2)
+    sub = parts[1].lower() if len(parts) > 1 else "snap"
+    arg = parts[2].strip() if len(parts) > 2 else ""
+
+    from .browser_engine import get_browser_driver
+    driver = get_browser_driver(cfg=cfg)
+
+    if sub in {"goto", "open", "navigate"}:
+        if not arg:
+            log.warn("usage: :browser goto <url>")
+            return
+        log.info(f"Navigating to {arg}...")
+        res = driver.navigate(arg)
+        log.rule(f"BROWSER: {res.get('title')} ({res.get('url')})", "cyan")
+        print(res.get("snapshot", ""))
+        log.rule()
+
+    elif sub in {"click"}:
+        if not arg:
+            log.warn("usage: :browser click <target (e.g. e1, #id, or text)>")
+            return
+        res = driver.click(arg)
+        if res.get("ok"):
+            log.ok(res.get("message", "Clicked."))
+            print(res.get("snapshot", ""))
+        else:
+            log.error(res.get("message", "Click failed."))
+
+    elif sub in {"type", "fill", "input"}:
+        if not arg:
+            log.warn("usage: :browser type <target> <text to type>")
+            return
+        subparts = arg.split(maxsplit=1)
+        target = subparts[0]
+        text = subparts[1] if len(subparts) > 1 else ""
+        res = driver.type_text(target, text)
+        if res.get("ok"):
+            log.ok(res.get("message", "Typed."))
+        else:
+            log.error(res.get("message", "Type failed."))
+
+    elif sub in {"shot", "screenshot"}:
+        shot_path = driver.take_screenshot()
+        log.ok(f"Browser screenshot saved to: {shot_path}")
+
+    elif sub in {"close", "quit", "exit"}:
+        driver.close()
+        log.ok("Browser session closed.")
+
+    else:  # snap or overview
+        snap = driver.snapshot()
+        log.rule(f"BROWSER SNAPSHOT: {snap.title} ({snap.url})", "cyan")
+        print(snap.format_text())
+        log.rule()
+
 
 
 def _cron_command(raw: str) -> None:

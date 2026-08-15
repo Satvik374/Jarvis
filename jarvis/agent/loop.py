@@ -147,6 +147,9 @@ class Agent:
         self.writer = TrajectoryWriter(
             str(traj_dir), enabled=cfg.data.collect_trajectories)
         self._shot_dir = proj_root / "dataset" / "data" / "screenshots"
+        from ..memory.manager import get_memory_manager
+        self.memory_mgr = get_memory_manager(memory_path=self.memory_path)
+
 
     # ------------------------------------------------------------------ #
     def _generate_plans(self, task: str, memory: str = "") -> list[dict]:
@@ -227,7 +230,7 @@ class Agent:
         task actually completed on screen. ask/cancel/brain-error end the whole
         run immediately - they are not "plan failures" to retry past.
         """
-        memory = self._read_memory()
+        memory = self._read_memory(task=task)
         chat_note = self._chat_context()   # persistent user<->Jarvis history
 
         # Image input: an image-file path anywhere in the prompt attaches that
@@ -389,14 +392,15 @@ class Agent:
                 if result.clear_image:
                     remote_image = None
                 if result.image_path:
-                    loaded_remote_image = _find_image(f'"{result.image_path}"')
-                    if loaded_remote_image is not None and self.cfg.brain.use_vision:
-                        remote_image = loaded_remote_image
-                        result.message += (
-                            " The authenticated image on the next turn is the REMOTE DEVICE "
-                            "screen; ignore the local desktop observation when interpreting it "
-                            "and continue through remote_task only."
-                        )
+                    loaded_action_image = _find_image(f'"{result.image_path}"')
+                    if loaded_action_image is not None and self.cfg.brain.use_vision:
+                        remote_image = loaded_action_image
+                        if decision.action == "remote_task":
+                            result.message += (
+                                " The authenticated image on the next turn is the REMOTE DEVICE "
+                                "screen; ignore the local desktop observation when interpreting it "
+                                "and continue through remote_task only."
+                            )
                 log.act(f"{decision.action}({_fmt_args(decision.args)}) -> {result.message}")
 
                 traj.add(Step(
@@ -607,8 +611,10 @@ class Agent:
                     return True
         return False
 
-    def _read_memory(self) -> str:
+    def _read_memory(self, task: str = "") -> str:
         try:
+            if task and hasattr(self, "memory_mgr") and self.memory_mgr is not None:
+                return self.memory_mgr.get_rag_context(task, max_chars=self.cfg.data.memory_max_chars)
             return (self.memory_path.read_text(encoding="utf-8")
                     if self.memory_path.exists() else "")
         except Exception as exc:
@@ -842,6 +848,12 @@ class Agent:
         # answer before the normal task loop gets a chance to use remote_task.
         from .. import remote
         remote_note = remote.note(self.cfg)
+        rag_note = ""
+        if hasattr(self, "memory_mgr") and self.memory_mgr is not None:
+            try:
+                rag_note = self.memory_mgr.get_rag_context(task, max_chars=1200)
+            except Exception:
+                rag_note = ""
         system = (
             "You are JARVIS - a warm, quick-witted personal assistant with the "
             "easy polish of a trusted aide and a dry sense of humour, who can "
@@ -860,6 +872,7 @@ class Agent:
             '  {"mode":"chat","reply":"<friendly reply>","remember":"<optional fact to store forever>"}\n'
             '   or   {"mode":"task"}'
             + remote_note
+            + (rag_note if rag_note else "")
         )
         messages: list[dict] = []
         if chat_note:

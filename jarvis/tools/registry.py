@@ -775,8 +775,11 @@ def _h_remember(args, obs, cfg):
     if not fact:
         return ActionResult(False, "remember needs a 'fact' parameter", needs_observe=False)
     cat = str(args.get("category", "fact")).strip()
+    entity = str(args.get("entity", "")).strip() or None
+    relation = str(args.get("relation", "")).strip() or None
+    target_entity = str(args.get("target_entity", "")).strip() or None
     from ..agent.memory import remember_fact
-    msg = remember_fact(fact=fact, category=cat)
+    msg = remember_fact(fact=fact, category=cat, entity=entity, relation=relation, target_entity=target_entity)
     return ActionResult(True, msg, needs_observe=False)
 
 
@@ -787,6 +790,235 @@ def _h_forget(args, obs, cfg):
     from ..agent.memory import forget_fact
     msg = forget_fact(target=target)
     return ActionResult(True, msg, needs_observe=False)
+
+
+def _h_memory_search(args, obs, cfg):
+    query = str(args.get("query", "")).strip()
+    if not query:
+        return ActionResult(False, "memory_search needs a 'query' parameter", needs_observe=False)
+    try:
+        top_k = int(args.get("top_k", 5))
+    except (TypeError, ValueError):
+        top_k = 5
+    from ..memory.manager import get_memory_manager
+    mgr = get_memory_manager()
+    results = mgr.search_semantic(query, top_k=top_k)
+    if not results:
+        return ActionResult(True, f"No relevant memories found for query '{query}'.", needs_observe=False)
+    lines = [f"Found {len(results)} relevant memory item(s):"]
+    for rec, score in results:
+        lines.append(f"  • [{rec.category}] {rec.content} (similarity: {score:.2f})")
+    return ActionResult(True, "\n".join(lines), needs_observe=False)
+
+
+def _h_graph_query(args, obs, cfg):
+    entity = str(args.get("entity", "")).strip()
+    if not entity:
+        return ActionResult(False, "graph_query needs an 'entity' parameter", needs_observe=False)
+    from ..memory.manager import get_memory_manager
+    mgr = get_memory_manager()
+    subgraph = mgr.query_graph(entity)
+    ent = subgraph.get("entity")
+    relations = subgraph.get("relations", [])
+    if not relations and not ent:
+        return ActionResult(True, f"No Knowledge Graph connections found for entity '{entity}'.", needs_observe=False)
+    lines = [f"Knowledge Graph Connections for '{entity}':"]
+    for rel in relations:
+        lines.append(f"  • {rel.source_name} --[{rel.relation_type}]--> {rel.target_name}" + (f" (context: {rel.context})" if rel.context else ""))
+    return ActionResult(True, "\n".join(lines), needs_observe=False)
+
+
+def _h_voice_control(args, obs, cfg):
+    action = str(args.get("action", "status")).strip().lower()
+    from ..utils import voice
+    if action == "interrupt":
+        was_speaking = voice.interrupt_speech()
+        msg = "Interrupted active speech playback." if was_speaking else "Voice was not actively speaking."
+        return ActionResult(True, msg, needs_observe=False)
+    elif action == "enable_duplex":
+        if cfg and cfg.voice:
+            cfg.voice.full_duplex = True
+        return ActionResult(True, "Full-duplex voice with real-time barge-in enabled.", needs_observe=False)
+    elif action == "disable_duplex":
+        if cfg and cfg.voice:
+            cfg.voice.full_duplex = False
+        return ActionResult(True, "Full-duplex voice disabled (half-duplex mode).", needs_observe=False)
+    elif action == "set_sensitivity":
+        val_str = str(args.get("value", "0.5")).strip()
+        try:
+            val = float(val_str)
+            if cfg and cfg.voice:
+                cfg.voice.barge_in_sensitivity = max(0.1, min(1.0, val))
+            return ActionResult(True, f"Barge-in sensitivity set to {val}.", needs_observe=False)
+        except ValueError:
+            return ActionResult(False, f"Invalid sensitivity value '{val_str}'. Expected float 0.1-1.0.", needs_observe=False)
+    else:  # status
+        speaking = voice.is_speaking()
+        duplex = getattr(cfg.voice, "full_duplex", True) if cfg else True
+        sens = getattr(cfg.voice, "barge_in_sensitivity", 0.5) if cfg else 0.5
+        msg = f"Voice Status: speaking={speaking}, full_duplex={duplex}, barge_in_sensitivity={sens}"
+        return ActionResult(True, msg, needs_observe=False)
+
+
+def _h_macro(args, obs, cfg):
+    action = str(args.get("action", "list")).strip().lower()
+    name = str(args.get("name", "")).strip()
+    desc = str(args.get("description", "")).strip()
+    speed = float(args.get("speed", 1.0))
+    params = args.get("params") or {}
+
+    from ..macro import get_macro_manager, MacroPlayer
+    mgr = get_macro_manager()
+
+    if action == "record":
+        if not name:
+            return ActionResult(False, "macro 'record' requires a 'name' parameter", needs_observe=False)
+        from ..macro.recorder import get_macro_recorder
+        rec = get_macro_recorder(mgr)
+        rec.start_recording(name=name, description=desc)
+        return ActionResult(True, f"Started recording macro '{name}'. Perform your actions on screen, then call macro(action='stop').", needs_observe=False)
+
+    elif action == "stop":
+        from ..macro.recorder import get_macro_recorder
+        rec = get_macro_recorder(mgr)
+        macro = rec.stop_recording(save_to_memory=True)
+        return ActionResult(True, f"Saved macro '{macro.name}' ({len(macro.steps)} steps). Plan:\n\n{macro.format_plan()}", needs_observe=False)
+
+    elif action == "play":
+        if not name:
+            return ActionResult(False, "macro 'play' requires a 'name' parameter", needs_observe=False)
+        player = MacroPlayer(mgr)
+        res = player.play(name, speed=speed, params=params)
+        return ActionResult(res.get("ok", True), res.get("message", "Played."), needs_observe=True)
+
+    elif action == "show":
+        if not name:
+            return ActionResult(False, "macro 'show' requires a 'name' parameter", needs_observe=False)
+        macro = mgr.load_macro(name)
+        if not macro:
+            return ActionResult(False, f"Macro '{name}' not found.", needs_observe=False)
+        return ActionResult(True, macro.format_plan(), needs_observe=False)
+
+    elif action == "delete":
+        if not name:
+            return ActionResult(False, "macro 'delete' requires a 'name' parameter", needs_observe=False)
+        ok = mgr.delete_macro(name)
+        msg = f"Macro '{name}' deleted." if ok else f"Macro '{name}' could not be deleted."
+        return ActionResult(ok, msg, needs_observe=False)
+
+    else:  # list
+        macros = mgr.list_macros()
+        if not macros:
+            return ActionResult(True, "No macros recorded yet. Use macro(action='record', name='...') to create one.", needs_observe=False)
+        lines = [f"Found {len(macros)} saved macro(s):"]
+        for m in macros:
+            lines.append(f"  • {m.name} ({len(m.steps)} steps) - {m.description}")
+        return ActionResult(True, "\n".join(lines), needs_observe=False)
+
+
+
+def _h_browser_action(args, obs, cfg):
+    action = str(args.get("action", "snapshot")).strip().lower()
+    from ..browser_engine import get_browser_driver
+    driver = get_browser_driver(cfg=cfg)
+    headless = args.get("headless")
+    if headless is not None:
+        try:
+            headless = bool(headless)
+        except Exception:
+            headless = None
+
+    shot_path = None
+    if action in {"navigate", "goto", "open"}:
+        url = str(args.get("url", "")).strip()
+        if not url:
+            return ActionResult(False, "browser_action 'navigate' requires a 'url' parameter", needs_observe=False)
+        res = driver.navigate(url, headless=headless)
+        shot_path = res.get("screenshot_path")
+        msg = f"Navigated to {res.get('url')} ('{res.get('title')}').\n\n{res.get('snapshot', '')}"
+        return ActionResult(res.get("ok", True), msg, needs_observe=False, image_path=shot_path)
+
+    elif action in {"click"}:
+        target = str(args.get("target", "")).strip()
+        if not target:
+            return ActionResult(False, "browser_action 'click' requires a 'target' (e.g. 'e1', CSS selector, or text)", needs_observe=False)
+        res = driver.click(target)
+        shot_path = res.get("screenshot_path")
+        msg = f"{res.get('message', 'Clicked.')}\nPage: {res.get('url')} ('{res.get('title')}')\n\n{res.get('snapshot', '')}"
+        return ActionResult(res.get("ok", True), msg, needs_observe=False, image_path=shot_path)
+
+    elif action in {"type", "fill", "input"}:
+        target = str(args.get("target", "")).strip()
+        text = str(args.get("text", ""))
+        press_enter = bool(args.get("press_enter", False))
+        if not target:
+            return ActionResult(False, "browser_action 'type' requires a 'target' (e.g. 'e1' or selector)", needs_observe=False)
+        res = driver.type_text(target, text, press_enter=press_enter)
+        shot_path = res.get("screenshot_path")
+        msg = f"{res.get('message', 'Typed text.')}\nPage: {res.get('url')} ('{res.get('title')}')\n\n{res.get('snapshot', '')}"
+        return ActionResult(res.get("ok", True), msg, needs_observe=False, image_path=shot_path)
+
+    elif action in {"select"}:
+        target = str(args.get("target", "")).strip()
+        value = str(args.get("value", "")).strip()
+        if not target or not value:
+            return ActionResult(False, "browser_action 'select' requires both 'target' and 'value'", needs_observe=False)
+        res = driver.select_option(target, value)
+        shot_path = res.get("screenshot_path")
+        return ActionResult(res.get("ok", True), f"{res.get('message')}\n\n{res.get('snapshot', '')}", needs_observe=False, image_path=shot_path)
+
+    elif action in {"scroll"}:
+        direction = str(args.get("direction", "down")).strip()
+        amount = int(args.get("amount", 500) or 500)
+        res = driver.scroll(direction=direction, amount=amount)
+        shot_path = res.get("screenshot_path")
+        return ActionResult(res.get("ok", True), f"{res.get('message')}\n\n{res.get('snapshot', '')}", needs_observe=False, image_path=shot_path)
+
+    elif action in {"hover"}:
+        target = str(args.get("target", "")).strip()
+        res = driver.hover(target)
+        shot_path = res.get("screenshot_path")
+        return ActionResult(res.get("ok", True), f"{res.get('message')}\n\n{res.get('snapshot', '')}", needs_observe=False, image_path=shot_path)
+
+    elif action in {"press"}:
+        key = str(args.get("text", args.get("key", "Enter"))).strip()
+        res = driver.press_key(key)
+        shot_path = res.get("screenshot_path")
+        return ActionResult(res.get("ok", True), f"{res.get('message')}\n\n{res.get('snapshot', '')}", needs_observe=False, image_path=shot_path)
+
+    elif action in {"extract"}:
+        target = str(args.get("target", "")).strip() or None
+        mode = str(args.get("mode", "markdown")).strip()
+        res = driver.extract_content(target=target, mode=mode)
+        if not res.get("ok"):
+            return ActionResult(False, res.get("message", "Extraction failed"), needs_observe=False)
+        return ActionResult(True, f"Extracted content from {res.get('url')} ('{res.get('title')}'):\n\n{res.get('content')}", needs_observe=False)
+
+    elif action in {"eval", "evaluate"}:
+        script = str(args.get("text", args.get("script", ""))).strip()
+        if not script:
+            return ActionResult(False, "browser_action 'eval' requires a 'text' (JavaScript script)", needs_observe=False)
+        res = driver.evaluate(script)
+        if not res.get("ok"):
+            return ActionResult(False, res.get("message", "Eval error"), needs_observe=False)
+        return ActionResult(True, f"JavaScript Result: {res.get('result')}", needs_observe=False)
+
+    elif action in {"snapshot", "inspect"}:
+        snap = driver.snapshot()
+        shot_path = snap.screenshot_path
+        return ActionResult(True, snap.format_text(), needs_observe=False, image_path=shot_path)
+
+    elif action in {"screenshot"}:
+        path = str(args.get("path", "")).strip() or None
+        shot_path = driver.take_screenshot(path=path)
+        return ActionResult(True, f"Browser screenshot captured to: {shot_path}", needs_observe=False, image_path=shot_path)
+
+    elif action in {"close"}:
+        driver.close()
+        return ActionResult(True, "Browser session closed.", needs_observe=False, clear_image=True)
+
+    else:
+        return ActionResult(False, f"Unknown browser_action '{action}'. Supported actions: navigate, click, type, select, scroll, hover, press, extract, snapshot, screenshot, eval, close.", needs_observe=False)
 
 
 def _h_remote_task(args, obs, cfg):
@@ -831,6 +1063,71 @@ def _h_set_theme(args, obs, cfg):
     return ActionResult(True, f"UI visual theme set to '{theme}'", needs_observe=False)
 
 
+def _h_secret(args, obs, cfg):
+    from ..security import get_credential_vault
+    vault = get_credential_vault()
+    op = str(args.get("op", "list")).strip().lower()
+    key = str(args.get("key", "")).strip()
+    val = str(args.get("value", "")).strip()
+    backend = str(args.get("backend", "credman")).strip().lower()
+
+    if op == "list":
+        secrets = vault.list_secrets()
+        if not secrets:
+            return ActionResult(True, "No credentials currently stored in vault.", needs_observe=False)
+        lines = [f"- {s['key']} ({s['backend']}): {s['masked']}" for s in secrets]
+        return ActionResult(True, f"Stored Credentials ({len(secrets)}):\n" + "\n".join(lines), needs_observe=False)
+
+    elif op == "get":
+        if not key:
+            return ActionResult(False, "secret 'get' requires 'key'", needs_observe=False)
+        secret_val = vault.get_secret(key)
+        if not secret_val:
+            return ActionResult(False, f"Secret '{key}' not found in Credential Vault.", needs_observe=False)
+        masked = vault.mask_secret(secret_val)
+        return ActionResult(True, f"Secret '{key}' exists in vault: {masked}", needs_observe=False)
+
+    elif op == "set":
+        if not key or not val:
+            return ActionResult(False, "secret 'set' requires 'key' and 'value'", needs_observe=False)
+        ok = vault.set_secret(key, val, backend=backend)
+        if ok:
+            masked = vault.mask_secret(val)
+            return ActionResult(True, f"Securely stored '{key}' in Windows Credential Vault ({backend}): {masked}", needs_observe=False)
+        return ActionResult(False, f"Failed to store '{key}' in Windows Credential Vault.", needs_observe=False)
+
+    elif op == "delete":
+        if not key:
+            return ActionResult(False, "secret 'delete' requires 'key'", needs_observe=False)
+        ok = vault.delete_secret(key)
+        if ok:
+            return ActionResult(True, f"Deleted secret '{key}' from Credential Vault.", needs_observe=False)
+        return ActionResult(False, f"Secret '{key}' not found or could not be deleted.", needs_observe=False)
+
+    elif op == "migrate":
+        migrated = vault.migrate_from_env()
+        if migrated:
+            return ActionResult(True, f"Successfully migrated {len(migrated)} secret(s) to Windows Credential Manager: {', '.join(migrated)}", needs_observe=False)
+        return ActionResult(True, "No unmanaged secrets found in .env or environment to migrate.", needs_observe=False)
+
+    return ActionResult(False, f"Unknown secret op '{op}'. Must be one of: list, get, set, delete, migrate.", needs_observe=False)
+
+
+def _h_see(args, obs, cfg):
+    prompt = str(args.get("prompt", "What do you see?")).strip()
+    source = str(args.get("source", "both")).strip().lower()
+    camera = int(args.get("camera", 0))
+
+    from ..perception import get_live_vision
+    from ..agent.brain import make_brain
+
+    vision = get_live_vision()
+    brain = make_brain(cfg.brain)
+
+    res = vision.analyze(source=source, prompt=prompt, brain=brain, camera_index=camera)
+    return ActionResult(True, res, needs_observe=False)
+
+
 def _h_ask(args, obs, cfg):
     q = str(args.get("question", "Could you clarify?"))
     return ActionResult(True, q, needs_observe=False, finished=True, ask=q)
@@ -854,6 +1151,7 @@ _HANDLERS = {
     "close_window": _h_close_window,
     "open_url": _h_open_url,
     "read_url": _h_read_url,
+    "browser_action": _h_browser_action,
     "http_request": _h_http_request,
     "python": _h_python,
     "download_file": _h_download_file,
@@ -883,6 +1181,12 @@ _HANDLERS = {
     "clipboard_write": _h_clipboard_write,
     "remember": _h_remember,
     "forget": _h_forget,
+    "memory_search": _h_memory_search,
+    "graph_query": _h_graph_query,
+    "voice_control": _h_voice_control,
+    "macro": _h_macro,
+    "secret": _h_secret,
+    "see": _h_see,
     "remote_task": _h_remote_task,
     "connector": _h_connector,
     "mcp": _h_mcp,

@@ -115,6 +115,14 @@ class VoiceConfig:
     transcription_model: str = "gemini-2.5-flash-lite"
     # Stop recording promptly after the user finishes speaking.
     silence_after: float = 0.6
+    # Full-duplex voice with real-time interruption (barge-in): allows simultaneous
+    # speaking and listening. The user can interrupt Jarvis mid-sentence.
+    full_duplex: bool = True
+    # Barge-in sensitivity: 0.1 (strict, needs louder voice) to 1.0 (sensitive).
+    barge_in_sensitivity: float = 0.5
+    # Frames (~0.1s each) of sustained speech required to trigger barge-in cutoff.
+    barge_in_hold: int = 2
+
 
 
 @dataclass
@@ -133,6 +141,23 @@ class RemoteConfig:
 
 
 @dataclass
+class BrowserConfig:
+    # Run browser headless (silent background) or headful (visible window).
+    headless: bool = False
+    # Browser engine: "chromium" | "chrome" | "msedge" | "firefox" | "webkit"
+    browser_type: str = "chromium"
+    # Optional Chrome DevTools Protocol URL (e.g. "http://localhost:9222") to attach
+    # to an already running browser instance.
+    cdp_url: str = ""
+    # Persistent user data profile path (keeps cookies, logins across sessions).
+    # Default is ~/.jarvis/browser_profile.
+    user_data_dir: str = ""
+    viewport_width: int = 1280
+    viewport_height: int = 800
+    timeout: int = 30000
+
+
+@dataclass
 class Config:
     brain: BrainConfig = field(default_factory=BrainConfig)
     perception: PerceptionConfig = field(default_factory=PerceptionConfig)
@@ -140,9 +165,14 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     remote: RemoteConfig = field(default_factory=RemoteConfig)
+    browser: BrowserConfig = field(default_factory=BrowserConfig)
     # Voice mode: speak replies aloud (Gemini TTS) and allow spoken commands
     # (mic -> Gemini transcription). Toggle at runtime with ':voice on|off'.
     voice_enabled: bool = False
+    # Hands-free wake-word mode: launch straight into "say Hey Jarvis" mode.
+    # Not persisted - set only via --wake / JARVIS_WAKE; toggle at runtime
+    # with ':wake'.
+    wake_enabled: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -184,10 +214,15 @@ def load_config(path: Path | str | None = None) -> Config:
         _apply(cfg.data, data.get("data", {}))
         _apply(cfg.voice, data.get("voice", {}))
         _apply(cfg.remote, data.get("remote", {}))
+        _apply(cfg.browser, data.get("browser", {}))
         cfg.voice_enabled = bool(data.get("voice_enabled", cfg.voice_enabled))
 
     # Environment overrides for the most common knobs.
     env = os.environ
+    if v := env.get("JARVIS_BROWSER_HEADLESS"):
+        cfg.browser.headless = v.lower() in {"1", "true", "yes"}
+    if v := env.get("JARVIS_BROWSER_CDP"):
+        cfg.browser.cdp_url = v
     if v := env.get("JARVIS_BACKEND") or env.get("BACKEND"):
         cfg.brain.backend = v
     if v := env.get("JARVIS_MODEL") or env.get("MODEL_ID") or env.get("MODEL"):
@@ -204,6 +239,13 @@ def load_config(path: Path | str | None = None) -> Config:
         cfg.voice.language_code = v
     if v := env.get("JARVIS_STT_MODEL"):
         cfg.voice.transcription_model = v
+    if v := env.get("JARVIS_VOICE_DUPLEX"):
+        cfg.voice.full_duplex = v.lower() in {"1", "true", "yes"}
+    if v := env.get("JARVIS_BARGE_IN_SENSITIVITY"):
+        try:
+            cfg.voice.barge_in_sensitivity = float(v)
+        except ValueError:
+            pass
     if v := env.get("JARVIS_REMOTE_URL"):
         cfg.remote.relay_url = v
     if v := env.get("JARVIS_REMOTE_STATE_DIR"):
@@ -212,6 +254,14 @@ def load_config(path: Path | str | None = None) -> Config:
         cfg.brain.api_key = v
         # Ensure it is set in environment for standard libraries
         os.environ["OPENAI_API_KEY"] = v
+    else:
+        try:
+            from .security import get_secret
+            if vault_key := (get_secret("JARVIS_API_KEY") or get_secret("OPENAI_API_KEY") or get_secret("GEMINI_API_KEY") or get_secret("ANTHROPIC_API_KEY")):
+                cfg.brain.api_key = vault_key
+                os.environ["OPENAI_API_KEY"] = vault_key
+        except Exception:
+            pass
 
     # Automatic fallback to openai backend if custom URL or API key is set
     # but backend is still the default ollama
@@ -225,6 +275,8 @@ def load_config(path: Path | str | None = None) -> Config:
         cfg.brain.use_vision = True
     if env.get("JARVIS_VOICE") in {"1", "true", "True"}:
         cfg.voice_enabled = True
+    if env.get("JARVIS_WAKE") in {"1", "true", "True"}:
+        cfg.wake_enabled = True
     if env.get("JARVIS_CONFIRM") in {"1", "true", "True"}:
         cfg.safety.confirm_each_action = True
     return cfg

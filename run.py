@@ -7,6 +7,7 @@ Usage:
   python run.py "open notepad and type hello"   # run one task then exit
   python run.py --check              # environment / dependency check
   python run.py --backend ollama --model ornith:9b "..."
+  python run.py --wake               # hands-free: say "Hey Jarvis" to command
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", dest="base_url", help="override backend base URL")
     parser.add_argument("--vision", action="store_true", help="send screenshots to the model")
     parser.add_argument("--voice", action="store_true", help="speak replies aloud (and voice input in console)")
+    parser.add_argument("--wake", action="store_true", help='launch straight into hands-free mode: say "Hey Jarvis" to command')
     parser.add_argument("--confirm", action="store_true", help="confirm each action")
     parser.add_argument("--steps", type=int, help="max steps per task")
     parser.add_argument("--check", action="store_true", help="run an environment check and exit")
@@ -106,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg.brain.use_vision = True
     if args.voice:
         cfg.voice_enabled = True
+    if args.wake:
+        cfg.wake_enabled = True
     if args.confirm:
         cfg.safety.confirm_each_action = True
     if args.steps:

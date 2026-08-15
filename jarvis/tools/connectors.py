@@ -73,7 +73,18 @@ def _cached(key: tuple, produce) -> str:
 
 
 def _env(*names: str) -> tuple[str, ...]:
-    return tuple(os.getenv(n, "").strip() for n in names)
+    def _lookup(name: str) -> str:
+        if v := os.getenv(name, "").strip():
+            return v
+        try:
+            from ..security import get_secret
+            if val := get_secret(name):
+                return val.strip()
+        except Exception:
+            pass
+        return ""
+
+    return tuple(_lookup(n) for n in names)
 
 
 # --------------------------------------------------------------------------- #

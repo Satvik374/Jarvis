@@ -1966,7 +1966,18 @@
   class EnergyCore {
     constructor(canvas) {
       this.canvas = canvas;
-      this.ctx = canvas.getContext("2d", { alpha: true });
+      this.holo3d = null;
+      if (window.HolographicCore3D && window.THREE) {
+        try {
+          this.holo3d = new window.HolographicCore3D(canvas.parentElement, canvas);
+        } catch (err) {
+          console.warn("Could not start 3D Hologram, falling back to 2D canvas:", err);
+          this.ctx = canvas.getContext("2d", { alpha: true });
+        }
+      } else {
+        this.ctx = canvas.getContext("2d", { alpha: true });
+      }
+
       this.dpr = 1;
       this.width = 0;
       this.height = 0;
@@ -2116,6 +2127,9 @@
     setState(name) {
       if (!this.profiles[name]) name = "working";
       this.state = name;
+      if (this.holo3d) {
+        this.holo3d.setState(name);
+      }
       const profile = this.profiles[name];
       this.target = {
         speed: profile.speed,
@@ -2132,6 +2146,9 @@
 
     setSpeaking(payload) {
       this.speaking = Boolean(payload?.active);
+      if (this.holo3d) {
+        this.holo3d.setSpeaking(payload);
+      }
       if (this.speaking) {
         this.speechDuration = Math.max(
           0.2,
@@ -2347,7 +2364,9 @@
     }
 
     draw(time) {
+      if (this.holo3d && this.holo3d.isWebGLAvailable) return;
       const ctx = this.ctx;
+      if (!ctx) return;
       const t = (time - this.startTime) / 1000;
       const { energy, speed, deform, pulse } = this.current;
       ctx.clearRect(0, 0, this.width, this.height);
@@ -2617,11 +2636,6 @@
       ctx.restore();
     }
 
-    /**
-     * Circular band spectrum.  Bands run from bass at the top to treble at the
-     * bottom down the right half and mirror back up the left, which is what
-     * makes an audio ring read as symmetric rather than as noise.
-     */
     drawVoiceSpectrum(ctx, t, energy) {
       const voice = this.speechMix;
       const bands = this.bars.length;
@@ -2640,7 +2654,6 @@
       ctx.globalCompositeOperation = "lighter";
       ctx.lineCap = "round";
 
-      // The blob surface itself, deformed band by band.
       ctx.beginPath();
       for (let slot = 0; slot <= slots; slot += 1) {
         const wrapped = slot % slots;
@@ -2668,8 +2681,6 @@
         const inner = surface(band, angle) + 2;
         const outer = inner + span * (0.05 + level * 0.95) * voice;
         ctx.beginPath();
-        // Loud bands run hotter (toward white) instead of shifting hue, so the
-        // ring stays on whatever colour the current state profile sets.
         ctx.strokeStyle = this.tint(
           (0.26 + level * 0.66) * voice * (0.72 + energy * 0.28),
           0.12 + level * 0.5,
@@ -2806,4 +2817,47 @@
   renderRibbon();
   updateHud();
   connectEvents();
+
+  // 3D Holographic Core Controls
+  const holoButtons = document.querySelectorAll("[data-holo-mode]");
+  holoButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mode = btn.dataset.holoMode;
+      holoButtons.forEach((b) => b.classList.toggle("is-active", b === btn));
+      orb.holo3d?.setDisplayMode(mode);
+      toast(`Hologram Mode: ${mode.toUpperCase()}`);
+    });
+  });
+
+  const holoResetBtn = document.getElementById("holoResetBtn");
+  if (holoResetBtn) {
+    holoResetBtn.addEventListener("click", () => {
+      orb.holo3d?.resetView();
+      toast("3D Camera Reset");
+    });
+  }
+
+  const holoPulseBtn = document.getElementById("holoPulseBtn");
+  if (holoPulseBtn) {
+    holoPulseBtn.addEventListener("click", () => {
+      orb.holo3d?.triggerPulse(1.8);
+    });
+  }
+
+  // Keyboard shortcut: Press 'H' (when not in inputs) to cycle hologram modes
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.ctrlKey || e.metaKey) return;
+    if (e.key.toLowerCase() === "h") {
+      const modes = ["hologram", "orbit", "wireframe", "quantum"];
+      const currentMode = orb.holo3d?.displayMode || "hologram";
+      const nextMode = modes[(modes.indexOf(currentMode) + 1) % modes.length];
+      holoButtons.forEach((b) => b.classList.toggle("is-active", b.dataset.holoMode === nextMode));
+      orb.holo3d?.setDisplayMode(nextMode);
+      toast(`Hologram Mode: ${nextMode.toUpperCase()}`);
+    } else if (e.key.toLowerCase() === "r") {
+      orb.holo3d?.resetView();
+    } else if (e.key.toLowerCase() === "p") {
+      orb.holo3d?.triggerPulse(1.8);
+    }
+  });
 })();

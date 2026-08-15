@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import io
 import math
 import os
+import queue
 import struct
 import tempfile
 import threading
@@ -40,6 +41,33 @@ _speech_lifecycle_lock = threading.Lock()
 _speech_playback_lock = threading.Lock()
 _sync_speech_lock = threading.Lock()
 _sync_owner: object | None = None
+_active_playback_cancel: threading.Event | None = None
+_active_playback_lock = threading.Lock()
+_is_speaking_flag = False
+
+
+def is_speaking() -> bool:
+    """Return True if Jarvis is currently playing audio or synthesizing speech."""
+    with _speech_state:
+        return _is_speaking_flag or (_active_playback_cancel is not None and not _active_playback_cancel.is_set())
+
+
+def interrupt_speech() -> bool:
+    """Instantly silence active speech playback and cancel pending synthesis (Barge-in)."""
+    global _speech_generation, _active_playback_cancel, _is_speaking_flag
+    was_speaking = False
+    with _speech_lifecycle_lock:
+        with _speech_state:
+            _speech_generation += 1
+            if _active_playback_cancel and not _active_playback_cancel.is_set():
+                _active_playback_cancel.set()
+                was_speaking = True
+            _is_speaking_flag = False
+            _SPEECH_DISPATCHER.discard_pending()
+            _speech_state.notify_all()
+        _stop_async_playback()
+    return was_speaking
+
 
 
 @dataclass(frozen=True)
@@ -331,6 +359,71 @@ def _play_wav(data: bytes, wait: bool) -> None:
         raise
 
 
+def _play_stream_interruptible(
+    data: bytes,
+    cancel_event: threading.Event | None = None,
+) -> tuple[bool, float]:
+    """Play WAV data using streaming chunks with sub-50ms cancellation checking.
+
+    Returns (was_interrupted: bool, played_seconds: float).
+    """
+    global _active_playback_cancel, _is_speaking_flag
+    if not data:
+        return False, 0.0
+
+    _stop_async_playback()
+    cancel = cancel_event or threading.Event()
+    with _active_playback_lock:
+        _active_playback_cancel = cancel
+        _is_speaking_flag = True
+
+    try:
+        with wave.open(io.BytesIO(data), "rb") as wf:
+            rate = wf.getframerate()
+            channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            frames_total = wf.getnframes()
+            duration = frames_total / rate if rate else 0.0
+
+            if sampwidth != 2 or channels not in (1, 2):
+                _play_wav(data, wait=True)
+                return False, duration
+
+            chunk_frames = max(512, rate // 20)  # ~50ms per chunk
+            played_frames = 0
+
+            try:
+                import sounddevice as sd
+                with sd.RawOutputStream(
+                    samplerate=rate,
+                    channels=channels,
+                    dtype="int16",
+                    blocksize=chunk_frames,
+                ) as stream:
+                    while played_frames < frames_total:
+                        if cancel.is_set():
+                            return True, played_frames / rate
+                        raw_chunk = wf.readframes(chunk_frames)
+                        if not raw_chunk:
+                            break
+                        stream.write(raw_chunk)
+                        played_frames += len(raw_chunk) // (channels * 2)
+
+                return False, played_frames / rate
+            except Exception:
+                if not cancel.is_set():
+                    _play_wav(data, wait=True)
+                return False, duration
+    except Exception:
+        return False, 0.0
+    finally:
+        with _active_playback_lock:
+            if _active_playback_cancel is cancel:
+                _active_playback_cancel = None
+            _is_speaking_flag = False
+
+
+
 def _speak_async(
     text: str,
     generation: int,
@@ -474,18 +567,163 @@ def speak_to_wav(text: str, path: str) -> bool:
 # Wake word
 # --------------------------------------------------------------------------- #
 
+# Live wake-word listening runs entirely on ONE dedicated background thread,
+# started lazily and reused for the rest of the process's life (see
+# _wake_worker_loop / _ensure_wake_worker). A naive per-call implementation
+# had two real bugs:
+#
+#  1. SpInprocRecognizer.AudioInput = Dispatch("SAPI.SpMMAudioIn") reliably
+#     raises a COM "Type mismatch" (-2147352571) - pywin32's dynamic dispatch
+#     can't marshal that object into the property - so live listening failed
+#     before it ever started. Fix: use SpSharedRecognizer, which manages the
+#     OS's default microphone itself and needs no AudioInput at all.
+#  2. Building a fresh recognizer/context/grammar - and calling CoInitialize/
+#     CoUninitialize - on EVERY call worked once and then hung forever on the
+#     next call: tearing down a shared-recognizer context races the SAPI
+#     engine's own async event delivery, so the following CreateRecoContext
+#     blocked indefinitely waiting on a call that would never be pumped.
+#
+# On top of that, SAPI's shared engine can itself hang or time out starting
+# its out-of-process server - especially with another app (a dictation tool,
+# etc.) also driving the microphone - and that hang has no exception and no
+# timeout of its own to catch. Running it on its own thread means a wedged
+# SAPI call can never freeze the console/agent loop: wait_for_wake() below
+# gives that thread a bounded grace period to prove it is alive, then gives
+# up on it (leaving it to die on its own, harmlessly, as a daemon thread)
+# rather than hanging Jarvis with it.
+
+_wake_worker: dict | None = None
+_wake_worker_lock = threading.Lock()
+_WAKE_STARTUP_GRACE = 25.0    # generous: covers a couple of slow-start retries
+
+
+def _wake_worker_loop(requests: "queue.Queue") -> None:
+    """Body of the dedicated wake-word thread.
+
+    Owns COM and the SAPI recognizer/context/grammar for as long as the
+    process runs. Each request is
+    ``(phrase, timeout, ready_q, done_q, cancel_event)``.
+    """
+    import time as _t
+    import pythoncom  # type: ignore
+    import win32com.client  # type: ignore
+
+    pythoncom.CoInitialize()
+    ctx = grammar = heard = None
+    cached_phrase = None
+
+    while True:
+        phrase, timeout, ready_q, done_q, cancel_event = requests.get()
+        try:
+            if grammar is None or cached_phrase != phrase:
+                # Starting the shared engine's out-of-process server
+                # occasionally times out on a loaded machine
+                # (SPERR_REMOTE_CALL_TIMED_OUT_START, OLE error 0x80045071) -
+                # observed to be transient, so retry once with a short pause
+                # before giving up.
+                attempts = 2
+                for attempt in range(attempts):
+                    try:
+                        rec = win32com.client.Dispatch("SAPI.SpSharedRecognizer")
+                        ctx = rec.CreateRecoContext()
+                        break
+                    except Exception as exc:
+                        if attempt == attempts - 1:
+                            raise
+                        log.warn(f"wake-word engine starting slowly, retrying: {exc}")
+                        _t.sleep(1.0)
+                grammar = ctx.CreateGrammar()
+                rule = grammar.Rules.Add("wake", 1 | 2)   # SRATopLevel|SRADynamic
+                rule.InitialState.AddWordTransition(None, phrase)
+                grammar.Rules.Commit()
+
+                heard = []
+
+                class _Sink:
+                    def OnRecognition(self, *args):
+                        heard.append(1)
+
+                win32com.client.WithEvents(ctx, _Sink)
+                cached_phrase = phrase
+            ready_q.put(("ok", None))
+        except Exception as exc:
+            grammar = None      # force a full rebuild attempt next time
+            try:
+                ready_q.put(("error", exc))
+            except Exception:
+                pass
+            continue
+
+        try:
+            heard.clear()
+            grammar.CmdSetRuleState("wake", 1)            # SGDSActive
+            t0 = _t.time()
+            result = False
+            while True:
+                pythoncom.PumpWaitingMessages()
+                if heard:
+                    result = True
+                    break
+                if cancel_event.is_set():
+                    break
+                if timeout is not None and _t.time() - t0 > timeout:
+                    break
+                _t.sleep(0.05)
+            done_q.put(("ok", result))
+        except Exception as exc:
+            try:
+                done_q.put(("error", exc))
+            except Exception:
+                pass
+        finally:
+            try:
+                grammar.CmdSetRuleState("wake", 0)
+            except Exception:
+                pass
+
+
+def _ensure_wake_worker() -> dict:
+    """Return the shared worker state, spawning a fresh thread if there is
+    none yet, or if the previous one has actually exited."""
+    global _wake_worker
+    with _wake_worker_lock:
+        if _wake_worker is None or not _wake_worker["thread"].is_alive():
+            requests: queue.Queue = queue.Queue()
+            thread = threading.Thread(
+                target=_wake_worker_loop, args=(requests,),
+                daemon=True, name="jarvis-wake-word")
+            thread.start()
+            _wake_worker = {"thread": thread, "requests": requests}
+        return _wake_worker
+
+
+def _drop_wake_worker(worker: dict) -> None:
+    """Abandon a worker that failed to respond in time.
+
+    It may still be blocked inside a hung native COM call forever; that is
+    fine - it is a daemon thread, so the process can still exit normally,
+    and the next call simply builds a fresh worker with its own apartment.
+    """
+    global _wake_worker
+    with _wake_worker_lock:
+        if _wake_worker is worker:
+            _wake_worker = None
+
+
 def wait_for_wake(phrase: str = "hey jarvis", timeout: float | None = None,
                   _wav_file: str | None = None) -> bool:
     """Block until the wake phrase is spoken. Offline, near-zero CPU.
 
     Uses Windows' built-in SAPI recognizer with a one-phrase grammar - no
     audio ever leaves the machine while waiting. Returns True on wake,
-    False on timeout or if the recognizer is unavailable. Ctrl+C propagates
-    so the caller can exit hands-free mode.
+    False on timeout, on any listener failure, or if the engine does not
+    respond within a short startup grace period - so a wedged SAPI server
+    can never hang the caller. Ctrl+C propagates so the caller can exit
+    hands-free mode.
 
-    ``_wav_file`` feeds a file instead of the microphone (self-tests).
+    ``_wav_file`` feeds a file instead of the microphone (self-tests); that
+    path is one-shot, in-process, and does not use the background worker.
     """
-    import time as _t
     try:
         import pythoncom  # type: ignore
         import win32com.client  # type: ignore
@@ -493,49 +731,82 @@ def wait_for_wake(phrase: str = "hey jarvis", timeout: float | None = None,
         log.warn(f"wake word needs pywin32: {exc}")
         return False
 
-    pythoncom.CoInitialize()
-    grammar = None
-    try:
-        rec = win32com.client.Dispatch("SAPI.SpInprocRecognizer")
-        if _wav_file:
+    if _wav_file:
+        import time as _t
+        pythoncom.CoInitialize()
+        grammar = None
+        try:
+            rec = win32com.client.Dispatch("SAPI.SpInprocRecognizer")
             stream = win32com.client.Dispatch("SAPI.SpFileStream")
             stream.Open(_wav_file)
             rec.AudioInputStream = stream
-        else:
-            rec.AudioInput = win32com.client.Dispatch("SAPI.SpMMAudioIn")
-        ctx = rec.CreateRecoContext()
-        grammar = ctx.CreateGrammar()
-        rule = grammar.Rules.Add("wake", 1 | 2)      # SRATopLevel|SRADynamic
-        rule.InitialState.AddWordTransition(None, phrase)
-        grammar.Rules.Commit()
-        grammar.CmdSetRuleState("wake", 1)           # SGDSActive
+            ctx = rec.CreateRecoContext()
+            grammar = ctx.CreateGrammar()
+            rule = grammar.Rules.Add("wake", 1 | 2)
+            rule.InitialState.AddWordTransition(None, phrase)
+            grammar.Rules.Commit()
+            grammar.CmdSetRuleState("wake", 1)
 
-        heard: list[int] = []
+            heard: list[int] = []
 
-        class _Sink:
-            def OnRecognition(self, *args):
-                heard.append(1)
+            class _Sink:
+                def OnRecognition(self, *args):
+                    heard.append(1)
 
-        win32com.client.WithEvents(ctx, _Sink)
-        t0 = _t.time()
-        while not heard:
-            pythoncom.PumpWaitingMessages()
-            _t.sleep(0.05)
-            if timeout is not None and _t.time() - t0 > timeout:
-                return False
-        return True
-    except KeyboardInterrupt:
-        raise
-    except Exception as exc:
-        log.warn(f"wake-word listener failed: {exc}")
+            win32com.client.WithEvents(ctx, _Sink)
+            t0 = _t.time()
+            while not heard:
+                pythoncom.PumpWaitingMessages()
+                _t.sleep(0.05)
+                if timeout is not None and _t.time() - t0 > timeout:
+                    return False
+            return True
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            log.warn(f"wake-word listener failed: {exc}")
+            return False
+        finally:
+            try:
+                if grammar is not None:
+                    grammar.CmdSetRuleState("wake", 0)
+            except Exception:
+                pass
+            pythoncom.CoUninitialize()
+
+    worker = _ensure_wake_worker()
+    ready_q: queue.Queue = queue.Queue(maxsize=1)
+    done_q: queue.Queue = queue.Queue(maxsize=1)
+    cancel_event = threading.Event()
+    worker["requests"].put((phrase, timeout, ready_q, done_q, cancel_event))
+
+    try:
+        status, err = ready_q.get(timeout=_WAKE_STARTUP_GRACE)
+    except queue.Empty:
+        log.warn("wake-word engine did not respond in time; is another app "
+                 "(a dictation tool, etc.) also using the microphone?")
+        cancel_event.set()
+        _drop_wake_worker(worker)
         return False
-    finally:
-        try:
-            if grammar is not None:
-                grammar.CmdSetRuleState("wake", 0)   # release before mic reuse
-        except Exception:
-            pass
-        pythoncom.CoUninitialize()
+    if status == "error":
+        log.warn(f"wake-word listener failed: {err}")
+        return False
+
+    try:
+        status, result = done_q.get(timeout=timeout)
+    except queue.Empty:
+        cancel_event.set()
+        return False
+    except BaseException:
+        # Ctrl+C (or anything else) while waiting: tell the worker to stop
+        # this wait right away so it is free for the next request instead of
+        # sitting blocked on an abandoned, possibly-unbounded wait.
+        cancel_event.set()
+        raise
+    if status == "error":
+        log.warn(f"wake-word listener failed: {result}")
+        return False
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -599,6 +870,56 @@ class _EnergyVAD:
             return "listening"
         # Recording: track the speech's loudness (jump up fast, bleed down slow),
         # and call it silence once the level drops well below that.
+        self.speech_ref = max(level, self.SPEECH_DECAY * self.speech_ref)
+        if level < self.STOP_FRAC * self.speech_ref:
+            self.quiet += self.chunk
+        else:
+            self.quiet = 0.0
+        return "stop" if self.quiet >= self.silence_after else "recording"
+
+
+class _BargeInVAD(_EnergyVAD):
+    """Energy VAD with adaptive acoustic feedback suppression & barge-in detection."""
+
+    def __init__(
+        self,
+        silence_after: float,
+        chunk: float = 0.1,
+        barge_in_sensitivity: float = 0.5,
+        barge_in_hold: int = 2,
+    ):
+        super().__init__(silence_after=silence_after, chunk=chunk)
+        self.barge_in_sensitivity = max(0.1, min(1.0, barge_in_sensitivity))
+        self.barge_in_hold = max(1, barge_in_hold)
+        self.barge_in_factor = 4.2 * (1.0 - (self.barge_in_sensitivity - 0.5) * 0.4)
+        self.barge_hold = 0
+
+    def feed(self, level: float, is_speaking: bool = False) -> str:
+        """Feed an RMS level. Returns 'listening', 'interrupt', 'recording', or 'stop'."""
+        if not self.started:
+            floor = max(self.MIN_FLOOR, self.floor if self.floor is not None else level)
+            if self.warmed < self.WARMUP:
+                self.warmed += 1
+                self._track_floor(level)
+                return "listening"
+
+            threshold_factor = self.barge_in_factor if is_speaking else self.START_FACTOR
+            required_hold = self.barge_in_hold if is_speaking else self.START_HOLD
+
+            if level >= threshold_factor * floor:
+                self.hold += 1
+                if self.hold >= required_hold:
+                    self.started = True
+                    self.speech_ref = level
+                    return "interrupt" if is_speaking else "recording"
+                return "listening"
+
+            self.hold = 0
+            if not is_speaking:
+                self._track_floor(level)
+            return "listening"
+
+        # Active recording phase
         self.speech_ref = max(level, self.SPEECH_DECAY * self.speech_ref)
         if level < self.STOP_FRAC * self.speech_ref:
             self.quiet += self.chunk
@@ -671,6 +992,137 @@ def listen(start_timeout: float = 6.0, max_seconds: float = 12.0,
         wf.setframerate(_RATE)
         wf.writeframes(b"".join(frames))
     return buf.getvalue()
+
+
+def speak_and_listen(
+    text: str,
+    start_timeout: float = 8.0,
+    max_seconds: float = 15.0,
+    silence_after: float | None = None,
+    full_duplex: bool = True,
+) -> tuple[bytes | None, bool]:
+    """Speak text while concurrently listening for speech interruption (Full-Duplex Barge-in).
+
+    If the user speaks while Jarvis is talking:
+      - Instantly aborts playback (<50ms)
+      - Captures user speech from onset
+      - Returns (user_wav_bytes, was_interrupted=True)
+
+    If playback finishes and user speaks afterwards:
+      - Returns (user_wav_bytes, was_interrupted=False)
+
+    If nothing is heard / silence:
+      - Returns (None, was_interrupted=False)
+    """
+    text = (text or "").strip()
+    if not text:
+        wav = listen(start_timeout=start_timeout, max_seconds=max_seconds, silence_after=silence_after)
+        return wav, False
+
+    if not full_duplex or not getattr(_tts_config, "full_duplex", True):
+        speak(text, wait=True)
+        wav = listen(start_timeout=start_timeout, max_seconds=max_seconds, silence_after=silence_after)
+        return wav, False
+
+    snapshot = _current_voice_snapshot()
+    try:
+        data = _synthesize_wav(text, snapshot=snapshot)
+    except Exception as exc:
+        log.warn(f"TTS synthesis failed: {exc}")
+        data = b""
+
+    if not data:
+        wav = listen(start_timeout=start_timeout, max_seconds=max_seconds, silence_after=silence_after)
+        return wav, False
+
+    try:
+        import sounddevice as sd
+    except Exception as exc:
+        log.warn(f"sounddevice unavailable for full-duplex: {exc}")
+        _play_wav(data, wait=True)
+        wav = listen(start_timeout=start_timeout, max_seconds=max_seconds, silence_after=silence_after)
+        return wav, False
+
+    silence_val = silence_after if silence_after is not None else _tts_config.silence_after
+    vad = _BargeInVAD(
+        silence_after=silence_val,
+        barge_in_sensitivity=_tts_config.barge_in_sensitivity,
+        barge_in_hold=_tts_config.barge_in_hold,
+    )
+
+    cancel_event = threading.Event()
+    playback_done = threading.Event()
+    interrupted = False
+
+    def _playback_thread():
+        try:
+            _play_stream_interruptible(data, cancel_event=cancel_event)
+        finally:
+            playback_done.set()
+
+    t_play = threading.Thread(target=_playback_thread, daemon=True, name="jarvis-duplex-play")
+    t_play.start()
+
+    from collections import deque
+    preroll = deque(maxlen=max(3, _tts_config.barge_in_hold + 1))
+    frames: list[bytes] = []
+    waited = 0.0
+
+    def rms(chunk: bytes) -> float:
+        n = len(chunk) // 2
+        if not n:
+            return 0.0
+        samples = struct.unpack(f"<{n}h", chunk)
+        return math.sqrt(sum(s * s for s in samples) / n)
+
+    try:
+        with sd.RawInputStream(samplerate=_RATE, channels=1, dtype="int16", blocksize=_CHUNK) as stream:
+            while True:
+                chunk, _ = stream.read(_CHUNK)
+                chunk = bytes(chunk)
+                speaking_now = not playback_done.is_set()
+
+                state = vad.feed(rms(chunk), is_speaking=speaking_now)
+
+                if state == "listening":
+                    preroll.append(chunk)
+                    if not speaking_now:
+                        waited += 0.1
+                        if waited >= start_timeout:
+                            break
+                    continue
+
+                if state in {"interrupt", "recording"}:
+                    if speaking_now and not interrupted:
+                        interrupted = True
+                        cancel_event.set()
+                        log.info("⚡ Voice interruption (Barge-in) detected!")
+
+                    if not frames:
+                        frames.extend(preroll)
+                    frames.append(chunk)
+
+                    if state == "stop" or len(frames) * 0.1 >= max_seconds:
+                        break
+    except Exception as exc:
+        log.warn(f"Full-duplex mic stream error: {exc}")
+        cancel_event.set()
+
+    cancel_event.set()
+    t_play.join(timeout=1.0)
+
+    if not frames:
+        return None, interrupted
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(_RATE)
+        wf.writeframes(b"".join(frames))
+
+    return buf.getvalue(), interrupted
+
 
 
 def transcribe(wav_bytes: bytes, brain) -> str:

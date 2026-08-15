@@ -455,6 +455,29 @@ print(json.dumps({"value": input("answer > ")}, ensure_ascii=False))
         self.assertEqual(seen["argv"], ["--vision"])
         self.assertFalse(seen["voice_enabled"])
 
+    def test_worker_forces_typed_repl_even_when_wake_was_requested(self):
+        cfg = Config()
+        cfg.wake_enabled = True
+        seen = {}
+        launcher = SimpleNamespace(load_config=lambda: cfg)
+
+        def fake_main(argv):
+            seen["argv"] = argv
+            seen["wake_enabled"] = launcher.load_config().wake_enabled
+            return 17
+
+        launcher.main = fake_main
+        with (
+            patch.object(browser_worker, "install_event_bridge"),
+            patch.object(browser_worker, "emit"),
+            patch.object(browser_worker, "_load_launcher", return_value=launcher),
+        ):
+            result = browser_worker.main(["--wake", "--vision"])
+
+        self.assertEqual(result, 17)
+        self.assertEqual(seen["argv"], ["--vision"])
+        self.assertFalse(seen["wake_enabled"])
+
     def test_worker_and_launcher_cannot_be_shadowed_by_launch_cwd(self):
         with tempfile.TemporaryDirectory() as temp:
             cwd = Path(temp)

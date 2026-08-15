@@ -488,13 +488,15 @@ def main(argv: list[str] | None = None) -> int:
         config = original_load_config(*args, **kwargs)
         # Browser mode always needs the typed REPL boundary.  Reply speech is
         # configured separately and remains available exactly as in console
-        # mode; only the microphone-only startup loop is suppressed.
+        # mode; only the microphone-only startup loops (voice/wake) are
+        # suppressed.
         config.voice_enabled = False
+        config.wake_enabled = False
         return config
 
     run.load_config = load_browser_config
     browser_argv = list(sys.argv[1:] if argv is None else argv)
-    browser_argv = [value for value in browser_argv if value != "--voice"]
+    browser_argv = [value for value in browser_argv if value not in ("--voice", "--wake")]
 
     if "--remote-agent" in browser_argv:
         # Add a structured observer to the normal encrypted remote loop.  The

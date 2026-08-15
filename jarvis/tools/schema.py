@@ -171,6 +171,32 @@ ACTIONS: tuple[Action, ...] = (
         examples=({"url": "https://en.wikipedia.org/wiki/Python_(programming_language)"},),
     ),
     Action(
+        "browser_action", "Direct high-speed browser automation (Playwright / CDP). "
+        "Interact directly with web pages: navigate, click buttons/links, fill forms, "
+        "select options, scroll, evaluate JS, extract structured markdown/text, "
+        "and inspect interactive element tags ([e1], [e2]). Automatically captures "
+        "instant clean screenshots for visual verification without mouse interference.",
+        (Param("action", "str", "The browser action: 'navigate', 'click', 'type', "
+               "'select', 'scroll', 'hover', 'press', 'extract', 'snapshot', "
+               "'screenshot', 'eval', 'close'."),
+         Param("url", "str", "Target URL (for 'navigate').", required=False),
+         Param("target", "str", "Target element index (e.g. 'e1', 'e2'), CSS selector, "
+               "or text (for 'click', 'type', 'select', 'hover').", required=False),
+         Param("text", "str", "Text to type (for 'type') or JS expression (for 'eval').", required=False),
+         Param("value", "str", "Value to select (for 'select').", required=False),
+         Param("direction", "str", "Scroll direction: 'down', 'up', 'top', 'bottom'.", required=False, default="down"),
+         Param("mode", "str", "Extraction mode: 'markdown', 'text', 'html'.", required=False, default="markdown"),
+         Param("headless", "bool", "Optional override to run browser headfully or headlessly.", required=False)),
+        category="apps",
+        examples=(
+            {"action": "navigate", "url": "https://news.ycombinator.com"},
+            {"action": "click", "target": "e1"},
+            {"action": "type", "target": "input[name=q]", "text": "Jarvis AI"},
+            {"action": "extract", "mode": "markdown"},
+            {"action": "snapshot"},
+        ),
+    ),
+    Action(
         "http_request", "Call any web API and get the raw response back. "
         "Unlike read_url (which only reads a page as text), this speaks to "
         "JSON/REST APIs: choose the method, send headers (e.g. an auth token), "
@@ -481,6 +507,39 @@ ACTIONS: tuple[Action, ...] = (
         category="system",
         examples=({"target": "dark mode"},),
     ),
+    Action(
+        "memory_search", "Search permanent long-term memory semantically via Vector RAG.",
+        (Param("query", "str", "Search query, topic, or question to find relevant facts/plans for."),
+         Param("top_k", "int", "Max results to return (default 5).", required=False, default=5)),
+        category="system",
+        examples=({"query": "coding preferences"}, {"query": "git repository location"}),
+    ),
+    Action(
+        "graph_query", "Query entity connections and relationships in the Knowledge Graph.",
+        (Param("entity", "str", "Name of the entity to query connections for (e.g. 'User', 'Spotify', 'Jarvis')."),),
+        category="system",
+        examples=({"entity": "Spotify"}, {"entity": "User"}),
+    ),
+    Action(
+        "voice_control", "Control voice engine, interrupt active playback, or toggle full-duplex barge-in.",
+        (Param("action", "str", "One of: 'interrupt', 'status', 'enable_duplex', 'disable_duplex', 'set_sensitivity'."),
+         Param("value", "str", "Optional value, e.g. sensitivity float 0.1-1.0.", required=False)),
+        category="system",
+        examples=({"action": "interrupt"}, {"action": "enable_duplex"}, {"action": "set_sensitivity", "value": "0.7"}),
+    ),
+    Action(
+        "macro", "Watch & Learn Macro recorder and playback engine. Record desktop actions or execute learned macros.",
+        (Param("action", "str", "One of: 'record', 'stop', 'play', 'list', 'show', 'delete'."),
+         Param("name", "str", "Macro name (e.g. 'open_daily_report', 'send_invoice').", required=False),
+         Param("description", "str", "Description of what the macro accomplishes.", required=False),
+         Param("speed", "float", "Playback speed multiplier (e.g. 1.0 = normal, 2.0 = 2x speed).", required=False, default=1.0),
+         Param("params", "dict", "Optional dictionary of parameter values to substitute.", required=False)),
+        category="control",
+        examples=({"action": "record", "name": "open_sales_sheet", "description": "Open Chrome and go to sales dashboard"},
+                  {"action": "stop"},
+                  {"action": "play", "name": "open_sales_sheet", "speed": 1.5},
+                  {"action": "list"}),
+    ),
     # ---- remote devices --------------------------------------------------
     Action(
         "remote_task", "Send a task to an explicitly named, trusted paired "
@@ -569,6 +628,39 @@ ACTIONS: tuple[Action, ...] = (
         category="mcp",
         examples=({"server": "github", "tool": "search_repositories",
                    "arguments": {"query": "jarvis desktop assistant"}},),
+    ),
+    # ---- security --------------------------------------------------------
+    Action(
+        "secret", "Securely store, retrieve, delete or migrate credentials, "
+        "API keys, and service tokens in Windows Credential Manager / DPAPI vault. "
+        "op is one of: 'set', 'get', 'list', 'delete', 'migrate'.",
+        (Param("op", "str", "One of: 'set', 'get', 'list', 'delete', 'migrate'."),
+         Param("key", "str", "Secret key name (e.g. 'OPENAI_API_KEY', 'WEATHER_API_KEY').", required=False),
+         Param("value", "str", "Secret value or token (for 'set').", required=False),
+         Param("backend", "str", "Target backend: 'credman' (Windows Credential Manager), "
+               "'dpapi' (Windows DPAPI encrypted vault), or 'all'.", required=False, default="credman")),
+        category="system",
+        examples=({"op": "list"},
+                  {"op": "set", "key": "WEATHER_API_KEY", "value": "xyz123abc456"},
+                  {"op": "get", "key": "OPENAI_API_KEY"},
+                  {"op": "migrate"}),
+    ),
+    # ---- perception / vision ---------------------------------------------
+    Action(
+        "see", "Live screen and webcam 'See What I See' multimodal visual perception. "
+        "Captures real-time desktop screen and/or physical user webcam frames, "
+        "and visually analyzes, describes, reads, or inspects them.",
+        (Param("prompt", "str", "Question or instruction for visual analysis (e.g. "
+               "'What is on my screen?', 'Read the document held to the webcam', "
+               "'Describe the physical room and desk').", required=False, default="What do you see?"),
+         Param("source", "str", "Vision input source: 'both' (screen + webcam dual fusion), "
+               "'webcam' (user camera only), or 'screen' (desktop screen only).",
+               required=False, default="both"),
+         Param("camera", "int", "Webcam index (default 0).", required=False, default=0)),
+        category="system",
+        examples=({"prompt": "Describe what is currently on my screen and desk.", "source": "both"},
+                  {"prompt": "Read the text written on the whiteboard in my webcam view.", "source": "webcam"},
+                  {"prompt": "What error message is visible in the terminal?", "source": "screen"}),
     ),
     # ---- meta ------------------------------------------------------------
     Action(

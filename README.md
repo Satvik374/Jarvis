@@ -197,6 +197,34 @@ The TTS model, prebuilt voice, and language can be changed under `voice:` in
 `JARVIS_TTS_LANGUAGE`. The transcription model can be overridden with
 `JARVIS_STT_MODEL`. Launch with `python run.py --voice` or use `:voice on`.
 
+### Hands-free wake word ("Hey Jarvis")
+
+Say **"Hey Jarvis"** at any time (no button, no typing) and Jarvis:
+
+1. Wakes up and asks *"Yes? What would you like me to do?"*
+2. Listens to your spoken task and transcribes it (Gemini STT).
+3. Runs the task through the normal agent loop.
+4. Speaks back a short summary of what it did.
+5. Goes straight back to silently listening for "Hey Jarvis" - it never acts
+   on anything else you say until you wake it again.
+
+Start it from the console with `:wake` (or the `/wake` slash command), or
+launch straight into it:
+
+```bash
+python run.py --wake
+# or, after adding bin/ to PATH:
+jarvis --wake
+```
+
+Ctrl+C exits hands-free mode and returns to the typed prompt. The wake-word
+detector itself (`jarvis/utils/voice.wait_for_wake`) runs fully offline via
+Windows' built-in SAPI recognizer with a one-phrase grammar - no audio leaves
+your machine while it's just waiting; only the command you speak *after* the
+wake word is sent to Gemini for transcription. It needs `pywin32` (already in
+`requirements.txt` for Windows) and the `gemini` brain backend for
+transcription/TTS.
+
 > **Safety:** start with `:confirm on` (or `python run.py --confirm`) so you
 > approve each action while you learn how the model behaves. Shell commands
 > matching a denylist (format, del /, shutdown, …) are refused; file writes are

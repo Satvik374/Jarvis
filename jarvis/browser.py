@@ -648,6 +648,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         "/app.js": ("app.js", "text/javascript; charset=utf-8"),
         "/aurora.js": ("aurora.js", "text/javascript; charset=utf-8"),
         "/grainient.js": ("grainient.js", "text/javascript; charset=utf-8"),
+        "/hologram.js": ("hologram.js", "text/javascript; charset=utf-8"),
         "/vendor/three.min.js": ("vendor/three.min.js", "text/javascript; charset=utf-8"),
     }
 
@@ -658,8 +659,8 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; "
-            "script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
-            "connect-src 'self'; font-src 'self'; object-src 'none'; "
+            "script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+            "connect-src 'self' ws: wss:; font-src 'self' https: data:; object-src 'none'; "
             "base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
         )
         self.send_header("Referrer-Policy", "no-referrer")
@@ -808,6 +809,33 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             if not self._require_api_access():
                 return
             self._stream_events()
+            return
+
+        if path == "/api/vision/frame":
+            if not self._require_api_access():
+                return
+            qs = parse_qs(parsed.query)
+            source = qs.get("source", ["both"])[0]
+            try:
+                from .perception import capture_live_frame
+                frame_bytes = capture_live_frame(source=source)
+                self._send_bytes(HTTPStatus.OK, frame_bytes, "image/jpeg")
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/vision/analyze":
+            if not self._require_api_access():
+                return
+            qs = parse_qs(parsed.query)
+            prompt = qs.get("prompt", ["What do you see?"])[0]
+            source = qs.get("source", ["both"])[0]
+            try:
+                from .perception import see
+                analysis = see(prompt=prompt, source=source)
+                self._json(HTTPStatus.OK, {"ok": True, "source": source, "prompt": prompt, "analysis": analysis})
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
             return
 
         if path == "/api/sessions":

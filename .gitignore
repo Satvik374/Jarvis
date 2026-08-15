@@ -15,6 +15,9 @@ dataset/data/trajectories/
 # Persistent memory (per-machine; not source)
 memory.txt
 chat_memory.jsonl
+*.db
+*.sqlite
+dataset/data/sessions/
 
 # Generated dataset (regenerate with dataset/build_dataset.py) - keep small samples out of git
 dataset/data/*.jsonl
