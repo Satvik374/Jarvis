@@ -1,0 +1,35 @@
+[
+  {
+    "id": "default_battery_low",
+    "name": "Low Battery Alert",
+    "trigger_type": "battery_low",
+    "condition": {},
+    "action_type": "notify",
+    "action_target": "Battery is low. Please connect the power adapter.",
+    "cooldown_seconds": 600.0,
+    "last_triggered": 0.0,
+    "enabled": true
+  },
+  {
+    "id": "default_high_memory",
+    "name": "High Memory Notification",
+    "trigger_type": "high_memory",
+    "condition": {},
+    "action_type": "notify",
+    "action_target": "High system memory usage detected. Consider closing unused applications.",
+    "cooldown_seconds": 900.0,
+    "last_triggered": 1786782685.8955746,
+    "enabled": true
+  },
+  {
+    "id": "default_morning_briefing",
+    "name": "Morning Routine Briefing",
+    "trigger_type": "morning_routine",
+    "condition": {},
+    "action_type": "notify",
+    "action_target": "Good morning, sir. System status is nominal. Ready for your daily agenda.",
+    "cooldown_seconds": 43200.0,
+    "last_triggered": 1786782675.787846,
+    "enabled": true
+  }
+]

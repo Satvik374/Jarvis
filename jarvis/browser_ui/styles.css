@@ -756,7 +756,7 @@ html[data-state="verifying"] .radar-sweep {
 
 .core-frame {
   position: absolute;
-  inset: clamp(20px, 4vw, 54px) clamp(10px, 3vw, 42px) 58px;
+  inset: 0;
   min-width: 0;
   min-height: 0;
   cursor: grab;
@@ -869,74 +869,6 @@ html[data-state="verifying"] .radar-sweep {
   display: block;
   width: 100%;
   height: 100%;
-}
-
-.corner {
-  position: absolute;
-  z-index: 2;
-  width: 50px;
-  height: 50px;
-  opacity: 0.75;
-  pointer-events: none;
-}
-
-.corner::before,
-.corner::after {
-  content: "";
-  position: absolute;
-  background: var(--line-strong);
-  box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.12);
-}
-
-.corner::before {
-  width: 50px;
-  height: 1px;
-}
-
-.corner::after {
-  width: 1px;
-  height: 50px;
-}
-
-.corner-tl {
-  top: 0;
-  left: 0;
-}
-
-.corner-tr {
-  top: 0;
-  right: 0;
-  transform: rotate(90deg);
-}
-
-.corner-bl {
-  bottom: 0;
-  left: 0;
-  transform: rotate(-90deg);
-}
-
-.corner-br {
-  right: 0;
-  bottom: 0;
-  transform: rotate(180deg);
-}
-
-.coordinate {
-  position: absolute;
-  z-index: 3;
-  color: var(--dim);
-  font: 500 6px/1 var(--mono);
-  letter-spacing: 0.22em;
-}
-
-.coordinate-top {
-  top: 9px;
-  left: 61px;
-}
-
-.coordinate-bottom {
-  right: 11px;
-  bottom: 10px;
 }
 
 .core-center-label {
