@@ -98,8 +98,8 @@ class FloatingMiniHUD:
         if not self._root:
             return
 
-        self.width = 380
-        self.height = 140
+        self.width = 420
+        self.height = 200
 
         # Main frame with cyber border
         self._outer_frame = tk.Frame(
@@ -137,17 +137,17 @@ class FloatingMiniHUD:
 
         # Body Container
         self._body = tk.Frame(self._outer_frame, bg="#02070d")
-        self._body.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+        self._body.pack(fill=tk.X, padx=8, pady=4)
 
         # Left: Reactor Core Canvas
         self._canvas = tk.Canvas(
             self._body,
-            width=54,
-            height=54,
+            width=48,
+            height=48,
             bg="#02070d",
             highlightthickness=0,
         )
-        self._canvas.pack(side=tk.LEFT, padx=(2, 8))
+        self._canvas.pack(side=tk.LEFT, padx=(2, 6))
 
         # Center: State & Details
         self._info_frame = tk.Frame(self._body, bg="#02070d")
@@ -155,9 +155,9 @@ class FloatingMiniHUD:
 
         self._state_lbl = tk.Label(
             self._info_frame,
-            text="INITIALIZING",
+            text="ONLINE",
             font=("Consolas", 10, "bold"),
-            fg="#e5f8ff",
+            fg="#00f0ff",
             bg="#02070d",
             anchor="w",
         )
@@ -165,13 +165,13 @@ class FloatingMiniHUD:
 
         self._detail_lbl = tk.Label(
             self._info_frame,
-            text="Calibrating interface...",
+            text="Neural Link Active · Ready",
             font=("Consolas", 7),
             fg="#8ba8b7",
             bg="#02070d",
             anchor="w",
         )
-        self._detail_lbl.pack(fill=tk.X, pady=(2, 0))
+        self._detail_lbl.pack(fill=tk.X, pady=(1, 0))
 
         # Right: Quick Action Buttons Bar
         self._actions_bar = tk.Frame(self._body, bg="#02070d")
@@ -188,9 +188,31 @@ class FloatingMiniHUD:
         self._btn_macro = tk.Button(self._actions_bar, text="🔴", command=self._handle_macro, **btn_style)
         self._btn_macro.pack(side=tk.LEFT, padx=2)
 
+        # Middle: Live Conversation & Response Frame
+        self._response_frame = tk.Frame(
+            self._outer_frame,
+            bg="#030c17",
+            highlightbackground="#0a324a",
+            highlightcolor="#0a324a",
+            highlightthickness=1,
+        )
+        self._response_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+
+        self._response_lbl = tk.Label(
+            self._response_frame,
+            text="✦ JARVIS: Ready for directive.",
+            font=("Consolas", 8),
+            fg="#cbe9ff",
+            bg="#030c17",
+            anchor="nw",
+            justify=tk.LEFT,
+            wraplength=390,
+        )
+        self._response_lbl.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+
         # Bottom: Expandable Input Bar
         self._input_frame = tk.Frame(self._outer_frame, bg="#02070d")
-        self._input_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._input_frame.pack(fill=tk.X, padx=8, pady=(0, 6))
 
         self._entry = tk.Entry(
             self._input_frame,
@@ -331,6 +353,9 @@ class FloatingMiniHUD:
     def set_state(self, state_name: str, detail: Optional[str] = None) -> None:
         self._msg_queue.put(("state", state_name.lower(), detail))
 
+    def set_response(self, prompt: str, reply: str) -> None:
+        self._msg_queue.put(("response", prompt, reply))
+
     def set_voice_active(self, active: bool) -> None:
         self._msg_queue.put(("voice", active))
 
@@ -357,6 +382,12 @@ class FloatingMiniHUD:
                         self._detail_lbl.config(text=dt)
                     if self._outer_frame:
                         self._outer_frame.config(highlightbackground=color, highlightcolor=color)
+
+                elif item[0] == "response":
+                    _, prompt, reply = item
+                    if self._response_lbl:
+                        display_text = f"▸ YOU: {prompt}\n✦ JARVIS: {reply}"
+                        self._response_lbl.config(text=display_text)
 
                 elif item[0] == "voice":
                     self.is_voice_active = item[1]

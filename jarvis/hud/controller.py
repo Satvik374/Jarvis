@@ -80,13 +80,20 @@ class HudController:
             log.warn("No task runner wired to HUD controller.")
             return
 
+        if self.overlay:
+            self.overlay.set_response(command_text, "Thinking...")
+
         def _exec():
             try:
-                self.set_state("acting", detail=f"Executing: {command_text[:24]}...")
+                self.set_state("thinking", detail=f"Processing: {command_text[:24]}...")
                 res = self.task_runner(command_text)
-                self.set_state("success", detail=f"{str(res)[:30]}")
+                self.set_state("idle", detail="Ready")
+                if self.overlay:
+                    self.overlay.set_response(command_text, str(res))
             except Exception as exc:
                 self.set_state("error", detail=f"Error: {str(exc)[:26]}")
+                if self.overlay:
+                    self.overlay.set_response(command_text, f"Error: {exc}")
 
         threading.Thread(target=_exec, daemon=True, name="jarvis-hud-exec").start()
 

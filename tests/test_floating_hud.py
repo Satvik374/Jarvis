@@ -56,6 +56,10 @@ def test_floating_mini_hud_state_queueing():
     item3 = hud._msg_queue.get_nowait()
     assert item3 == ("macro", True)
 
+    hud.set_response("hello", "Hello sir")
+    item4 = hud._msg_queue.get_nowait()
+    assert item4 == ("response", "hello", "Hello sir")
+
 
 def test_hud_controller_lifecycle():
     cfg = Config()
