@@ -317,6 +317,22 @@ ACTIONS: tuple[Action, ...] = (
                   {"strategy": "restart_app", "target": "notepad.exe"}),
     ),
     Action(
+        "daemon_rule", "Configure proactive background daemon event triggers and rules. "
+        "Allows Jarvis to automatically respond to hardware/OS events (low battery, high CPU/RAM, new downloads, morning routines). "
+        "Supported actions: 'list' (view rules), 'add' (create rule), 'remove' (delete rule), 'enable', 'disable', 'status'.",
+        (Param("action", "str", "Operation: 'list', 'add', 'remove', 'enable', 'disable', or 'status'."),
+         Param("rule_id", "str", "Rule ID (for remove/enable/disable).", required=False),
+         Param("name", "str", "Human readable rule name (for add).", required=False),
+         Param("trigger", "str", "Trigger event: 'battery_low', 'battery_charging', 'high_cpu', 'high_memory', 'file_dropped', 'morning_routine', 'app_launched'.", required=False),
+         Param("action_type", "str", "Action type: 'notify' (voice/UI alert), 'task' (run agent prompt), or 'macro' (replay macro).", required=False, default="notify"),
+         Param("target", "str", "Action target (notification text, task prompt, or macro name).", required=False),
+         Param("cooldown", "int", "Cooldown in seconds between triggers (default 300).", required=False, default=300)),
+        category="system",
+        examples=({"action": "list"},
+                  {"action": "add", "name": "Download Alert", "trigger": "file_dropped", "action_type": "notify", "target": "New file arrived in downloads."},
+                  {"action": "enable", "rule_id": "default_battery_low"}),
+    ),
+    Action(
         "focus_window", "Bring an open window matching a title substring to the "
         "foreground.",
         (Param("title", "str", "Case-insensitive substring of the window title."),),

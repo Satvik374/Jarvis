@@ -46,6 +46,7 @@ _SLASH_COMMANDS = (
     ("/secret", "Windows Credential Manager / DPAPI vault: set/get/list/migrate"),
     ("/see", "[question] - multimodal live screen & webcam visual perception"),
     ("/cam", "[snap|inspect] - physical webcam vision tools"),
+    ("/daemon", "[status|list|enable|disable|tick] - proactive background daemon & event triggers"),
     ("/cron", "list/add/remove scheduled jobs"),
     ("/connect", "Gmail/Discord/WhatsApp connector status and test"),
     ("/remote", "list, remove, trust, or send tasks to paired devices"),
@@ -425,6 +426,10 @@ def repl(cfg: Config | None = None) -> int:
     scheduler.set_default(sched)
     sched.start()
 
+    # Proactive Background Daemon: monitor hardware, OS events, and routines
+    from . import daemon
+    daemon.start_daemon(cfg=cfg, task_runner=_cron_runner)
+
     # MCP: warm up any configured connectors in the background so their tools
     # are ready by the time the user gives a task.
     from . import mcp
@@ -537,6 +542,8 @@ def repl(cfg: Config | None = None) -> int:
         log.rule(f"done in {time.time() - started:.1f}s")
     sched.stop()
     scheduler.set_default(None)
+    from . import daemon
+    daemon.stop_daemon()
     mcp.get_manager().close_all()
     log.jarvis("Goodbye.")
     voice.speak("Goodbye, sir.", wait=True)   # sync: the process is exiting
@@ -871,6 +878,8 @@ def _command(cmd: str, cfg: Config) -> bool:
         _see_command(cmd, cfg)
     elif c == "cam" or c.startswith("cam ") or c == "camera" or c.startswith("camera "):
         _cam_command(cmd, cfg)
+    elif c == "daemon" or c.startswith("daemon "):
+        _daemon_command(cmd)
     elif c == "cron" or c.startswith("cron "):
         _cron_command(cmd)
     elif c == "mcp" or c.startswith("mcp "):
@@ -1200,6 +1209,65 @@ def _browser_command(raw: str, cfg: Config) -> None:
         print(snap.format_text())
         log.rule()
 
+
+def _daemon_command(raw: str) -> None:
+    """Handle ':daemon [status | list | remove <id> | enable <id> | disable <id> | tick]'."""
+    from . import daemon
+    d = daemon.get_daemon()
+    body = raw[1:].strip()
+    body = body[6:].strip() if body[:6].lower() == "daemon" else body
+
+    if not body or body.lower() == "status":
+        rules = d.list_rules()
+        active_cnt = sum(1 for r in rules if r.enabled)
+        log.rule("PROACTIVE BACKGROUND DAEMON STATUS", "cyan")
+        print(f"  • Daemon:     {_c('ONLINE', 'green')}")
+        print(f"  • Total Rules: {len(rules)} ({active_cnt} active)")
+        print(f"  • Watchers:   Battery, Resource (CPU/RAM), File Drops, Window Focus, Daily Routines")
+        print(f"  • Event Log:  {len(d.event_history)} recent event(s) recorded")
+        print(f"\n  {_c('Commands:', 'grey')} :daemon list | :daemon enable <id> | :daemon disable <id> | :daemon tick\n")
+        log.rule()
+        return
+
+    if body.lower() == "list":
+        rules = d.list_rules()
+        if not rules:
+            log.info("No proactive rules configured.")
+            return
+        log.rule("PROACTIVE AUTOMATION RULES", "cyan")
+        for r in rules:
+            st = _c("ENABLED", "green") if r.enabled else _c("DISABLED", "yellow")
+            print(f"  • [{_c(r.id, 'cyan')}] {r.name} ({st})")
+            print(f"    Trigger: {_c(r.trigger_type.value, 'yellow')} ──▶ {_c(r.action_type.upper(), 'magenta')}: {r.action_target} (cooldown: {int(r.cooldown_seconds)}s)")
+        print(f"\n  {_c('Manage:', 'grey')} :daemon enable <id> | :daemon disable <id> | :daemon remove <id>\n")
+        log.rule()
+        return
+
+    if body.lower().startswith(("remove", "rm", "del")):
+        parts = body.split()
+        if len(parts) < 2:
+            log.warn("usage: :daemon remove <rule_id>")
+            return
+        rid = parts[1]
+        log.ok(f"Removed rule {rid}" if d.remove_rule(rid) else f"No rule with id {rid}")
+        return
+
+    if body.lower().startswith(("enable", "disable")):
+        parts = body.split()
+        if len(parts) < 2:
+            log.warn(f"usage: :daemon {parts[0]} <rule_id>")
+            return
+        rid = parts[1]
+        en = parts[0].lower() == "enable"
+        log.ok(f"Rule {rid} {'enabled' if en else 'disabled'}" if d.enable_rule(rid, enabled=en) else f"No rule with id {rid}")
+        return
+
+    if body.lower() == "tick":
+        events = d.tick()
+        log.ok(f"Manual proactive daemon tick executed. Discovered {len(events)} event(s).")
+        return
+
+    log.warn("usage: :daemon [status | list | remove <id> | enable <id> | disable <id> | tick]")
 
 
 def _cron_command(raw: str) -> None:

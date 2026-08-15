@@ -1170,6 +1170,74 @@ def _h_self_heal(args, obs, cfg):
     return ActionResult(False, f"Unknown self_heal strategy '{strategy}'. Supported: refocus, escape, restart_app, reset_state.", needs_observe=False)
 
 
+def _h_daemon_rule(args, obs, cfg):
+    action = str(args.get("action", "list")).strip().lower()
+    from ..daemon import get_daemon, EventRule, EventType
+
+    daemon = get_daemon(cfg=cfg)
+
+    if action == "list":
+        rules = daemon.list_rules()
+        if not rules:
+            return ActionResult(True, "No proactive daemon rules configured.", needs_observe=False)
+        lines = ["Proactive Daemon Rules:"]
+        for r in rules:
+            st = "ENABLED" if r.enabled else "DISABLED"
+            lines.append(f"  • [{r.id}] {r.name} ({st}) - Trigger: {r.trigger_type.value} -> {r.action_type.upper()}: '{r.action_target}' (cooldown: {int(r.cooldown_seconds)}s)")
+        return ActionResult(True, "\n".join(lines), needs_observe=False)
+
+    elif action == "status":
+        rules = daemon.list_rules()
+        active_cnt = sum(1 for r in rules if r.enabled)
+        return ActionResult(True, f"Proactive Daemon Status: Active | {len(rules)} total rules ({active_cnt} enabled) | Watchers: Battery, Resource, File, Window, Routine.", needs_observe=False)
+
+    elif action == "add":
+        name = str(args.get("name", "Custom Rule")).strip()
+        trigger_str = str(args.get("trigger", "custom")).strip().lower()
+        action_type = str(args.get("action_type", "notify")).strip().lower()
+        target = str(args.get("target", "")).strip()
+        cooldown = float(args.get("cooldown", 300))
+
+        if not target:
+            return ActionResult(False, "daemon_rule 'add' requires 'target' (message text, task prompt, or macro name)", needs_observe=False)
+
+        try:
+            evt_type = EventType(trigger_str)
+        except ValueError:
+            evt_type = EventType.CUSTOM
+
+        rule = EventRule(
+            name=name,
+            trigger_type=evt_type,
+            action_type=action_type,
+            action_target=target,
+            cooldown_seconds=cooldown,
+        )
+        daemon.add_rule(rule)
+        return ActionResult(True, f"Added proactive rule '{name}' [{rule.id}] for trigger '{evt_type.value}'.", needs_observe=False)
+
+    elif action == "remove":
+        rule_id = str(args.get("rule_id", "")).strip()
+        if not rule_id:
+            return ActionResult(False, "daemon_rule 'remove' requires 'rule_id'", needs_observe=False)
+        ok = daemon.remove_rule(rule_id)
+        if ok:
+            return ActionResult(True, f"Removed proactive rule '{rule_id}'.", needs_observe=False)
+        return ActionResult(False, f"Rule '{rule_id}' not found.", needs_observe=False)
+
+    elif action in ("enable", "disable"):
+        rule_id = str(args.get("rule_id", "")).strip()
+        if not rule_id:
+            return ActionResult(False, f"daemon_rule '{action}' requires 'rule_id'", needs_observe=False)
+        en = action == "enable"
+        ok = daemon.enable_rule(rule_id, enabled=en)
+        if ok:
+            return ActionResult(True, f"Rule '{rule_id}' is now {'enabled' if en else 'disabled'}.", needs_observe=False)
+        return ActionResult(False, f"Rule '{rule_id}' not found.", needs_observe=False)
+
+    return ActionResult(False, f"Unknown daemon_rule action '{action}'. Must be one of: list, status, add, remove, enable, disable.", needs_observe=False)
+
+
 def _h_ask(args, obs, cfg):
     q = str(args.get("question", "Could you clarify?"))
     return ActionResult(True, q, needs_observe=False, finished=True, ask=q)
@@ -1214,6 +1282,7 @@ _HANDLERS = {
     "code_task": _h_code_task,
     "self_upgrade": _h_self_upgrade,
     "self_heal": _h_self_heal,
+    "daemon_rule": _h_daemon_rule,
     "make_dir": _h_make_dir,
     "list_dir": _h_list_dir,
     "find_files": _h_find_files,

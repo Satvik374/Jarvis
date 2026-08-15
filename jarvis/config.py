@@ -166,6 +166,32 @@ class BrowserConfig:
 
 
 @dataclass
+class DaemonConfig:
+    # Proactive background daemon: monitors battery, system resources, file changes,
+    # and proactive daily routines.
+    enabled: bool = True
+    # Background monitoring check frequency in seconds
+    check_interval: float = 10.0
+    # Battery and power status monitoring
+    battery_monitoring: bool = True
+    battery_threshold_low: int = 20
+    # CPU & RAM utilization monitoring
+    resource_monitoring: bool = True
+    cpu_threshold_high: int = 90
+    memory_threshold_high: int = 85
+    # Directory file monitoring (e.g. downloads folder)
+    file_monitoring: bool = True
+    watch_directories: tuple[str, ...] = ("~/Downloads",)
+    # Proactive daily routines
+    morning_briefing_enabled: bool = True
+    morning_briefing_time: str = "09:00"
+    evening_summary_enabled: bool = True
+    evening_summary_time: str = "21:00"
+    # Speak proactive notifications aloud if voice is enabled
+    voice_announcements: bool = True
+
+
+@dataclass
 class Config:
     brain: BrainConfig = field(default_factory=BrainConfig)
     perception: PerceptionConfig = field(default_factory=PerceptionConfig)
@@ -174,6 +200,7 @@ class Config:
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     remote: RemoteConfig = field(default_factory=RemoteConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
+    daemon: DaemonConfig = field(default_factory=DaemonConfig)
     # Voice mode: speak replies aloud (Gemini TTS) and allow spoken commands
     # (mic -> Gemini transcription). Toggle at runtime with ':voice on|off'.
     voice_enabled: bool = False
@@ -223,6 +250,7 @@ def load_config(path: Path | str | None = None) -> Config:
         _apply(cfg.voice, data.get("voice", {}))
         _apply(cfg.remote, data.get("remote", {}))
         _apply(cfg.browser, data.get("browser", {}))
+        _apply(cfg.daemon, data.get("daemon", {}))
         cfg.voice_enabled = bool(data.get("voice_enabled", cfg.voice_enabled))
 
     # Environment overrides for the most common knobs.
