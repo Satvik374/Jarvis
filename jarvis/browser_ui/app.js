@@ -992,6 +992,7 @@
     canvas.width = Math.round(rect.width * dpr);
     canvas.height = Math.round(rect.height * dpr);
     const ctx = canvas.getContext("2d");
+    if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, rect.width, rect.height);
 
@@ -2081,7 +2082,12 @@
       this.height = Math.max(1, rect.height);
       this.canvas.width = Math.round(this.width * this.dpr);
       this.canvas.height = Math.round(this.height * this.dpr);
-      this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      if (this.ctx) {
+        this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      }
+      if (this.holo3d && typeof this.holo3d.resize === "function") {
+        this.holo3d.resize(this.width, this.height);
+      }
       this.cx = this.width / 2;
       this.cy = this.height / 2 - Math.min(12, this.height * 0.025);
       this.radius = Math.max(92, Math.min(this.width, this.height) * 0.46);
