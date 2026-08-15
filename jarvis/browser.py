@@ -716,6 +716,10 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         self._send_bytes(status, body, "application/json; charset=utf-8")
 
     def _token_valid(self) -> bool:
+        client_ip = self.client_address[0] if self.client_address else ""
+        is_loopback = client_ip in ("127.0.0.1", "::1", "localhost") or client_ip.startswith("127.")
+        if is_loopback and self.server.bridge.interface_mode != "remote-agent":
+            return True
         query_token = parse_qs(urlparse(self.path).query).get("token", [""])[0]
         supplied = self.headers.get("X-Jarvis-Token", "") or query_token
         if not supplied:
