@@ -1434,6 +1434,7 @@
         }
         break;
       case "input":
+      case "user":
         acceptingInput = false;
         metrics.userMessages += 1;
         addMessage("user", payload.message, payload.timestamp);

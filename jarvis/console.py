@@ -436,6 +436,16 @@ def repl(cfg: Config | None = None) -> int:
         log.rule(f"HUD › {command[:60]}", "cyan")
         started = time.time()
         try:
+            from .sessions import get_session_manager
+            get_session_manager().append_message("user", command)
+        except Exception:
+            pass
+        try:
+            from .browser_worker import emit
+            emit("input", message=command, mode="command")
+        except Exception:
+            pass
+        try:
             with scheduler.desktop():
                 result = agent.run(command, asker=_typed_asker)
         except Exception as exc:

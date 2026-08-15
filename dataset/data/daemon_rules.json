@@ -18,7 +18,7 @@
     "action_type": "notify",
     "action_target": "High system memory usage detected. Consider closing unused applications.",
     "cooldown_seconds": 900.0,
-    "last_triggered": 1786786949.2347856,
+    "last_triggered": 1786787863.527788,
     "enabled": true
   },
   {

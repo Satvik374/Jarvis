@@ -319,11 +319,17 @@ class FloatingMiniHUD:
         pos = f"+{cur_geom[1]}+{cur_geom[2]}" if len(cur_geom) > 2 else ""
 
         if self.is_expanded:
-            self._input_frame.pack_forget()
-            self._root.geometry(f"{self.width}x75{pos}")
+            if hasattr(self, "_response_frame"):
+                self._response_frame.pack_forget()
+            if self._input_frame:
+                self._input_frame.pack_forget()
+            self._root.geometry(f"{self.width}x70{pos}")
             self._close_btn.config(text="+")
         else:
-            self._input_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+            if hasattr(self, "_response_frame"):
+                self._response_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+            if self._input_frame:
+                self._input_frame.pack(fill=tk.X, padx=8, pady=(0, 6))
             self._root.geometry(f"{self.width}x{self.height}{pos}")
             self._close_btn.config(text="—")
 
