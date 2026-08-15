@@ -78,6 +78,14 @@ class SafetyConfig:
     )
     # Directories writes/deletes are confined to (empty = home dir only guard off).
     allow_paths: tuple[str, ...] = ()
+    # Autonomous self-healing with Tree-of-Thought (ToT) error recovery
+    self_healing: bool = True
+    # Maximum exploration depth for ToT recovery branching
+    tot_max_depth: int = 3
+    # Maximum automated recovery interventions per task
+    max_healing_attempts: int = 3
+    # Automatically refocus or un-minimize target window on focus loss
+    auto_refocus: bool = True
 
 
 @dataclass

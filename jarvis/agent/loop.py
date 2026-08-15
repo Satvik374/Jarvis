@@ -31,6 +31,7 @@ from .prompts import (build_system_prompt, parse_decision, format_observation,
                       format_decision, _extract_json)
 from .subagent import agents_note
 from .trajectory import Trajectory, TrajectoryWriter, Step
+from .tree_of_thought import SelfHealingDirector
 
 
 _IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
@@ -303,6 +304,10 @@ class Agent:
                              "if present, is the current screen.)")
             messages: list[dict] = [{"role": "user", "content": task_msg}]
 
+            director = SelfHealingDirector(
+                config_self_healing=getattr(self.cfg.safety, "self_healing", True),
+                max_healing_attempts=getattr(self.cfg.safety, "max_healing_attempts", 3),
+            )
             plan_succeeded = False
             off_script = 0     # consecutive non-action replies from the model
             last_changed = True    # did the previous action change the screen?
@@ -459,9 +464,11 @@ class Agent:
                     break
 
                 if result.needs_observe:
+                    before_win = obs.active_window
                     before = obs.active_window + "\n" + obs.menu()
                     editable = self._clicked_editable(decision, obs)
                     obs = self._perceive()
+                    after_win = obs.active_window
                     last_changed = (obs.active_window + "\n" + obs.menu()) != before
                     if not last_changed and editable:
                         # Clicking a text/prompt box only sets focus + caret,
@@ -479,6 +486,39 @@ class Agent:
                             " (note: the screen did NOT change after this "
                             "action - if that was unexpected, try a different "
                             "approach)")
+
+                    # Tree-of-Thought & Self-Healing Diagnosis
+                    if getattr(self.cfg.safety, "self_healing", True):
+                        diag, repair = director.diagnose_and_guide(
+                            thought=decision.thought,
+                            action=decision.action,
+                            args=decision.args,
+                            is_ok=result.ok,
+                            result_message=result.message,
+                            screen_changed=last_changed,
+                            before_window=before_win,
+                            after_window=after_win,
+                        )
+                        note = director.get_healing_note(diag, repair)
+                        if note:
+                            messages[-1]["content"] += f"\n[{note}]"
+                            if repair:
+                                obs = self._perceive()
+                else:
+                    if getattr(self.cfg.safety, "self_healing", True) and not result.ok:
+                        diag, repair = director.diagnose_and_guide(
+                            thought=decision.thought,
+                            action=decision.action,
+                            args=decision.args,
+                            is_ok=result.ok,
+                            result_message=result.message,
+                            screen_changed=False,
+                            before_window=obs.active_window,
+                            after_window=obs.active_window,
+                        )
+                        note = director.get_healing_note(diag, repair)
+                        if note:
+                            messages[-1]["content"] += f"\n[{note}]"
             else:
                 final_message = f"Plan reached the {self.cfg.safety.max_steps}-step limit."
                 traj.outcome = "step_limit"

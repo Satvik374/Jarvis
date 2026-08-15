@@ -305,6 +305,18 @@ ACTIONS: tuple[Action, ...] = (
                    "registry.py"},),
     ),
     Action(
+        "self_heal", "Execute an automated self-healing recovery intervention when "
+        "an application loses focus, becomes unresponsive, or an action gets stuck. "
+        "Strategies: 'refocus' (brings target window to front), 'escape' (clears modal popups/menus), "
+        "'restart_app' (kills and relaunches a stuck app), 'reset_state' (resets keyboard/mouse modifiers).",
+        (Param("strategy", "str", "Recovery strategy: 'refocus', 'escape', 'restart_app', or 'reset_state'."),
+         Param("target", "str", "Target window title or executable name (e.g. 'Notepad' or 'notepad.exe').", required=False)),
+        category="system",
+        examples=({"strategy": "refocus", "target": "Notepad"},
+                  {"strategy": "escape"},
+                  {"strategy": "restart_app", "target": "notepad.exe"}),
+    ),
+    Action(
         "focus_window", "Bring an open window matching a title substring to the "
         "foreground.",
         (Param("title", "str", "Case-insensitive substring of the window title."),),

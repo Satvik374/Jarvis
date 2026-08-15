@@ -1128,6 +1128,48 @@ def _h_see(args, obs, cfg):
     return ActionResult(True, res, needs_observe=False)
 
 
+def _h_self_heal(args, obs, cfg):
+    strategy = str(args.get("strategy", "refocus")).strip().lower()
+    target = str(args.get("target", "")).strip()
+
+    from ..agent.tree_of_thought import SelfHealingDirector
+    director = SelfHealingDirector(config_self_healing=True)
+
+    if strategy == "refocus":
+        target_win = target or (obs.active_window if obs else "")
+        if not target_win:
+            return ActionResult(False, "self_heal 'refocus' requires a target window title", needs_observe=False)
+        ok = director.perform_refocus(target_win)
+        if ok:
+            return ActionResult(True, f"Self-healing: successfully restored and refocused window '{target_win}'.", needs_observe=True)
+        return ActionResult(False, f"Self-healing: window matching '{target_win}' was not found.", needs_observe=False)
+
+    elif strategy == "escape":
+        ok = director.perform_escape()
+        return ActionResult(True, "Self-healing: sent Escape key to clear dialogs/popups.", needs_observe=True)
+
+    elif strategy == "restart_app":
+        if not target:
+            return ActionResult(False, "self_heal 'restart_app' requires a 'target' executable or app name", needs_observe=False)
+        import subprocess
+        exe_name = target if target.endswith(".exe") else f"{target}.exe"
+        subprocess.run(["taskkill", "/F", "/IM", exe_name], capture_output=True, text=True)
+        time.sleep(0.5)
+        subprocess.Popen(target, shell=True)
+        return ActionResult(True, f"Self-healing: killed and restarted application '{target}'.", needs_observe=True)
+
+    elif strategy == "reset_state":
+        try:
+            import pyautogui  # type: ignore
+            for key in ("ctrl", "alt", "shift", "win"):
+                pyautogui.keyUp(key)
+            return ActionResult(True, "Self-healing: released all stuck modifier keys (Ctrl, Alt, Shift, Win).", needs_observe=False)
+        except Exception as exc:
+            return ActionResult(False, f"Self-healing reset failed: {exc}", needs_observe=False)
+
+    return ActionResult(False, f"Unknown self_heal strategy '{strategy}'. Supported: refocus, escape, restart_app, reset_state.", needs_observe=False)
+
+
 def _h_ask(args, obs, cfg):
     q = str(args.get("question", "Could you clarify?"))
     return ActionResult(True, q, needs_observe=False, finished=True, ask=q)
@@ -1171,6 +1213,7 @@ _HANDLERS = {
     "agent": _h_agent,
     "code_task": _h_code_task,
     "self_upgrade": _h_self_upgrade,
+    "self_heal": _h_self_heal,
     "make_dir": _h_make_dir,
     "list_dir": _h_list_dir,
     "find_files": _h_find_files,
