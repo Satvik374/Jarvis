@@ -432,9 +432,26 @@ def repl(cfg: Config | None = None) -> int:
     daemon.start_daemon(cfg=cfg, task_runner=_cron_runner)
 
     # Floating Mini HUD: Always-On-Top global capsule overlay & hotkeys
+    def _hud_task_runner(command: str) -> str:
+        log.rule(f"HUD › {command[:60]}", "cyan")
+        started = time.time()
+        try:
+            with scheduler.desktop():
+                result = agent.run(command, asker=_typed_asker)
+        except Exception as exc:
+            log.error(f"HUD execution error: {exc}")
+            result = f"Error: {exc}"
+        log.jarvis(result)
+        try:
+            voice.speak(result, wait=False)
+        except Exception:
+            pass
+        log.rule(f"done in {time.time() - started:.1f}s")
+        return result
+
     from . import hud
     if getattr(cfg, "hud", None) and cfg.hud.enabled:
-        hud.start_hud(cfg=cfg, task_runner=_cron_runner)
+        hud.start_hud(cfg=cfg, task_runner=_hud_task_runner)
 
     # MCP: warm up any configured connectors in the background so their tools
     # are ready by the time the user gives a task.

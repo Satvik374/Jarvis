@@ -81,21 +81,12 @@ class HudController:
             return
 
         def _exec():
-            from ..scheduler import desktop
-            with desktop():
-                try:
-                    self.set_state("acting", detail=f"Executing: {command_text[:24]}...")
-                    res = self.task_runner(command_text)
-                    self.set_state("success", detail="Task Completed")
-
-                    # Speak brief summary if voice is available
-                    try:
-                        from ..utils import voice
-                        voice.speak(str(res), wait=False)
-                    except Exception:
-                        pass
-                except Exception as exc:
-                    self.set_state("error", detail=f"Error: {str(exc)[:26]}")
+            try:
+                self.set_state("acting", detail=f"Executing: {command_text[:24]}...")
+                res = self.task_runner(command_text)
+                self.set_state("success", detail=f"{str(res)[:30]}")
+            except Exception as exc:
+                self.set_state("error", detail=f"Error: {str(exc)[:26]}")
 
         threading.Thread(target=_exec, daemon=True, name="jarvis-hud-exec").start()
 
