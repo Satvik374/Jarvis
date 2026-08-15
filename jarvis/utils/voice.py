@@ -166,7 +166,7 @@ def _current_voice_snapshot() -> _VoiceSnapshot:
 
 def configure(brain, config: VoiceConfig) -> None:
     """Connect voice output to Jarvis's authenticated Gemini brain."""
-    global _brain, _tts_config, _voice_epoch, _sync_owner, _kokoro_broken
+    global _brain, _tts_config, _voice_epoch, _sync_owner, _kokoro_broken, _gemini_broken, _edge_broken
     with _speech_lifecycle_lock:
         with _speech_state:
             _next_speech_generation_locked()
@@ -174,6 +174,8 @@ def configure(brain, config: VoiceConfig) -> None:
             _brain = brain
             _tts_config = copy.copy(config)
             _kokoro_broken = False
+            _gemini_broken = False
+            _edge_broken = False
             _sync_owner = None
             _SPEECH_DISPATCHER.discard_pending()
             _speech_state.notify_all()
@@ -182,7 +184,7 @@ def configure(brain, config: VoiceConfig) -> None:
 
 def reset() -> None:
     """Clear configured TTS state and stop any asynchronous playback."""
-    global _brain, _tts_config, _voice_epoch, _sync_owner, _kokoro_broken
+    global _brain, _tts_config, _voice_epoch, _sync_owner, _kokoro_broken, _gemini_broken, _edge_broken
     # Invalidate synthesis immediately; never wait behind a cloud request.
     with _speech_lifecycle_lock:
         with _speech_state:
@@ -191,6 +193,8 @@ def reset() -> None:
             _brain = None
             _tts_config = VoiceConfig()
             _kokoro_broken = False  # the loaded Kokoro model itself is kept
+            _gemini_broken = False
+            _edge_broken = False
             _sync_owner = None
             _SPEECH_DISPATCHER.discard_pending()
             _speech_state.notify_all()
@@ -235,16 +239,15 @@ def _wav_bytes(pcm: bytes, rate: int = 24000) -> bytes:
 # --------------------------------------------------------------------------- #
 
 _kokoro = None                 # loaded once, on first utterance
-_kokoro_broken = False         # failed once -> stop retrying, use Gemini
+_kokoro_broken = False         # failed once -> stop retrying, use Edge/Gemini
+_gemini_broken = False         # failed once -> stop retrying, use Edge
+_edge_broken = False           # failed once -> stop retrying, use SAPI
 _kokoro_lock = threading.Lock()
 
 
 def _synthesize_kokoro(text: str, config: VoiceConfig) -> bytes:
     """WAV bytes from the local Kokoro model (raises if unavailable)."""
     global _kokoro
-    # Kokoro's model initialization and create() are not documented as
-    # thread-safe. Serialize only this fast local engine; cloud calls retain
-    # the dispatcher's two-way concurrency.
     with _kokoro_lock:
         if _kokoro is None:
             from ..config import ROOT
@@ -262,6 +265,79 @@ def _synthesize_kokoro(text: str, config: VoiceConfig) -> bytes:
     return _wav_bytes(pcm, rate)
 
 
+def _synthesize_edge_tts(text: str, config: VoiceConfig) -> bytes:
+    """WAV bytes from Microsoft Edge Neural TTS (fast, natural, free)."""
+    import asyncio
+    import edge_tts
+    import soundfile as sf
+
+    voice = "en-GB-RyanNeural"  # Default classic Jarvis British voice
+    voice_lower = (config.voice or "").lower()
+    local_voice_lower = (getattr(config, "local_voice", "") or "").lower()
+    lang = (config.language_code or "en-US").lower()
+
+    if "us" in lang or "guy" in voice_lower or "puck" in voice_lower:
+        voice = "en-US-GuyNeural"
+    elif "female" in voice_lower or "aria" in voice_lower or "kore" in voice_lower or "heart" in local_voice_lower:
+        voice = "en-US-AriaNeural"
+    elif "gb" in lang or "uk" in lang or "british" in voice_lower or "george" in local_voice_lower or "lewis" in local_voice_lower:
+        voice = "en-GB-RyanNeural"
+
+    async def _fetch():
+        communicate = edge_tts.Communicate(text, voice)
+        mp3_buf = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk.get("type") == "audio":
+                mp3_buf.write(chunk.get("data", b""))
+        return mp3_buf.getvalue()
+
+    try:
+        mp3_data = asyncio.run(_fetch())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            mp3_data = loop.run_until_complete(_fetch())
+        finally:
+            loop.close()
+
+    if not mp3_data:
+        raise RuntimeError("Edge-TTS returned empty audio stream")
+
+    data, samplerate = sf.read(io.BytesIO(mp3_data))
+    wav_out = io.BytesIO()
+    sf.write(wav_out, data, samplerate, format="WAV", subtype="PCM_16")
+    return wav_out.getvalue()
+
+
+def _synthesize_sapi(text: str, config: VoiceConfig) -> bytes:
+    """100% offline Windows SAPI5 / pyttsx3 fallback speech synthesis."""
+    import tempfile
+    import pyttsx3
+
+    engine = pyttsx3.init()
+    try:
+        engine.setProperty("rate", int(180 * getattr(config, "local_speed", 1.0)))
+    except Exception:
+        pass
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        tpath = f.name
+    try:
+        engine.save_to_file(text, tpath)
+        engine.runAndWait()
+        with open(tpath, "rb") as f:
+            wav_data = f.read()
+        if not wav_data:
+            raise RuntimeError("Windows SAPI produced 0 bytes")
+        return wav_data
+    finally:
+        if os.path.exists(tpath):
+            try:
+                os.unlink(tpath)
+            except OSError:
+                pass
+
+
 class _SupersededSpeech(Exception):
     pass
 
@@ -271,30 +347,19 @@ def _synthesize_wav(
     snapshot: _VoiceSnapshot | None = None,
     generation: int | None = None,
 ) -> bytes:
-    """WAV bytes from the configured engine: local Kokoro first, Gemini after."""
-    global _kokoro_broken
+    """WAV bytes from the multi-tier fail-safe TTS engine.
+
+    Cascades smoothly through:
+    1. Preferred engine (Gemini Cloud TTS, Kokoro Local, Edge-TTS, or SAPI)
+    2. Edge-TTS Neural (Free, ultra-fast, natural British/US voice)
+    3. Local Kokoro ONNX (if available)
+    4. Windows Native SAPI5 / pyttsx3 (100% offline fallback)
+    """
+    global _kokoro_broken, _gemini_broken, _edge_broken
     snapshot = snapshot or _current_voice_snapshot()
     config = snapshot.config
-    with _speech_state:
-        current_epoch = snapshot.epoch == _voice_epoch
-        kokoro_broken = _kokoro_broken if current_epoch else False
-    if config.engine == "kokoro" and not kokoro_broken:
-        try:
-            return _synthesize_kokoro(text, config)
-        except Exception as exc:
-            with _speech_state:
-                still_current = (
-                    snapshot.epoch == _voice_epoch
-                    and (
-                        generation is None
-                        or generation == _speech_generation
-                    )
-                )
-                if still_current:
-                    _kokoro_broken = True  # warn once, not every sentence
-            if not still_current:
-                raise _SupersededSpeech() from exc
-            log.warn(f"local TTS unavailable ({exc}); using Gemini TTS")
+    engine_pref = (getattr(config, "engine", "gemini") or "gemini").lower()
+
     with _speech_state:
         if (
             snapshot.epoch != _voice_epoch
@@ -304,7 +369,52 @@ def _synthesize_wav(
             )
         ):
             raise _SupersededSpeech()
-    return _wav_bytes(_synthesize(text, snapshot))
+
+    # 1. Preferred engine: Kokoro
+    if engine_pref == "kokoro" and not _kokoro_broken:
+        try:
+            return _synthesize_kokoro(text, config)
+        except Exception as exc:
+            _kokoro_broken = True
+            log.warn(f"Local Kokoro TTS unavailable ({exc}); switching to Edge-TTS neural engine")
+
+    # 2. Preferred engine: Gemini Cloud TTS
+    if engine_pref == "gemini" and not _gemini_broken:
+        try:
+            pcm = _synthesize(text, snapshot)
+            return _wav_bytes(pcm)
+        except Exception as exc:
+            _gemini_broken = True
+            log.warn(f"Gemini Cloud TTS unavailable ({exc}); switching to Edge-TTS neural engine")
+
+    # 3. Preferred engine: SAPI
+    if engine_pref in ("sapi", "system"):
+        try:
+            return _synthesize_sapi(text, config)
+        except Exception as exc:
+            log.warn(f"Windows SAPI TTS failed ({exc}); trying Edge-TTS")
+
+    # 4. Universal Tier-2: Edge-TTS Neural (fast, free, natural)
+    if not _edge_broken:
+        try:
+            return _synthesize_edge_tts(text, config)
+        except Exception as exc:
+            _edge_broken = True
+            log.warn(f"Edge-TTS unavailable ({exc}); falling back to Windows SAPI offline engine")
+
+    # 5. Universal Tier-3: Local Kokoro (if not tried)
+    if not _kokoro_broken:
+        try:
+            return _synthesize_kokoro(text, config)
+        except Exception:
+            _kokoro_broken = True
+
+    # 6. Universal Tier-4: 100% Offline Windows Native SAPI
+    try:
+        return _synthesize_sapi(text, config)
+    except Exception as exc:
+        log.warn(f"All TTS synthesis engines failed: {exc}")
+        raise
 
 
 def _stop_async_playback() -> None:

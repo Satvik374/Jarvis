@@ -45,7 +45,7 @@ voice:
 
 # Voice mode (Gemini TTS + Gemini STT). Toggle live with ':voice on|off'
 # or launch with --voice.
-voice_enabled: false
+voice_enabled: true
 
 safety:
   confirm_each_action: false  # set true while you build trust in the model

@@ -136,6 +136,34 @@ class FullDuplexVoiceTests(unittest.TestCase):
         r5 = registry.execute("voice_control", {"action": "interrupt"}, None, cfg)
         self.assertTrue(r5.ok)
 
+    def test_06_edge_tts_synthesis(self):
+        cfg = VoiceConfig(engine="edge", voice="Ryan")
+        wav = voice._synthesize_edge_tts("Hello testing Edge TTS.", cfg)
+        self.assertTrue(wav.startswith(b"RIFF"))
+        self.assertIn(b"WAVE", wav[:16])
+
+    def test_07_sapi_tts_synthesis(self):
+        cfg = VoiceConfig(engine="sapi")
+        wav = voice._synthesize_sapi("Testing SAPI fallback.", cfg)
+        self.assertTrue(wav.startswith(b"RIFF"))
+        self.assertIn(b"WAVE", wav[:16])
+
+    def test_08_multi_tier_fallback_on_gemini_failure(self):
+        # Configure Gemini as default engine
+        cfg = VoiceConfig(engine="gemini")
+        mock_brain = Mock()
+        # Make brain raise Vertex AI Connection failure
+        mock_brain.synthesize_speech.side_effect = RuntimeError(
+            "Vertex AI Gemini TTS request failed: HTTPSConnectionPool(host='aiplatform.googleapis.com')"
+        )
+        voice.configure(brain=mock_brain, config=cfg)
+
+        # Call synthesize_wav: should cleanly catch Gemini error and fall back to Edge-TTS / SAPI
+        wav_bytes = voice._synthesize_wav("Jarvis fallback test message.")
+        self.assertTrue(wav_bytes.startswith(b"RIFF"))
+        self.assertIn(b"WAVE", wav_bytes[:16])
+        self.assertGreater(len(wav_bytes), 1000)
+
 
 if __name__ == "__main__":
     unittest.main()

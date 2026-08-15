@@ -748,6 +748,25 @@ class GeminiVertexBrain(Brain):
         return "".join(p.get("text", "") for p in parts
                        if isinstance(p, dict) and not p.get("thought")).strip()
 
+    def _parse_tts_response(self, response: Any) -> bytes:
+        candidates = response.json().get("candidates", [])
+        parts = (
+            candidates[0].get("content", {}).get("parts", [])
+            if candidates else []
+        )
+        audio_chunks = []
+        for part in parts:
+            inline_data = (
+                part.get("inlineData") or part.get("inline_data") or {}
+                if isinstance(part, dict) else {}
+            )
+            encoded = inline_data.get("data")
+            if encoded:
+                audio_chunks.append(base64.b64decode(encoded))
+        if not audio_chunks:
+            raise BrainError("Gemini TTS returned no audio data")
+        return b"".join(audio_chunks)
+
     def synthesize_speech(self, text: str, *, model: str, voice_name: str,
                           language_code: str = "en-US") -> bytes:
         """Generate 24 kHz, mono, signed 16-bit PCM with a Gemini TTS model.
@@ -755,7 +774,7 @@ class GeminiVertexBrain(Brain):
         ``model`` is supplied explicitly so speech generation can never
         accidentally replace or mutate ``self.cfg.model``, the thinking model.
         """
-        access_token, project_id = self._get_access_token_and_project()
+        api_key = getattr(self.cfg, "api_key", None) or os.environ.get("GEMINI_API_KEY")
         speech_config: dict[str, Any] = {
             "voiceConfig": {
                 "prebuiltVoiceConfig": {"voiceName": voice_name}
@@ -778,6 +797,25 @@ class GeminiVertexBrain(Brain):
                 "speechConfig": speech_config,
             },
         }
+
+        # Try Google AI Studio if API key is present
+        if api_key:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            headers = {"Content-Type": "application/json"}
+            try:
+                response = self._http_post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=self.cfg.request_timeout,
+                )
+                if response.ok:
+                    return self._parse_tts_response(response)
+            except Exception:
+                pass
+
+        # Try Vertex AI via Application Default Credentials
+        access_token, project_id = self._get_access_token_and_project()
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
@@ -805,20 +843,4 @@ class GeminiVertexBrain(Brain):
                 f"{response.status_code}: {response.text[:500]}"
             )
 
-        candidates = response.json().get("candidates", [])
-        parts = (
-            candidates[0].get("content", {}).get("parts", [])
-            if candidates else []
-        )
-        audio_chunks = []
-        for part in parts:
-            inline_data = (
-                part.get("inlineData") or part.get("inline_data") or {}
-                if isinstance(part, dict) else {}
-            )
-            encoded = inline_data.get("data")
-            if encoded:
-                audio_chunks.append(base64.b64decode(encoded))
-        if not audio_chunks:
-            raise BrainError("Gemini TTS returned no audio data")
-        return b"".join(audio_chunks)
+        return self._parse_tts_response(response)
