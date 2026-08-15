@@ -119,3 +119,20 @@ def test_hud_control_tool_action():
     # 4. Unknown action
     res_err = execute("hud_control", {"action": "invalid_action"}, None, cfg)
     assert res_err.ok is False
+
+
+def test_hud_hide_during_screenshot():
+    from jarvis.perception.screen import _hide_hud_for_capture, capture
+    from jarvis.hud import get_hud_controller, set_hud_controller
+
+    cfg = Config()
+    ctrl = HudController(cfg=cfg)
+    set_hud_controller(ctrl)
+
+    with _hide_hud_for_capture():
+        shot = capture()
+        assert shot is not None
+        assert shot.width > 0
+        assert shot.height > 0
+
+    set_hud_controller(None)

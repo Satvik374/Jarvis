@@ -109,6 +109,19 @@ class HudController:
         if self.overlay:
             self.overlay.hide()
 
+    def is_hud_visible(self) -> bool:
+        if self.overlay:
+            return self.overlay.is_visible()
+        return False
+
+    def hide_hud_sync(self, timeout: float = 0.1) -> None:
+        if self.overlay:
+            self.overlay.hide_sync(timeout=timeout)
+
+    def show_hud_sync(self, timeout: float = 0.1) -> None:
+        if self.overlay:
+            self.overlay.show_sync(timeout=timeout)
+
     def toggle_voice(self) -> None:
         """Toggle Push-to-Talk or Voice listening."""
         if not self.overlay:

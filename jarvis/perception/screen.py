@@ -7,9 +7,29 @@ can be imported on any machine.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 import time
+
+
+@contextmanager
+def _hide_hud_for_capture():
+    """Temporarily hide the Floating HUD so screen captures never capture the HUD overlay."""
+    try:
+        from ..hud import get_hud_controller
+        controller = get_hud_controller()
+        if controller and controller.overlay and controller.overlay._running:
+            if controller.is_hud_visible():
+                controller.hide_hud_sync(timeout=0.08)
+                try:
+                    yield
+                finally:
+                    controller.show_hud_sync(timeout=0.08)
+                return
+    except Exception:
+        pass
+    yield
 
 
 @dataclass
@@ -46,18 +66,20 @@ def capture(monitor: int = 1) -> Screenshot:
     """Grab the current screen as a :class:`Screenshot`.
 
     ``monitor=1`` is the primary display in mss numbering (0 = all combined).
+    Temporarily hides the Floating HUD overlay so screenshots never capture it.
     """
-    try:
-        import mss  # type: ignore
-        from PIL import Image  # type: ignore
+    with _hide_hud_for_capture():
+        try:
+            import mss  # type: ignore
+            from PIL import Image  # type: ignore
 
-        with mss.mss() as sct:
-            mon = sct.monitors[monitor]
-            raw = sct.grab(mon)
-            img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
-            return Screenshot(image=img, width=img.width, height=img.height)
-    except Exception:
-        pass
+            with mss.mss() as sct:
+                mon = sct.monitors[monitor]
+                raw = sct.grab(mon)
+                img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+                return Screenshot(image=img, width=img.width, height=img.height)
+        except Exception:
+            pass
 
     try:
         from PIL import ImageGrab  # type: ignore

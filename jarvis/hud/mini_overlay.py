@@ -333,27 +333,77 @@ class FloatingMiniHUD:
             self._root.geometry(f"{self.width}x{self.height}{pos}")
             self._close_btn.config(text="—")
 
+    def is_visible(self) -> bool:
+        if not self._root:
+            return False
+        try:
+            return self._root.state() != "withdrawn"
+        except Exception:
+            return False
+
     def toggle_visibility(self) -> None:
         if not self._root:
             return
         if self._root.state() == "withdrawn":
-            self._root.deiconify()
-            self._root.attributes("-topmost", True)
-            if self._entry:
-                self._entry.focus_set()
+            self.show()
         else:
-            self._root.withdraw()
+            self.hide()
 
     def show(self) -> None:
         if self._root:
-            self._root.deiconify()
-            self._root.attributes("-topmost", True)
-            if self._entry:
-                self._entry.focus_set()
+            try:
+                self._root.deiconify()
+                self._root.attributes("-topmost", True)
+                if self._entry:
+                    self._entry.focus_set()
+            except Exception:
+                pass
 
     def hide(self) -> None:
         if self._root:
-            self._root.withdraw()
+            try:
+                self._root.withdraw()
+            except Exception:
+                pass
+
+    def hide_sync(self, timeout: float = 0.1) -> None:
+        """Synchronously hide the HUD window (for clean screenshot captures)."""
+        if not self._root:
+            return
+        done = threading.Event()
+        def _do():
+            try:
+                self._root.withdraw()
+                self._root.update_idletasks()
+            except Exception:
+                pass
+            finally:
+                done.set()
+        try:
+            self._root.after(0, _do)
+            done.wait(timeout=timeout)
+        except Exception:
+            pass
+
+    def show_sync(self, timeout: float = 0.1) -> None:
+        """Synchronously restore the HUD window after a screenshot capture."""
+        if not self._root:
+            return
+        done = threading.Event()
+        def _do():
+            try:
+                self._root.deiconify()
+                self._root.attributes("-topmost", True)
+                self._root.update_idletasks()
+            except Exception:
+                pass
+            finally:
+                done.set()
+        try:
+            self._root.after(0, _do)
+            done.wait(timeout=timeout)
+        except Exception:
+            pass
 
     # -- State Updates ----------------------------------------------------- #
     def set_state(self, state_name: str, detail: Optional[str] = None) -> None:

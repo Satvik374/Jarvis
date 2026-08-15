@@ -1481,8 +1481,13 @@
 
 
   function connectEvents() {
-    const eventUrl = token ? `/api/events?token=${encodeURIComponent(token)}` : "/api/events";
-    eventSource = new EventSource(eventUrl);
+    if (!token) {
+      setConnected(false, "NO TOKEN");
+      setState("error", "Launch this page with jarvis --browser");
+      toast("This interface needs a Jarvis session token.", "error");
+      return;
+    }
+    eventSource = new EventSource(`/api/events?token=${encodeURIComponent(token)}`);
     eventSource.onopen = async () => {
       setConnected(true, "LINKED");
       const generationAtRequest = eventGeneration;
@@ -1490,7 +1495,7 @@
         const snapshot = await api("/api/state");
         applyInterface(snapshot.interface || { mode: interfaceMode });
         if (generationAtRequest === eventGeneration) {
-          acceptingInput = Boolean(snapshot.accepting_input !== false);
+          acceptingInput = Boolean(snapshot.accepting_input);
           inputMode = snapshot.input_mode || "command";
           inputPrompt = String(snapshot.input_prompt || "");
           if (snapshot.state) setState(snapshot.state);
