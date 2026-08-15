@@ -1238,6 +1238,36 @@ def _h_daemon_rule(args, obs, cfg):
     return ActionResult(False, f"Unknown daemon_rule action '{action}'. Must be one of: list, status, add, remove, enable, disable.", needs_observe=False)
 
 
+def _h_hud_control(args, obs, cfg):
+    action = str(args.get("action", "status")).strip().lower()
+    from ..hud import get_hud_controller
+    controller = get_hud_controller(cfg=cfg)
+
+    if action == "status":
+        active = controller._is_active
+        return ActionResult(True, f"Floating Mini HUD Status: {'ACTIVE' if active else 'INACTIVE'} | Hotkeys: {getattr(getattr(cfg, 'hud', None), 'hotkey_toggle', 'ctrl+alt+j')}", needs_observe=False)
+
+    elif action == "show":
+        controller.show_hud()
+        return ActionResult(True, "Floating Mini HUD is now visible.", needs_observe=False)
+
+    elif action == "hide":
+        controller.hide_hud()
+        return ActionResult(True, "Floating Mini HUD is now hidden.", needs_observe=False)
+
+    elif action == "toggle":
+        controller.toggle_hud()
+        return ActionResult(True, "Floating Mini HUD visibility toggled.", needs_observe=False)
+
+    elif action == "set_state":
+        state_name = str(args.get("state", "idle")).strip().lower()
+        detail = args.get("detail")
+        controller.set_state(state_name, detail=str(detail) if detail else None)
+        return ActionResult(True, f"HUD state updated to '{state_name}'.", needs_observe=False)
+
+    return ActionResult(False, f"Unknown hud_control action '{action}'. Supported: show, hide, toggle, set_state, status.", needs_observe=False)
+
+
 def _h_ask(args, obs, cfg):
     q = str(args.get("question", "Could you clarify?"))
     return ActionResult(True, q, needs_observe=False, finished=True, ask=q)
@@ -1283,6 +1313,7 @@ _HANDLERS = {
     "self_upgrade": _h_self_upgrade,
     "self_heal": _h_self_heal,
     "daemon_rule": _h_daemon_rule,
+    "hud_control": _h_hud_control,
     "make_dir": _h_make_dir,
     "list_dir": _h_list_dir,
     "find_files": _h_find_files,

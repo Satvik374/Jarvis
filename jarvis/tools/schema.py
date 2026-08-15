@@ -333,6 +333,18 @@ ACTIONS: tuple[Action, ...] = (
                   {"action": "enable", "rule_id": "default_battery_low"}),
     ),
     Action(
+        "hud_control", "Control the Global Floating Mini HUD overlay and system state display. "
+        "Allows showing, hiding, toggling, or updating the state/detail text on the always-on-top HUD capsule. "
+        "Operations: 'show', 'hide', 'toggle', 'set_state', 'status'.",
+        (Param("action", "str", "Operation: 'show', 'hide', 'toggle', 'set_state', or 'status'."),
+         Param("state", "str", "State name: 'idle', 'listening', 'thinking', 'acting', 'speaking', 'healing', 'success', 'error'.", required=False),
+         Param("detail", "str", "Optional short detail/toast text to display on the HUD.", required=False)),
+        category="system",
+        examples=({"action": "show"},
+                  {"action": "set_state", "state": "acting", "detail": "Executing user task"},
+                  {"action": "toggle"}),
+    ),
+    Action(
         "focus_window", "Bring an open window matching a title substring to the "
         "foreground.",
         (Param("title", "str", "Case-insensitive substring of the window title."),),

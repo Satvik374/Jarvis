@@ -47,6 +47,7 @@ _SLASH_COMMANDS = (
     ("/see", "[question] - multimodal live screen & webcam visual perception"),
     ("/cam", "[snap|inspect] - physical webcam vision tools"),
     ("/daemon", "[status|list|enable|disable|tick] - proactive background daemon & event triggers"),
+    ("/hud", "[show|hide|toggle|status] - global floating mini HUD & system-wide hotkeys"),
     ("/cron", "list/add/remove scheduled jobs"),
     ("/connect", "Gmail/Discord/WhatsApp connector status and test"),
     ("/remote", "list, remove, trust, or send tasks to paired devices"),
@@ -430,6 +431,11 @@ def repl(cfg: Config | None = None) -> int:
     from . import daemon
     daemon.start_daemon(cfg=cfg, task_runner=_cron_runner)
 
+    # Floating Mini HUD: Always-On-Top global capsule overlay & hotkeys
+    from . import hud
+    if getattr(cfg, "hud", None) and cfg.hud.enabled:
+        hud.start_hud(cfg=cfg, task_runner=_cron_runner)
+
     # MCP: warm up any configured connectors in the background so their tools
     # are ready by the time the user gives a task.
     from . import mcp
@@ -542,7 +548,8 @@ def repl(cfg: Config | None = None) -> int:
         log.rule(f"done in {time.time() - started:.1f}s")
     sched.stop()
     scheduler.set_default(None)
-    from . import daemon
+    from . import daemon, hud
+    hud.stop_hud()
     daemon.stop_daemon()
     mcp.get_manager().close_all()
     log.jarvis("Goodbye.")
@@ -880,6 +887,8 @@ def _command(cmd: str, cfg: Config) -> bool:
         _cam_command(cmd, cfg)
     elif c == "daemon" or c.startswith("daemon "):
         _daemon_command(cmd)
+    elif c == "hud" or c.startswith("hud "):
+        _hud_command(cmd, cfg)
     elif c == "cron" or c.startswith("cron "):
         _cron_command(cmd)
     elif c == "mcp" or c.startswith("mcp "):
@@ -1268,6 +1277,36 @@ def _daemon_command(raw: str) -> None:
         return
 
     log.warn("usage: :daemon [status | list | remove <id> | enable <id> | disable <id> | tick]")
+
+
+def _hud_command(raw: str, cfg: Config) -> None:
+    """Handle ':hud [status | show | hide | toggle]'."""
+    parts = raw.strip().split(maxsplit=2)
+    sub = parts[1].lower() if len(parts) > 1 else "status"
+
+    from . import hud
+    controller = hud.get_hud_controller(cfg=cfg)
+
+    if sub == "show":
+        controller.show_hud()
+        log.ok("Floating Mini HUD is now visible.")
+    elif sub == "hide":
+        controller.hide_hud()
+        log.ok("Floating Mini HUD is now hidden.")
+    elif sub == "toggle":
+        controller.toggle_hud()
+        log.ok("Floating Mini HUD visibility toggled.")
+    else:
+        hud_cfg = getattr(cfg, "hud", None)
+        log.rule("GLOBAL FLOATING MINI HUD & HOTKEYS", "cyan")
+        print(f"  • HUD Enabled:    {_c('YES', 'green') if getattr(hud_cfg, 'enabled', True) else 'No'}")
+        print(f"  • HUD Position:   {getattr(hud_cfg, 'position', 'bottom_right')}")
+        print(f"  • Global Toggle:  {_c(getattr(hud_cfg, 'hotkey_toggle', 'ctrl+alt+j'), 'yellow')}")
+        print(f"  • Push-To-Talk:   {_c(getattr(hud_cfg, 'hotkey_voice', 'ctrl+alt+v'), 'yellow')}")
+        print(f"  • Live Vision:    {_c(getattr(hud_cfg, 'hotkey_vision', 'ctrl+alt+s'), 'yellow')}")
+        print(f"  • Macro Record:   {_c(getattr(hud_cfg, 'hotkey_macro', 'ctrl+alt+r'), 'yellow')}")
+        print(f"\n  {_c('Commands:', 'grey')} :hud show | :hud hide | :hud toggle | :hud status\n")
+        log.rule()
 
 
 def _cron_command(raw: str) -> None:

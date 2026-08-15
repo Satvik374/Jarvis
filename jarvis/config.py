@@ -192,6 +192,20 @@ class DaemonConfig:
 
 
 @dataclass
+class HudConfig:
+    # Global Floating Mini HUD & System-Wide Hotkey overlay
+    enabled: bool = True
+    always_on_top: bool = True
+    hotkey_toggle: str = "ctrl+alt+j"
+    hotkey_voice: str = "ctrl+alt+v"
+    hotkey_vision: str = "ctrl+alt+s"
+    hotkey_macro: str = "ctrl+alt+r"
+    opacity: float = 0.94
+    # Default position on desktop: "bottom_right", "top_right", "bottom_left", "top_center", "center"
+    position: str = "bottom_right"
+
+
+@dataclass
 class Config:
     brain: BrainConfig = field(default_factory=BrainConfig)
     perception: PerceptionConfig = field(default_factory=PerceptionConfig)
@@ -201,6 +215,7 @@ class Config:
     remote: RemoteConfig = field(default_factory=RemoteConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
+    hud: HudConfig = field(default_factory=HudConfig)
     # Voice mode: speak replies aloud (Gemini TTS) and allow spoken commands
     # (mic -> Gemini transcription). Toggle at runtime with ':voice on|off'.
     voice_enabled: bool = False
@@ -251,6 +266,7 @@ def load_config(path: Path | str | None = None) -> Config:
         _apply(cfg.remote, data.get("remote", {}))
         _apply(cfg.browser, data.get("browser", {}))
         _apply(cfg.daemon, data.get("daemon", {}))
+        _apply(cfg.hud, data.get("hud", {}))
         cfg.voice_enabled = bool(data.get("voice_enabled", cfg.voice_enabled))
 
     # Environment overrides for the most common knobs.
