@@ -72,9 +72,12 @@
         isDragging: false,
         startX: 0, startY: 0,
         rotX: 0, rotY: 0,
-        targetRotX: 0, targetRotY: 0
+        targetRotX: 0, targetRotY: 0,
+        posX: 0, posY: 0,
+        targetPosX: 0, targetPosY: 0,
+        mode: "rotate", // "rotate" (drag to rotate) or "pan" (shift/right drag to translate position)
       };
-      this.zoom = { current: 1.0, target: 1.0, min: 0.65, max: 1.8 };
+      this.zoom = { current: 1.0, target: 1.0, min: 0.65, max: 2.2 };
 
       this.initThree();
       this.buildHologram();
@@ -285,6 +288,18 @@
     bindEvents() {
       const el = this.container;
 
+      // Context menu prevent default on canvas for smooth right click pan
+      el.addEventListener("contextmenu", (e) => e.preventDefault());
+
+      // Mouse drag controls
+      el.addEventListener("pointerdown", (e) => {
+        this.drag.isDragging = true;
+        this.drag.startX = e.clientX;
+        this.drag.startY = e.clientY;
+        this.drag.mode = (e.button === 2 || e.shiftKey || e.button === 1) ? "pan" : "rotate";
+        el.style.cursor = "grabbing";
+      });
+
       // Mouse move / Parallax
       window.addEventListener("pointermove", (e) => {
         const x = (e.clientX / window.innerWidth) * 2 - 1;
@@ -295,20 +310,17 @@
         if (this.drag.isDragging) {
           const dx = e.clientX - this.drag.startX;
           const dy = e.clientY - this.drag.startY;
-          this.drag.targetRotY += dx * 0.007;
-          this.drag.targetRotX += dy * 0.007;
+          if (this.drag.mode === "pan") {
+            this.drag.targetPosX += dx * 0.035;
+            this.drag.targetPosY -= dy * 0.035;
+          } else {
+            this.drag.targetRotY += dx * 0.007;
+            this.drag.targetRotX += dy * 0.007;
+          }
           this.drag.startX = e.clientX;
           this.drag.startY = e.clientY;
         }
       }, { passive: true });
-
-      // Mouse drag controls
-      el.addEventListener("pointerdown", (e) => {
-        this.drag.isDragging = true;
-        this.drag.startX = e.clientX;
-        this.drag.startY = e.clientY;
-        el.style.cursor = "grabbing";
-      });
 
       window.addEventListener("pointerup", () => {
         this.drag.isDragging = false;
@@ -388,6 +400,8 @@
     resetView() {
       this.drag.targetRotX = 0;
       this.drag.targetRotY = 0;
+      this.drag.targetPosX = 0;
+      this.drag.targetPosY = 0;
       this.zoom.target = 1.0;
       this.triggerPulse(1.2);
     }
@@ -503,19 +517,27 @@
       this.pointer.x += (this.pointer.targetX - this.pointer.x) * 0.05 * dt;
       this.pointer.y += (this.pointer.targetY - this.pointer.y) * 0.05 * dt;
 
-      // Smooth Drag Rotation
+      // Smooth Drag Rotation (persists where released)
       this.drag.rotX += (this.drag.targetRotX - this.drag.rotX) * 0.08 * dt;
       this.drag.rotY += (this.drag.targetRotY - this.drag.rotY) * 0.08 * dt;
+
+      // Smooth Position Translation (persists where dragged)
+      this.drag.posX += (this.drag.targetPosX - this.drag.posX) * 0.08 * dt;
+      this.drag.posY += (this.drag.targetPosY - this.drag.posY) * 0.08 * dt;
 
       // Smooth Zoom
       this.zoom.current += (this.zoom.target - this.zoom.current) * 0.08 * dt;
       this.camera.position.z = 32 / this.zoom.current;
 
-      // Auto-Orbit drift
-      const autoDrift = this.autoOrbit && !this.drag.isDragging ? t * 0.15 : 0;
+      // Continuous incremental Auto-Orbit drift (never resets or jumps on release!)
+      if (this.autoOrbit && !this.drag.isDragging) {
+        this.drag.targetRotY += 0.0025 * dt;
+      }
 
+      this.hologramRoot.position.x = this.drag.posX;
+      this.hologramRoot.position.y = this.drag.posY;
       this.hologramRoot.rotation.x = this.pointer.y + this.drag.rotX;
-      this.hologramRoot.rotation.y = this.pointer.x + this.drag.rotY + autoDrift;
+      this.hologramRoot.rotation.y = this.pointer.x + this.drag.rotY;
     }
 
     updateSingularity(t) {
