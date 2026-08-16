@@ -21,7 +21,7 @@ def _response(candidate: dict) -> Mock:
 class GeminiActionRecoveryTests(unittest.TestCase):
     def _brain(self) -> GeminiVertexBrain:
         brain = GeminiVertexBrain(
-            BrainConfig(model="gemini-3.6-flash", location="global")
+            BrainConfig(model="gemini-3.7-flash", location="global")
         )
         brain._get_access_token_and_project = Mock(
             return_value=("access-token", "project-id")

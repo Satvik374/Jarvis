@@ -7,7 +7,7 @@ brain:
   # backend: gemini | ollama | hf | llamacpp | openai | anthropic
   backend: gemini
   # The model Vertex AI/Ollama serves.
-  model: gemini-3.6-flash
+  model: gemini-3.7-flash
   adapter_path: ""      # only for backend "hf": path to your trained LoRA
   base_url: ""
 
@@ -17,7 +17,7 @@ brain:
   # adapter_path: training/outputs/jarvis-lora  # the adapter you trained
   temperature: 0.2
   max_tokens: 50000    # openai/anthropic pass this straight through; 500000 is a 400
-  # Keep vision ON to allow Gemini 3.5 Flash to analyze screen images natively.
+  # Keep vision ON to allow Gemini 3.7 Flash to analyze screen images natively.
   use_vision: true
   request_timeout: 120
   # Answer plain conversation (greetings, small talk) directly, no tools.

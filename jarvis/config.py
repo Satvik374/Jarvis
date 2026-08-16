@@ -28,11 +28,11 @@ class BrainConfig:
     #   hf     - load a HuggingFace model + your trained LoRA adapter directly,
     #            no server needed. Best way to run your fine-tune immediately.
     backend: str = "gemini"
-    # Model name/tag. For gemini this is e.g. "gemini-3.6-flash".
+    # Model name/tag. For gemini this is e.g. "gemini-3.7-flash".
     # For ollama this is the pulled model, e.g. "ornith:9b".
     # For hf this is the base model id, e.g. "Qwen/Qwen2.5-0.5B-Instruct".
     # Once you fine-tune, point this at "jarvis" (see training/export_ollama.py).
-    model: str = "gemini-3.6-flash"
+    model: str = "gemini-3.7-flash"
     # Google Cloud Vertex AI region/location (used by "gemini" backend).
     location: str = "global"
     # Path to a trained LoRA adapter (used by the "hf" backend). Empty = base only.

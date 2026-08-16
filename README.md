@@ -182,7 +182,7 @@ you > :help
 
 Voice output uses the dedicated `gemini-3.1-flash-tts-preview` model through
 Vertex AI. It is configured separately from the thinking model, so
-`brain.model: gemini-3.6-flash` remains unchanged.
+`brain.model: gemini-3.7-flash` remains unchanged.
 Voice transcription uses the lower-latency `gemini-2.5-flash-lite` model with
 thinking disabled and a shorter end-of-speech delay.
 
