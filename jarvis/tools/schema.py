@@ -233,6 +233,22 @@ ACTIONS: tuple[Action, ...] = (
         category="apps", examples=({"title": "Notepad"},),
     ),
     Action(
+        "snap_window", "Position and resize a window to a region of the screen: "
+        "'left' (left half), 'right' (right half), 'top' (top half), 'bottom' (bottom half), "
+        "'maximize', 'minimize', 'restore', or 'center'. Snaps active window by default, or pass 'title'.",
+        (Param("direction", "str", "Snap direction: left, right, top, bottom, maximize, minimize, restore, center."),
+         Param("title", "str", "Optional window title substring. If omitted, snaps active foreground window.", required=False)),
+        category="apps",
+        examples=({"direction": "left"}, {"direction": "maximize", "title": "Chrome"}),
+    ),
+    Action(
+        "tile_windows", "Automatically arrange open desktop windows into a clean workspace layout: "
+        "'side_by_side' (columns), 'grid' (2x2 grid), or 'minimize_all'.",
+        (Param("layout", "str", "Layout pattern: side_by_side, grid, minimize_all (default: side_by_side).", required=False, default="side_by_side"),),
+        category="apps",
+        examples=({"layout": "side_by_side"}, {"layout": "grid"}),
+    ),
+    Action(
         "run_command", "Run a shell command and capture its output. Use for "
         "non-GUI tasks. Refuses obviously destructive commands.",
         (Param("command", "str", "The command line to execute."),
@@ -264,13 +280,31 @@ ACTIONS: tuple[Action, ...] = (
         "final report. Use it for deep web research, document writing, or any "
         "big sub-task, so this loop stays fast and focused.",
         (Param("name", "str", "The sub-agent to run, e.g. 'researcher', "
-               "'writer', 'coder'."),
+               "'verifier', 'data_analyst', 'architect', 'coder'."),
          Param("task", "str", "Complete, self-contained instructions - the "
                "sub-agent cannot see this conversation.")),
         category="coding",
         examples=({"name": "researcher",
                    "task": "Find the current stable Python version and its "
                            "release date; cite the sources you read"},),
+    ),
+    Action(
+        "agent_swarm", "Delegate multiple specialist sub-agent tasks concurrently "
+        "in parallel (e.g. running research, data analysis, architectural design, "
+        "and code verification simultaneously). Each sub-agent runs independently "
+        "in its own worker thread with isolated context, returning an aggregated report.",
+        (Param("tasks", "list", "List of sub-task objects, e.g. "
+               "[{'name': 'researcher', 'task': '...'}, {'name': 'verifier', 'task': '...'}]."),
+         Param("timeout", "int", "Max seconds to wait for swarm completion (default 180).",
+               required=False, default=180)),
+        category="coding",
+        examples=({
+            "tasks": [
+                {"name": "researcher", "task": "Search for best practices on SQLite WAL mode performance"},
+                {"name": "verifier", "task": "Run pytest on the database module and check for concurrency issues"},
+            ],
+            "timeout": 120,
+        },),
     ),
     Action(
         "code_task", "Delegate a complete software-development job to the "

@@ -286,6 +286,20 @@ def _h_focus_window(args, obs, cfg):
     return ActionResult(True, apps.focus_window(str(args.get("title", ""))))
 
 
+def _h_snap_window(args, obs, cfg):
+    direction = str(args.get("direction", "maximize"))
+    title = args.get("title")
+    msg = apps.snap_window(direction, title=str(title) if title else None)
+    return ActionResult(not msg.startswith("could not") and not msg.startswith("unknown"), msg)
+
+
+def _h_tile_windows(args, obs, cfg):
+    layout = str(args.get("layout", "side_by_side"))
+    msg = apps.tile_windows(layout)
+    return ActionResult(not msg.startswith("unknown"), msg)
+
+
+
 def _h_open_url(args, obs, cfg):
     return ActionResult(True, system.open_url(str(args.get("url", ""))))
 
@@ -607,6 +621,24 @@ def _h_agent(args, obs, cfg):
         return ActionResult(True, msg, needs_observe=False, finished=True,
                             ask=msg)
     return ActionResult(True, f"[{name} report] {msg}", needs_observe=False)
+
+
+def _h_agent_swarm(args, obs, cfg):
+    tasks = args.get("tasks")
+    if not tasks or not isinstance(tasks, list):
+        return ActionResult(False, "agent_swarm requires a list of task objects: [{'name': '...', 'task': '...'}, ...]", needs_observe=False)
+
+    timeout = float(args.get("timeout", 180) or 180)
+    from ..agent import subagent
+    from ..agent.brain import make_brain
+    from ..utils import logging as log
+
+    log.rule(f"Swarm: {len(tasks)} parallel subagents", "magenta")
+    msg, is_ask = subagent.run_swarm(tasks, make_brain(cfg.brain), cfg, timeout=timeout)
+    if is_ask:
+        return ActionResult(True, msg, needs_observe=False, finished=True, ask=msg)
+    return ActionResult(True, msg, needs_observe=False)
+
 
 
 def _h_find_files(args, obs, cfg):
@@ -1287,6 +1319,8 @@ _HANDLERS = {
     "key_sequence": _h_key_sequence,
     "open_app": _h_open_app,
     "focus_window": _h_focus_window,
+    "snap_window": _h_snap_window,
+    "tile_windows": _h_tile_windows,
     "list_windows": _h_list_windows,
     "close_window": _h_close_window,
     "open_url": _h_open_url,
@@ -1309,6 +1343,7 @@ _HANDLERS = {
     "write_files": _h_write_files,
     "edit_file": _h_edit_file,
     "agent": _h_agent,
+    "agent_swarm": _h_agent_swarm,
     "code_task": _h_code_task,
     "self_upgrade": _h_self_upgrade,
     "self_heal": _h_self_heal,

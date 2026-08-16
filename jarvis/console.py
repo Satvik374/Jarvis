@@ -457,6 +457,12 @@ def repl(cfg: Config | None = None) -> int:
         except Exception:
             pass
         log.rule(f"done in {time.time() - started:.1f}s")
+        try:
+            from .browser_worker import emit
+            emit("input_request", prompt="› ", mode="command")
+            emit("state", state="listening", label="Awaiting directive")
+        except Exception:
+            pass
         return result
 
     from . import hud
@@ -1329,7 +1335,7 @@ def _hud_command(raw: str, cfg: Config) -> None:
         print(f"  • HUD Enabled:    {_c('YES', 'green') if getattr(hud_cfg, 'enabled', True) else 'No'}")
         print(f"  • HUD Position:   {getattr(hud_cfg, 'position', 'bottom_right')}")
         print(f"  • Global Toggle:  {_c(getattr(hud_cfg, 'hotkey_toggle', 'ctrl+alt+j'), 'yellow')}")
-        print(f"  • Push-To-Talk:   {_c(getattr(hud_cfg, 'hotkey_voice', 'ctrl+alt+v'), 'yellow')}")
+        print(f"  • Push-To-Talk:   {_c(getattr(hud_cfg, 'hotkey_voice', 'alt+v'), 'yellow')}")
         print(f"  • Live Vision:    {_c(getattr(hud_cfg, 'hotkey_vision', 'ctrl+alt+s'), 'yellow')}")
         print(f"  • Macro Record:   {_c(getattr(hud_cfg, 'hotkey_macro', 'ctrl+alt+r'), 'yellow')}")
         print(f"\n  {_c('Commands:', 'grey')} :hud show | :hud hide | :hud toggle | :hud status\n")

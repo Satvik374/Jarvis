@@ -1104,6 +1104,55 @@ def listen(start_timeout: float = 6.0, max_seconds: float = 12.0,
     return buf.getvalue()
 
 
+def record_until_cancelled(
+    stop_event: threading.Event,
+    max_seconds: float = 120.0,
+) -> bytes | None:
+    """Continuously record microphone audio until `stop_event` is set.
+
+    Used by Push-to-Talk toggle (press hotkey to start, press hotkey to stop).
+    Does NOT stop on silence or pause.
+    Returns standard WAV bytes, or None if no audio or canceled immediately.
+    """
+    try:
+        import sounddevice as sd  # type: ignore
+    except Exception as exc:
+        log.warn(f"microphone unavailable: {exc}")
+        return None
+
+    frames: list[bytes] = []
+    try:
+        with sd.RawInputStream(
+            samplerate=_RATE,
+            channels=1,
+            dtype="int16",
+            blocksize=_CHUNK,
+        ) as stream:
+            while not stop_event.is_set():
+                chunk, _ = stream.read(_CHUNK)
+                chunk = bytes(chunk)
+                frames.append(chunk)
+                if len(frames) * 0.1 >= max_seconds:
+                    break
+    except Exception as exc:
+        log.warn(f"Push-to-talk recording failed: {exc}")
+        return None
+
+    if not frames or len(frames) < 2:
+        return None
+
+    secs = len(frames) * 0.1
+    log.info(f"🎤 Push-to-talk recorded {secs:.1f}s")
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(_RATE)
+        wf.writeframes(b"".join(frames))
+    return buf.getvalue()
+
+
 def speak_and_listen(
     text: str,
     start_timeout: float = 8.0,

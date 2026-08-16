@@ -287,3 +287,59 @@ class RoutineWatcher(BaseWatcher):
             self.last_evening_date = today_str
 
         return events
+
+
+class ClipboardWatcher(BaseWatcher):
+    """Monitors system clipboard changes for URLs, code snippets, error traces, and actionable patterns."""
+
+    def __init__(self):
+        super().__init__(name="clipboard_watcher")
+        self.last_clip: str = ""
+        self._initialized = False
+
+    def check(self, now: float | None = None) -> List[Event]:
+        if not self.enabled:
+            return []
+
+        events: List[Event] = []
+        try:
+            import pyperclip  # type: ignore
+            text = pyperclip.paste()
+        except Exception:
+            return []
+
+        if not text or not isinstance(text, str):
+            return []
+
+        clean = text.strip()
+        if not clean or clean == self.last_clip:
+            return []
+
+        if not self._initialized:
+            self.last_clip = clean
+            self._initialized = True
+            return []
+
+        self.last_clip = clean
+
+        # 1. URL pattern
+        if clean.startswith("http://") or clean.startswith("https://"):
+            events.append(Event(
+                type=EventType.CLIPBOARD_SUGGESTION,
+                title="URL Copied",
+                message=f"URL copied to clipboard: {clean[:80]}",
+                payload={"url": clean, "kind": "url"},
+                source="clipboard_watcher",
+            ))
+        # 2. Error / Traceback pattern
+        elif "traceback (most recent call last)" in clean.lower() or "syntaxerror:" in clean.lower() or "error:" in clean.lower():
+            events.append(Event(
+                type=EventType.CLIPBOARD_SUGGESTION,
+                title="Error Traceback Detected",
+                message="Code error detected in clipboard. Ready to debug.",
+                payload={"snippet": clean[:500], "kind": "error"},
+                source="clipboard_watcher",
+            ))
+
+        return events
+

@@ -197,9 +197,10 @@ class HudConfig:
     enabled: bool = True
     always_on_top: bool = True
     hotkey_toggle: str = "ctrl+alt+j"
-    hotkey_voice: str = "ctrl+alt+v"
+    hotkey_voice: str = "alt+v"
     hotkey_vision: str = "ctrl+alt+s"
     hotkey_macro: str = "ctrl+alt+r"
+    hotkey_stop: str = "ctrl+alt+x"
     opacity: float = 0.94
     # Default position on desktop: "bottom_right", "top_right", "bottom_left", "top_center", "center"
     position: str = "bottom_right"

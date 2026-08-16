@@ -73,6 +73,75 @@ RULES
                        "wait", "finish", "ask"}),
 )
 
+VERIFIER = AgentSpec(
+    name="verifier",
+    description=("quality assurance & test verification: inspects files, runs tests, "
+                 "detects bugs, checks edge cases, and provides verification stamp"),
+    prompt="""\
+You are JARVIS-VERIFIER, a strict Quality Assurance & Verification Specialist.
+Your goal is to independently inspect, test, and verify deliverables.
+
+WORKFLOW
+  1. Inspect the target code or files using read_file / list_dir / find_files.
+  2. Run unit tests, linters, or verification scripts using run_command or python.
+  3. Analyze edge cases, syntax correctness, regression risks, and security constraints.
+  4. Finish with an explicit PASS / FAIL verdict, detailing all test outcomes and any defects found.
+
+RULES
+  * Be thorough and adversarial: try to find edge cases that fail.
+  * Always provide concrete evidence (e.g. command output or line numbers) in your report.""",
+    actions=frozenset({
+        "read_file", "read_document", "list_dir", "find_files", "run_command",
+        "python", "system_status", "wait", "finish", "ask",
+    }),
+)
+
+DATA_ANALYST = AgentSpec(
+    name="data_analyst",
+    description=("data analysis & computation: processes CSVs, JSON, logs, computes "
+                 "statistics/math, extracts trends, and generates structured summaries"),
+    prompt="""\
+You are JARVIS-ANALYST, an expert data scientist and mathematical analyst.
+You extract insights, analyze datasets, and perform precise calculations.
+
+WORKFLOW
+  1. Locate and read data files (read_file, read_document, list_dir, find_files).
+  2. Process data using Python scripts (python / run_command) for heavy math, parsing, or stats.
+  3. Validate numbers, distributions, outliers, and key drivers.
+  4. Finish with structured tables, executive summaries, metrics, and actionable conclusions.
+
+RULES
+  * Use python execution for arithmetic and calculations rather than doing mental math.
+  * Present key findings in clean markdown tables with exact figures.""",
+    actions=frozenset({
+        "read_file", "read_document", "list_dir", "find_files", "write_file",
+        "python", "run_command", "wait", "finish", "ask",
+    }),
+)
+
+ARCHITECT = AgentSpec(
+    name="architect",
+    description=("software & system architect: analyzes codebases, designs technical "
+                 "blueprints, plans component interfaces, and creates task breakdowns"),
+    prompt="""\
+You are JARVIS-ARCHITECT, a senior systems architect and technical planner.
+You evaluate existing codebases and draft comprehensive, decoupled system designs.
+
+WORKFLOW
+  1. Explore directory structure, dependencies, and existing patterns (list_dir, find_files, read_file).
+  2. Identify architecture constraints, integration points, and component boundaries.
+  3. Draft technical specification, data models, API signatures, and modular task splits.
+  4. Finish with the complete design document and a prioritized task breakdown for implementation.
+
+RULES
+  * Preserve established codebase conventions and avoid unnecessary external dependencies.
+  * Structure plans with clear component separation and verification criteria.""",
+    actions=frozenset({
+        "read_file", "read_document", "list_dir", "find_files", "web_search",
+        "read_url", "write_file", "wait", "finish", "ask",
+    }),
+)
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
@@ -104,7 +173,12 @@ def _load_custom(root: Path) -> dict[str, AgentSpec]:
 def available(root: Path | None = None) -> dict[str, AgentSpec]:
     """All delegatable sub-agents (built-ins + agents/*.yaml). The coder is
     exposed separately (it needs workdir machinery) but is listed in the note."""
-    agents = {"researcher": RESEARCHER}
+    agents = {
+        "researcher": RESEARCHER,
+        "verifier": VERIFIER,
+        "data_analyst": DATA_ANALYST,
+        "architect": ARCHITECT,
+    }
     agents.update(_load_custom(root or _project_root()))
     return agents
 
@@ -213,3 +287,84 @@ def _short(args: dict) -> str:
 def _short_msg(msg: str) -> str:
     first = (msg or "").splitlines()[0] if msg else ""
     return first[:117] + "..." if len(first) > 120 else first
+
+
+def run_swarm(
+    tasks: list[dict],
+    brain: Brain,
+    cfg: Config,
+    max_workers: int = 4,
+    timeout: float = 180.0,
+) -> tuple[str, bool]:
+    """Execute multiple specialist subagent tasks concurrently in parallel.
+
+    `tasks` is a list of dicts: `[{"name": "researcher", "task": "..."}, ...]`.
+    Returns an aggregated report containing the outcomes of all subagents.
+    """
+    if not tasks:
+        return "No swarm tasks provided to execute.", False
+
+    specs = available()
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from .coder import Coder
+    from ..agent.brain import make_brain
+
+    results: list[dict | None] = [None] * len(tasks)
+
+    def _execute_single(idx: int, task_item: dict) -> dict:
+        name = str(task_item.get("name") or "researcher").strip().lower()
+        task_prompt = str(task_item.get("task") or "").strip()
+        workdir = task_item.get("workdir")
+
+        if not task_prompt:
+            return {"index": idx, "name": name, "ok": False, "report": "Empty task prompt provided."}
+
+        worker_brain = make_brain(cfg.brain)
+
+        try:
+            if name == "coder":
+                coder = Coder(worker_brain, cfg)
+                report, is_ask = coder.run(task_prompt, workdir or str(_project_root()))
+                return {"index": idx, "name": name, "ok": True, "report": report, "is_ask": is_ask}
+
+            spec = specs.get(name)
+            if not spec:
+                return {
+                    "index": idx,
+                    "name": name,
+                    "ok": False,
+                    "report": f"Unknown subagent '{name}'. Available: {', '.join(sorted(specs.keys()))}, coder",
+                }
+
+            report, is_ask = run_agent(spec, worker_brain, cfg, task_prompt)
+            return {"index": idx, "name": name, "ok": True, "report": report, "is_ask": is_ask}
+        except Exception as exc:
+            return {"index": idx, "name": name, "ok": False, "report": f"Subagent error: {exc}"}
+
+    num_workers = min(len(tasks), max(1, max_workers))
+    log.info(f"🐝 Spawning Subagent Swarm with {len(tasks)} concurrent tasks ({num_workers} threads)...")
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        future_map = {executor.submit(_execute_single, i, t): i for i, t in enumerate(tasks)}
+        for future in as_completed(future_map, timeout=timeout):
+            try:
+                res = future.result()
+                results[res["index"]] = res
+            except Exception as exc:
+                idx = future_map[future]
+                results[idx] = {"index": idx, "name": tasks[idx].get("name", "agent"), "ok": False, "report": f"Execution error: {exc}"}
+
+    lines = [f"=== SUBAGENT SWARM REPORT ({len(tasks)} tasks executed) ==="]
+    has_ask = False
+    for i, res in enumerate(results):
+        if not res:
+            res = {"name": tasks[i].get("name", "agent"), "report": "Task timed out."}
+        lines.append(f"\n[Task {i+1}] Subagent: {res.get('name', 'unknown').upper()}")
+        lines.append(f"Prompt: {tasks[i].get('task', '')[:100]}...")
+        lines.append("Deliverable / Findings:")
+        lines.append(res.get("report", "").strip())
+        lines.append("-" * 40)
+        if res.get("is_ask"):
+            has_ask = True
+
+    return "\n".join(lines), has_ask

@@ -79,7 +79,7 @@ class Observation:
 
 
 def observe(max_elements: int = 60, use_uia: bool = True,
-            use_ocr: bool = False) -> Observation:
+            use_ocr: bool = True) -> Observation:
     """Build an :class:`Observation` of the current desktop."""
     from .screen import screen_size
 
@@ -100,6 +100,7 @@ def observe(max_elements: int = 60, use_uia: bool = True,
             elements = []
 
     return Observation(elements=elements, screen_size=size, active_window=active)
+
 
 
 def _active_window_title() -> str:

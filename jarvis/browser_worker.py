@@ -339,7 +339,7 @@ def install_event_bridge() -> None:
                     try:
                         from jarvis.config import load_config
                         from jarvis.agent.brain import make_brain
-                        cfg = load_browser_config()
+                        cfg = load_config()
                         brain = make_brain(cfg.brain)
                         new_title = sm.generate_ai_title(session, brain)
                         if new_title:

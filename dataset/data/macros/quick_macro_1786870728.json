@@ -1,0 +1,31 @@
+{
+  "name": "quick_macro_1786870728",
+  "description": "Automated workflow for JARVIS HUD",
+  "steps": [
+    {
+      "action": "focus_window",
+      "args": {
+        "title": "JARVIS HUD"
+      },
+      "description": "Focus window 'JARVIS HUD'",
+      "delay": 0.2
+    },
+    {
+      "action": "click",
+      "args": {
+        "x": 1640,
+        "y": 527,
+        "element_name": "",
+        "control_type": "Button"
+      },
+      "description": "Click at (1640, 527)",
+      "delay": 0.25
+    }
+  ],
+  "parameters": [],
+  "target_apps": [
+    "JARVIS HUD"
+  ],
+  "created_at": "2026-08-16 14:28:49",
+  "author": "user"
+}

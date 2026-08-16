@@ -160,3 +160,130 @@ def list_windows() -> list[str]:
         return [w.title for w in gw.getAllWindows() if w.title.strip()]
     except Exception:
         return []
+
+
+def snap_window(direction: str, title: str | None = None) -> str:
+    """Position the active or named window (left, right, top, bottom, maximize, minimize, restore, center)."""
+    dir_clean = (direction or "").strip().lower()
+    try:
+        import pygetwindow as gw  # type: ignore
+        from ..perception.screen import screen_size
+    except Exception as exc:
+        return f"window manager unavailable: {exc}"
+
+    if title:
+        matches = [w for w in gw.getAllWindows() if w.title and title.lower() in w.title.lower()]
+        if not matches:
+            return f"no window matching '{title}'"
+        w = matches[0]
+    else:
+        w = gw.getActiveWindow()
+        if not w:
+            return "no active window found to snap"
+
+    sw, sh = screen_size()
+
+    try:
+        if dir_clean in ("maximize", "max"):
+            w.maximize()
+            return f"maximized '{w.title}'"
+        elif dir_clean in ("minimize", "min"):
+            w.minimize()
+            return f"minimized '{w.title}'"
+        elif dir_clean == "restore":
+            w.restore()
+            return f"restored '{w.title}'"
+        elif dir_clean == "left":
+            if w.isMinimized or w.isMaximized:
+                w.restore()
+            w.moveTo(0, 0)
+            w.resizeTo(sw // 2, sh)
+            return f"snapped '{w.title}' to left half"
+        elif dir_clean == "right":
+            if w.isMinimized or w.isMaximized:
+                w.restore()
+            w.moveTo(sw // 2, 0)
+            w.resizeTo(sw // 2, sh)
+            return f"snapped '{w.title}' to right half"
+        elif dir_clean == "top":
+            if w.isMinimized or w.isMaximized:
+                w.restore()
+            w.moveTo(0, 0)
+            w.resizeTo(sw, sh // 2)
+            return f"snapped '{w.title}' to top half"
+        elif dir_clean == "bottom":
+            if w.isMinimized or w.isMaximized:
+                w.restore()
+            w.moveTo(0, sh // 2)
+            w.resizeTo(sw, sh // 2)
+            return f"snapped '{w.title}' to bottom half"
+        elif dir_clean == "center":
+            if w.isMinimized or w.isMaximized:
+                w.restore()
+            cw, ch = int(sw * 0.7), int(sh * 0.7)
+            w.moveTo((sw - cw) // 2, (sh - ch) // 2)
+            w.resizeTo(cw, ch)
+            return f"centered '{w.title}'"
+        else:
+            return f"unknown direction '{direction}'. Supported: left, right, top, bottom, maximize, minimize, restore, center"
+    except Exception as exc:
+        return f"could not snap '{w.title}': {exc}"
+
+
+def tile_windows(layout: str = "side_by_side") -> str:
+    """Tile open visible windows into a clean desktop layout (side_by_side, grid, minimize_all)."""
+    layout_clean = (layout or "side_by_side").strip().lower()
+    try:
+        import pygetwindow as gw  # type: ignore
+        from ..perception.screen import screen_size
+    except Exception as exc:
+        return f"window manager unavailable: {exc}"
+
+    sw, sh = screen_size()
+    windows = [w for w in gw.getAllWindows() if w.title.strip() and not _is_own_console(w) and not w.isMinimized]
+
+    if not windows:
+        return "no visible windows to tile"
+
+    if layout_clean == "minimize_all":
+        count = 0
+        for w in windows:
+            try:
+                w.minimize()
+                count += 1
+            except Exception:
+                pass
+        return f"minimized {count} open windows"
+
+    if layout_clean in ("side_by_side", "horizontal"):
+        n = min(len(windows), 4)
+        width = sw // n
+        for i, w in enumerate(windows[:n]):
+            try:
+                if w.isMaximized:
+                    w.restore()
+                w.moveTo(i * width, 0)
+                w.resizeTo(width, sh)
+            except Exception:
+                pass
+        return f"tiled {n} windows side-by-side"
+
+    if layout_clean in ("grid", "2x2"):
+        n = min(len(windows), 4)
+        if n == 1:
+            return snap_window("maximize", windows[0].title)
+        w_half, h_half = sw // 2, sh // 2
+        coords = [(0, 0), (w_half, 0), (0, h_half), (w_half, h_half)]
+        for i, w in enumerate(windows[:n]):
+            try:
+                if w.isMaximized:
+                    w.restore()
+                x, y = coords[i]
+                w.moveTo(x, y)
+                w.resizeTo(w_half, h_half)
+            except Exception:
+                pass
+        return f"tiled {n} windows in 2x2 grid"
+
+    return f"unknown layout '{layout}'. Supported: side_by_side, grid, minimize_all"
+

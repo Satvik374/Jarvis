@@ -433,7 +433,48 @@ class GeminiVertexBrain(Brain):
         self._cached_token = None
         self.project_id = None
         self._token_expiry = 0
-        # Try using google-auth library if installed
+
+        # Fast-path: Directly parse and refresh from standard ADC JSON
+        # (Avoids slow gcloud CLI subshell spawning in google.auth on Windows)
+        adc_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        if not adc_path:
+            adc_path = os.path.expandvars(r'%APPDATA%\gcloud\application_default_credentials.json')
+
+        if os.path.exists(adc_path):
+            try:
+                with open(adc_path, 'r', encoding='utf-8') as f:
+                    creds = json.load(f)
+
+                cred_type = creds.get('type')
+                project_id = creds.get('quota_project_id') or creds.get('project_id') or os.environ.get('GOOGLE_CLOUD_PROJECT')
+
+                if cred_type == 'authorized_user' and creds.get('client_id') and creds.get('refresh_token') and project_id:
+                    token_url = "https://oauth2.googleapis.com/token"
+                    data = urllib.parse.urlencode({
+                        'client_id': creds['client_id'],
+                        'client_secret': creds.get('client_secret', ''),
+                        'refresh_token': creds['refresh_token'],
+                        'grant_type': 'refresh_token'
+                    }).encode('utf-8')
+
+                    req = urllib.request.Request(
+                        token_url,
+                        data=data,
+                        headers={'Content-Type': 'application/x-www-form-urlencoded'}
+                    )
+                    with urllib.request.urlopen(
+                        req,
+                        timeout=min(10.0, float(self.cfg.request_timeout or 10.0)),
+                    ) as response:
+                        res = json.loads(response.read().decode('utf-8'))
+                        self._cached_token = res['access_token']
+                        self.project_id = project_id
+                        self._token_expiry = time.time() + res.get('expires_in', 3600)
+                        return self._cached_token, self.project_id
+            except Exception as direct_exc:
+                log.debug(f"Direct ADC refresh fast-path bypassed: {direct_exc}")
+
+        # Fallback: Try using google-auth library if installed (for service accounts / metadata server)
         ga_error = ""
         try:
             import google.auth  # type: ignore
@@ -441,8 +482,6 @@ class GeminiVertexBrain(Brain):
             credentials, project = google.auth.default()
             request = google.auth.transport.requests.Request()
             credentials.refresh(request)
-            # authorized_user creds carry no project, so fall back to the
-            # configured GOOGLE_CLOUD_PROJECT for the Vertex endpoint.
             token = credentials.token
             project_id = (
                 project
@@ -457,66 +496,13 @@ class GeminiVertexBrain(Brain):
         except ImportError:
             pass
         except Exception as exc:
-            # Remember why google-auth failed so the final error is accurate
-            # (the manual fallback below only handles authorized_user creds).
             ga_error = str(exc)
 
-        # Manual parsing from ADC JSON
-        adc_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
-        if not adc_path:
-            adc_path = os.path.expandvars(r'%APPDATA%\gcloud\application_default_credentials.json')
-
-        if not os.path.exists(adc_path):
-            raise BrainError(
-                f"Google Cloud Application Default Credentials (ADC) file not found. "
-                f"Please run 'gcloud auth application-default login' or set GOOGLE_APPLICATION_CREDENTIALS env var."
-            )
-
-        try:
-            with open(adc_path, 'r', encoding='utf-8') as f:
-                creds = json.load(f)
-        except Exception as exc:
-            raise BrainError(f"Failed to read ADC file at {adc_path}: {exc}")
-
-        cred_type = creds.get('type')
-        project_id = creds.get('quota_project_id') or creds.get('project_id') or os.environ.get('GOOGLE_CLOUD_PROJECT')
-        if not project_id:
-            raise BrainError("No project ID found in credentials or environment. Please set GOOGLE_CLOUD_PROJECT or configure your quota project.")
-
-        if cred_type == 'authorized_user':
-            token_url = "https://oauth2.googleapis.com/token"
-            data = urllib.parse.urlencode({
-                'client_id': creds['client_id'],
-                'client_secret': creds['client_secret'],
-                'refresh_token': creds['refresh_token'],
-                'grant_type': 'refresh_token'
-            }).encode('utf-8')
-
-            req = urllib.request.Request(token_url, data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'})
-            try:
-                with urllib.request.urlopen(
-                    req,
-                    timeout=self.cfg.request_timeout,
-                ) as response:
-                    res = json.loads(response.read().decode('utf-8'))
-                    self._cached_token = res['access_token']
-                    self.project_id = project_id
-                    self._token_expiry = time.time() + res.get('expires_in', 3600)
-                    return self._cached_token, self.project_id
-            except Exception as e:
-                err_msg = ""
-                if hasattr(e, 'read'):
-                    err_msg = f": {e.read().decode()}"
-                raise BrainError(f"Failed to refresh access token using ADC credentials{err_msg}") from e
-        else:
-            detail = f" (google-auth: {ga_error})" if ga_error else ""
-            raise BrainError(
-                f"The Application Default Credentials file at {adc_path} is not a "
-                f"valid Google credential (type={cred_type!r}){detail}. "
-                f"Run 'gcloud auth application-default login' to regenerate it, then "
-                f"'gcloud auth application-default set-quota-project <YOUR_PROJECT>'. "
-                f"Or switch to a local backend (set brain.backend: ollama in config.yaml)."
-            )
+        detail = f" (google-auth: {ga_error})" if ga_error else ""
+        raise BrainError(
+            f"Could not authenticate Google Cloud credentials for Gemini Vertex AI{detail}. "
+            f"Please run 'gcloud auth application-default login' or switch to a local backend in config.yaml."
+        )
 
     def complete(self, system: str, messages: list[dict], image=None) -> str:
         access_token, project_id = self._get_access_token_and_project()

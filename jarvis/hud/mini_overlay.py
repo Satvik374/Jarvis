@@ -39,6 +39,7 @@ class FloatingMiniHUD:
         on_voice_toggle: Optional[Callable[[], None]] = None,
         on_vision_trigger: Optional[Callable[[], None]] = None,
         on_macro_toggle: Optional[Callable[[], None]] = None,
+        on_stop_action: Optional[Callable[[], None]] = None,
         position: str = "bottom_right",
         opacity: float = 0.94,
     ):
@@ -46,15 +47,17 @@ class FloatingMiniHUD:
         self.on_voice_toggle = on_voice_toggle
         self.on_vision_trigger = on_vision_trigger
         self.on_macro_toggle = on_macro_toggle
+        self.on_stop_action = on_stop_action
         self.default_position = position
         self.opacity = opacity
 
         self.state = "idle"
         self.detail_text = "Neural Link Active · Ready"
-        self.is_expanded = False
+        self.is_expanded = True
         self.is_macro_recording = False
         self.is_voice_active = False
 
+        self._visible = True
         self._root: Optional[tk.Tk] = None
         self._canvas: Optional[tk.Canvas] = None
         self._entry: Optional[tk.Entry] = None
@@ -71,6 +74,7 @@ class FloatingMiniHUD:
         if self._running:
             return
         self._running = True
+        self._visible = True
         self._thread = threading.Thread(target=self._run_tk, daemon=True, name="jarvis-mini-hud")
         self._thread.start()
 
@@ -93,13 +97,15 @@ class FloatingMiniHUD:
             log.warn(f"HUD Tkinter runtime closed: {exc}")
         finally:
             self._running = False
+            self._visible = False
+            self._root = None
 
     def _setup_ui(self) -> None:
         if not self._root:
             return
 
         self.width = 420
-        self.height = 200
+        self.height = 220
 
         # Main frame with cyber border
         self._outer_frame = tk.Frame(
@@ -111,7 +117,7 @@ class FloatingMiniHUD:
         )
         self._outer_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Header Bar (Draggable)
+        # Header Bar (Draggable) - Packed TOP
         self._header = tk.Frame(self._outer_frame, bg="#05121e", height=26)
         self._header.pack(fill=tk.X, side=tk.TOP)
 
@@ -135,11 +141,11 @@ class FloatingMiniHUD:
         self._close_btn.pack(side=tk.RIGHT, padx=8, pady=3)
         self._close_btn.bind("<Button-1>", lambda e: self.toggle_expand())
 
-        # Body Container
+        # Body Container - Packed TOP
         self._body = tk.Frame(self._outer_frame, bg="#02070d")
-        self._body.pack(fill=tk.X, padx=8, pady=4)
+        self._body.pack(fill=tk.X, side=tk.TOP, padx=8, pady=(2, 4))
 
-        # Left: Reactor Core Canvas
+        # Left: Reactor Core Canvas (48x48)
         self._canvas = tk.Canvas(
             self._body,
             width=48,
@@ -188,31 +194,12 @@ class FloatingMiniHUD:
         self._btn_macro = tk.Button(self._actions_bar, text="🔴", command=self._handle_macro, **btn_style)
         self._btn_macro.pack(side=tk.LEFT, padx=2)
 
-        # Middle: Live Conversation & Response Frame
-        self._response_frame = tk.Frame(
-            self._outer_frame,
-            bg="#030c17",
-            highlightbackground="#0a324a",
-            highlightcolor="#0a324a",
-            highlightthickness=1,
-        )
-        self._response_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        self._btn_stop = tk.Button(self._actions_bar, text="⏹", command=self._handle_stop, **btn_style)
+        self._btn_stop.pack(side=tk.LEFT, padx=2)
 
-        self._response_lbl = tk.Label(
-            self._response_frame,
-            text="✦ JARVIS: Ready for directive.",
-            font=("Consolas", 8),
-            fg="#cbe9ff",
-            bg="#030c17",
-            anchor="nw",
-            justify=tk.LEFT,
-            wraplength=390,
-        )
-        self._response_lbl.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
-
-        # Bottom: Expandable Input Bar
+        # Bottom: Expandable Input Bar - Packed BOTTOM (never gets pushed offscreen!)
         self._input_frame = tk.Frame(self._outer_frame, bg="#02070d")
-        self._input_frame.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self._input_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=8, pady=(0, 6))
 
         self._entry = tk.Entry(
             self._input_frame,
@@ -228,6 +215,8 @@ class FloatingMiniHUD:
         self._entry.pack(fill=tk.X, side=tk.LEFT, expand=True, ipady=4, padx=(0, 4))
         self._entry.insert(0, "")
         self._entry.bind("<Return>", self._on_entry_submit)
+        self._entry.bind("<Escape>", lambda e: self._handle_stop())
+        self._root.bind("<Escape>", lambda e: self._handle_stop())
 
         self._send_btn = tk.Button(
             self._input_frame,
@@ -240,6 +229,39 @@ class FloatingMiniHUD:
             command=self._on_send_click,
         )
         self._send_btn.pack(side=tk.RIGHT, ipady=2, ipadx=4)
+
+        # Middle: Scrollable Conversation & Response Frame - Fills remaining space
+        self._response_frame = tk.Frame(
+            self._outer_frame,
+            bg="#030c17",
+            highlightbackground="#0a324a",
+            highlightcolor="#0a324a",
+            highlightthickness=1,
+        )
+        self._response_frame.pack(fill=tk.BOTH, expand=True, side=tk.TOP, padx=8, pady=(0, 4))
+
+        self._response_text = tk.Text(
+            self._response_frame,
+            font=("Consolas", 8),
+            fg="#cbe9ff",
+            bg="#030c17",
+            wrap=tk.WORD,
+            relief="flat",
+            highlightthickness=0,
+            padx=6,
+            pady=4,
+            cursor="arrow",
+        )
+        self._response_text.pack(fill=tk.BOTH, expand=True)
+        self._response_text.insert(tk.END, "✦ JARVIS: Ready for directive.")
+        self._response_text.config(state=tk.DISABLED)
+
+        # Mousewheel scroll support
+        def _on_mousewheel(event):
+            if hasattr(self, "_response_text") and self._response_text:
+                self._response_text.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        self._response_text.bind("<MouseWheel>", _on_mousewheel)
 
     def _position_window(self) -> None:
         if not self._root:
@@ -275,10 +297,14 @@ class FloatingMiniHUD:
             widget.bind("<B1-Motion>", self._on_drag)
 
     def _start_drag(self, event: tk.Event) -> None:
+        if not self._root:
+            return
         self._drag_start_x = event.x_root - self._root.winfo_x()
         self._drag_start_y = event.y_root - self._root.winfo_y()
 
     def _on_drag(self, event: tk.Event) -> None:
+        if not self._root:
+            return
         new_x = event.x_root - self._drag_start_x
         new_y = event.y_root - self._drag_start_y
         self._root.geometry(f"+{new_x}+{new_y}")
@@ -296,6 +322,10 @@ class FloatingMiniHUD:
         if self.on_macro_toggle:
             threading.Thread(target=self.on_macro_toggle, daemon=True).start()
 
+    def _handle_stop(self) -> None:
+        if self.on_stop_action:
+            threading.Thread(target=self.on_stop_action, daemon=True).start()
+
     def _on_send_click(self) -> None:
         self._on_entry_submit(None)
 
@@ -312,69 +342,92 @@ class FloatingMiniHUD:
             threading.Thread(target=self.on_submit_command, args=(text,), daemon=True).start()
 
     def toggle_expand(self) -> None:
-        if not self._root:
-            return
-        self.is_expanded = not self.is_expanded
-        cur_geom = self._root.geometry().split("+")
-        pos = f"+{cur_geom[1]}+{cur_geom[2]}" if len(cur_geom) > 2 else ""
+        """Toggle HUD between expanded (full dialog & input) and compact (reactor & status) modes."""
+        def _do_toggle():
+            if not self._root:
+                return
+            self.is_expanded = not self.is_expanded
+            cur_geom = self._root.geometry().split("+")
+            pos = f"+{cur_geom[1]}+{cur_geom[2]}" if len(cur_geom) > 2 else ""
 
-        if self.is_expanded:
-            if hasattr(self, "_response_frame"):
-                self._response_frame.pack_forget()
-            if self._input_frame:
-                self._input_frame.pack_forget()
-            self._root.geometry(f"{self.width}x70{pos}")
-            self._close_btn.config(text="+")
-        else:
-            if hasattr(self, "_response_frame"):
-                self._response_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
-            if self._input_frame:
-                self._input_frame.pack(fill=tk.X, padx=8, pady=(0, 6))
-            self._root.geometry(f"{self.width}x{self.height}{pos}")
-            self._close_btn.config(text="—")
+            if not self.is_expanded:
+                # Collapse to compact 70px bar
+                if hasattr(self, "_response_frame") and self._response_frame:
+                    self._response_frame.pack_forget()
+                if hasattr(self, "_input_frame") and self._input_frame:
+                    self._input_frame.pack_forget()
+                self._root.geometry(f"{self.width}x70{pos}")
+                if hasattr(self, "_close_btn") and self._close_btn:
+                    self._close_btn.config(text="+")
+            else:
+                # Expand to full HUD (anchoring input_frame to bottom first)
+                if hasattr(self, "_input_frame") and self._input_frame:
+                    self._input_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=8, pady=(0, 6))
+                if hasattr(self, "_response_frame") and self._response_frame:
+                    self._response_frame.pack(fill=tk.BOTH, expand=True, side=tk.TOP, padx=8, pady=(0, 4))
+                self._root.geometry(f"{self.width}x{self.height}{pos}")
+                if hasattr(self, "_close_btn") and self._close_btn:
+                    self._close_btn.config(text="—")
 
-    def is_visible(self) -> bool:
-        if not self._root:
-            return False
-        try:
-            return self._root.state() != "withdrawn"
-        except Exception:
-            return False
-
-    def toggle_visibility(self) -> None:
-        if not self._root:
-            return
-        if self._root.state() == "withdrawn":
-            self.show()
-        else:
-            self.hide()
-
-    def show(self) -> None:
         if self._root:
             try:
-                self._root.deiconify()
-                self._root.attributes("-topmost", True)
-                if self._entry:
-                    self._entry.focus_set()
+                self._root.after(0, _do_toggle)
+            except Exception:
+                pass
+        else:
+            self.is_expanded = not self.is_expanded
+
+    def is_visible(self) -> bool:
+        return bool(self._visible and self._running)
+
+    def toggle_visibility(self) -> None:
+        if self._visible:
+            self.hide()
+        else:
+            self.show()
+
+    def show(self) -> None:
+        self._visible = True
+        if self._root:
+            def _do_show():
+                try:
+                    if self._root:
+                        self._root.deiconify()
+                        self._root.attributes("-topmost", True)
+                        if self._entry:
+                            self._entry.focus_set()
+                except Exception:
+                    pass
+            try:
+                self._root.after(0, _do_show)
             except Exception:
                 pass
 
     def hide(self) -> None:
+        self._visible = False
         if self._root:
+            def _do_hide():
+                try:
+                    if self._root:
+                        self._root.withdraw()
+                except Exception:
+                    pass
             try:
-                self._root.withdraw()
+                self._root.after(0, _do_hide)
             except Exception:
                 pass
 
-    def hide_sync(self, timeout: float = 0.1) -> None:
+    def hide_sync(self, timeout: float = 0.15) -> None:
         """Synchronously hide the HUD window (for clean screenshot captures)."""
+        self._visible = False
         if not self._root:
             return
         done = threading.Event()
         def _do():
             try:
-                self._root.withdraw()
-                self._root.update_idletasks()
+                if self._root:
+                    self._root.withdraw()
+                    self._root.update_idletasks()
             except Exception:
                 pass
             finally:
@@ -385,16 +438,18 @@ class FloatingMiniHUD:
         except Exception:
             pass
 
-    def show_sync(self, timeout: float = 0.1) -> None:
+    def show_sync(self, timeout: float = 0.15) -> None:
         """Synchronously restore the HUD window after a screenshot capture."""
+        self._visible = True
         if not self._root:
             return
         done = threading.Event()
         def _do():
             try:
-                self._root.deiconify()
-                self._root.attributes("-topmost", True)
-                self._root.update_idletasks()
+                if self._root:
+                    self._root.deiconify()
+                    self._root.attributes("-topmost", True)
+                    self._root.update_idletasks()
             except Exception:
                 pass
             finally:
@@ -411,6 +466,9 @@ class FloatingMiniHUD:
 
     def set_response(self, prompt: str, reply: str) -> None:
         self._msg_queue.put(("response", prompt, reply))
+
+    def set_input_text(self, text: str) -> None:
+        self._msg_queue.put(("input_text", text))
 
     def set_voice_active(self, active: bool) -> None:
         self._msg_queue.put(("voice", active))
@@ -429,21 +487,41 @@ class FloatingMiniHUD:
                 if item[0] == "state":
                     _, st, dt = item
                     self.state = st
-                    if dt:
+                    if dt is not None:
                         self.detail_text = dt
+                    elif st == "idle":
+                        self.detail_text = "Neural Link Active · Ready"
+                    else:
+                        self.detail_text = f"State: {st.capitalize()}"
+
                     color = STATE_COLORS.get(self.state, "#00f0ff")
                     if self._state_lbl:
                         self._state_lbl.config(text=self.state.upper(), fg=color)
-                    if self._detail_lbl and dt:
-                        self._detail_lbl.config(text=dt)
+                    if self._detail_lbl:
+                        self._detail_lbl.config(text=self.detail_text)
                     if self._outer_frame:
                         self._outer_frame.config(highlightbackground=color, highlightcolor=color)
 
                 elif item[0] == "response":
                     _, prompt, reply = item
-                    if self._response_lbl:
-                        display_text = f"▸ YOU: {prompt}\n✦ JARVIS: {reply}"
-                        self._response_lbl.config(text=display_text)
+                    if hasattr(self, "_response_text") and self._response_text:
+                        self._response_text.config(state=tk.NORMAL)
+                        self._response_text.delete("1.0", tk.END)
+                        self._response_text.insert(tk.END, f"▸ YOU: {prompt}\n\n✦ JARVIS: {reply}")
+                        self._response_text.see(tk.END)
+                        self._response_text.config(state=tk.DISABLED)
+
+                elif item[0] == "input_text":
+                    _, text = item
+                    if not self._visible:
+                        self.show()
+                    if not self.is_expanded:
+                        self.toggle_expand()
+                    if hasattr(self, "_entry") and self._entry:
+                        self._entry.delete(0, tk.END)
+                        self._entry.insert(0, text)
+                        self._entry.focus_set()
+                        self._entry.icursor(tk.END)
 
                 elif item[0] == "voice":
                     self.is_voice_active = item[1]
@@ -463,7 +541,8 @@ class FloatingMiniHUD:
         self._render_reactor()
 
         # 3. Schedule next frame (30 FPS)
-        self._root.after(33, self._tick_loop)
+        if self._root:
+            self._root.after(33, self._tick_loop)
 
     def _render_reactor(self) -> None:
         if not self._canvas:
@@ -473,28 +552,31 @@ class FloatingMiniHUD:
         color = STATE_COLORS.get(self.state, "#00f0ff")
         self._pulse_phase += 0.12
 
-        cx, cy = 27, 27
-        pulse = math.sin(self._pulse_phase) * 2.0
+        cx, cy = 24, 24
+        pulse = math.sin(self._pulse_phase) * 1.5
 
         # Outer arc ring
-        r1 = 22 + pulse
+        r1 = 18 + pulse
         self._canvas.create_oval(cx - r1, cy - r1, cx + r1, cy + r1, outline=color, width=1.5)
 
         # Rotating dash arcs
         angle = (self._pulse_phase * 40) % 360
-        self._canvas.create_arc(cx - r1 + 3, cy - r1 + 3, cx + r1 - 3, cy + r1 - 3,
+        r_arc = max(4, r1 - 3)
+        self._canvas.create_arc(cx - r_arc, cy - r_arc, cx + r_arc, cy + r_arc,
                                 start=angle, extent=65, outline="#ffffff", width=1.5, style="arc")
-        self._canvas.create_arc(cx - r1 + 3, cy - r1 + 3, cx + r1 - 3, cy + r1 - 3,
+        self._canvas.create_arc(cx - r_arc, cy - r_arc, cx + r_arc, cy + r_arc,
                                 start=angle + 180, extent=65, outline="#ffffff", width=1.5, style="arc")
 
         # Inner pulsing core dot
-        r2 = 7 + math.sin(self._pulse_phase * 1.5) * 1.5
+        r2 = 5 + math.sin(self._pulse_phase * 1.5) * 1.0
         self._canvas.create_oval(cx - r2, cy - r2, cx + r2, cy + r2, fill=color, outline="")
 
     def stop(self) -> None:
+        self._running = False
+        self._visible = False
         if self._root:
             try:
                 self._root.destroy()
             except Exception:
                 pass
-        self._running = False
+            self._root = None

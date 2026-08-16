@@ -1037,11 +1037,11 @@
   }
 
   function updateHud() {
-    elements.hudEvents.textContent = metrics.events.toLocaleString();
-    elements.hudUptime.textContent = formatDuration(Date.now() - sessionStarted);
-    elements.hudSteps.textContent = metrics.steps;
-    elements.hudAlerts.textContent = metrics.alerts;
-    elements.hudAlertChip.dataset.active = metrics.alerts > 0 ? "true" : "false";
+    if (elements.hudEvents) elements.hudEvents.textContent = metrics.events.toLocaleString();
+    if (elements.hudUptime) elements.hudUptime.textContent = formatDuration(Date.now() - sessionStarted);
+    if (elements.hudSteps) elements.hudSteps.textContent = metrics.steps;
+    if (elements.hudAlerts) elements.hudAlerts.textContent = metrics.alerts;
+    if (elements.hudAlertChip) elements.hudAlertChip.dataset.active = metrics.alerts > 0 ? "true" : "false";
   }
 
   // ============================================================

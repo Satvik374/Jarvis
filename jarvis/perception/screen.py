@@ -52,7 +52,8 @@ def screen_size() -> tuple[int, int]:
     try:
         import mss  # type: ignore
 
-        with mss.mss() as sct:
+        factory = getattr(mss, "MSS", getattr(mss, "mss", None))
+        with factory() as sct:
             mon = sct.monitors[1]
             return mon["width"], mon["height"]
     except Exception:
@@ -73,7 +74,8 @@ def capture(monitor: int = 1) -> Screenshot:
             import mss  # type: ignore
             from PIL import Image  # type: ignore
 
-            with mss.mss() as sct:
+            factory = getattr(mss, "MSS", getattr(mss, "mss", None))
+            with factory() as sct:
                 mon = sct.monitors[monitor]
                 raw = sct.grab(mon)
                 img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")

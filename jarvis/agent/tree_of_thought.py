@@ -163,18 +163,18 @@ class ErrorClassifier:
 
         # 5. Element not found or UI changed
         if any(term in msg_lower for term in ("not found", "element not found", "no such element", "invalid element", "element #", "could not find")):
-            target_elem = args.get("element_id") or args.get("label") or "element"
+            target_elem = args.get("element_id") or args.get("element") or args.get("label") or "element"
             return ErrorDiagnosis(
                 category=ErrorCategory.UI_NOT_FOUND,
                 confidence=0.95,
                 reason=f"Element '{target_elem}' was not found on screen.",
                 suggested_strategy=RecoveryAction.SWITCH_TO_KEYBOARD,
                 advice_prompt=(
-                    f"SELF-HEALING NOTICE: UI element '{target_elem}' is missing or obscured. "
-                    "Do NOT retry clicking the same missing element id. Instead: "
-                    "1) Use a keyboard shortcut (e.g. 'hotkey', 'press_key', Tab, Enter), "
-                    "2) Use 'click_coords' with normalized (x,y) if visible, or "
-                    "3) Use a CLI command via 'run_command'."
+                    f"SELF-HEALING NOTICE (UI -> KEYBOARD/CLI): UI element '{target_elem}' is missing or obscured. "
+                    "Do NOT retry clicking the same missing element id. Switch modality: "
+                    "1) Use a keyboard shortcut via 'press' (e.g. 'enter', 'tab', 'down') or 'key_sequence', "
+                    "2) Use 'click' with raw x/y pixel coordinates if visible, or "
+                    "3) Accomplish the goal headlessly via 'run_command' or 'python'."
                 ),
             )
 
@@ -186,22 +186,22 @@ class ErrorClassifier:
                 reason=f"Action '{action}' had no observable effect for {consecutive_repeats + 1} steps.",
                 suggested_strategy=RecoveryAction.BACKTRACK_AND_BRANCH,
                 advice_prompt=(
-                    f"SELF-HEALING NOTICE: Loop detected. Repeating '{action}' is producing no progress. "
+                    f"SELF-HEALING NOTICE (MODALITY SWITCH): Loop detected on action '{action}'. "
                     "PRUNE this branch immediately. Switch to an alternative modality: "
-                    "try a keyboard hotkey, run a PowerShell command via 'run_command', or press 'escape' to clear popups."
+                    "try a keyboard shortcut, run a PowerShell command via 'run_command', use 'python', or send 'press' with key='escape'."
                 ),
             )
 
-        # 7. Command / Script errors
-        if action in ("run_command", "powershell", "cmd") or "command failed" in msg_lower or "exit code" in msg_lower or "traceback" in msg_lower:
+        # 7. Command / Script / Module errors
+        if action in ("run_command", "python", "cmd", "powershell") or any(term in msg_lower for term in ("command failed", "exit code", "traceback", "modulenotfounderror", "syntaxerror", "filenotfounderror")):
             return ErrorDiagnosis(
                 category=ErrorCategory.SYNTAX_OR_ARG_ERROR,
-                confidence=0.85,
-                reason=f"Command execution error: {result_message[:120]}",
+                confidence=0.88,
+                reason=f"Execution error: {result_message[:120]}",
                 suggested_strategy=RecoveryAction.SWITCH_TO_KEYBOARD,
                 advice_prompt=(
-                    f"SELF-HEALING NOTICE: Command failed ({result_message[:100]}). "
-                    "Fix command arguments, or achieve the goal directly through native UI/shortcuts."
+                    f"SELF-HEALING NOTICE (CLI/CODE): Command failed ({result_message[:100]}). "
+                    "Inspect syntax, install missing packages via pip, or achieve the outcome using native file actions ('write_file', 'edit_file') or UI actions."
                 ),
             )
 
@@ -213,7 +213,7 @@ class ErrorClassifier:
             suggested_strategy=RecoveryAction.BACKTRACK_AND_BRANCH if not is_ok else RecoveryAction.NOOP,
             advice_prompt=(
                 f"SELF-HEALING NOTICE: Action '{action}' did not succeed ({result_message[:100]}). "
-                "Evaluate screen state and try an alternative action."
+                "Evaluate the current screen/file state and switch to an alternative action or modality."
             ) if not is_ok else "",
         )
 

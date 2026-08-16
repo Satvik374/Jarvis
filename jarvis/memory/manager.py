@@ -126,6 +126,29 @@ class MemoryManager:
         log.ok(f"{action_type} memory (Vector + Graph): {content}")
         return f"{action_type} permanent memory: {content}"
 
+    def extract_and_remember(self, text: str, source: str = "auto") -> list[str]:
+        """Automatically extract user preferences, facts, and key context from natural conversation."""
+        if not text or len(text.strip()) < 5:
+            return []
+
+        import re
+        patterns = [
+            r"(?:i prefer|i like|always use|prefer to use|default to)\s+([^.!?\n]+)",
+            r"(?:my name is|call me|i am)\s+([^.!?\n]+)",
+            r"(?:my project is (?:at|located in)|project path is)\s+([^.!?\n]+)",
+            r"(?:my email is|contact me at)\s+([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)",
+        ]
+
+        extracted = []
+        for pat in patterns:
+            for match in re.finditer(pat, text, re.IGNORECASE):
+                fact = match.group(0).strip()
+                if len(fact) > 8 and fact not in extracted:
+                    self.remember(fact, category="user_preference", sync_file=True)
+                    extracted.append(fact)
+
+        return extracted
+
     def forget(self, target: str, sync_file: bool = True) -> str:
         """Remove facts matching target from Vector Store, Knowledge Graph, and memory.txt."""
         target_str = (target or "").strip().lower()

@@ -53,6 +53,13 @@ class GlobalHotkeyManager:
     def _bind_hotkey(self, key: str, callback: Callable[[], None]) -> None:
         try:
             import keyboard
+            if key in self._hooks:
+                try:
+                    keyboard.remove_hotkey(self._hooks[key])
+                except Exception:
+                    pass
+                del self._hooks[key]
+
             # Wrap callback in thread to avoid blocking keyboard hook thread
             def _runner():
                 try:

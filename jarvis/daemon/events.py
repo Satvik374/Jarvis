@@ -20,6 +20,7 @@ class EventType(enum.Enum):
     APP_LAUNCHED = "app_launched"
     MORNING_ROUTINE = "morning_routine"
     EVENING_ROUTINE = "evening_routine"
+    CLIPBOARD_SUGGESTION = "clipboard_suggestion"
     CUSTOM = "custom"
 
 

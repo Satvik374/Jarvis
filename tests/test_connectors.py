@@ -27,6 +27,11 @@ _NO_ENV = {"GMAIL_ADDRESS": "", "GMAIL_APP_PASSWORD": "", "DISCORD_BOT_TOKEN": "
 class TestDispatch(unittest.TestCase):
     def setUp(self):
         connectors.invalidate()
+        self._secret_patcher = mock.patch("jarvis.security.get_secret", return_value="")
+        self._secret_patcher.start()
+
+    def tearDown(self):
+        self._secret_patcher.stop()
 
     def test_action_is_in_schema_and_registry(self):
         self.assertIn("connector", ACTIONS_BY_NAME)
@@ -286,6 +291,11 @@ class TestPromptNote(unittest.TestCase):
 class TestRegistryHandler(unittest.TestCase):
     def setUp(self):
         connectors.invalidate()
+        self._secret_patcher = mock.patch("jarvis.security.get_secret", return_value="")
+        self._secret_patcher.start()
+
+    def tearDown(self):
+        self._secret_patcher.stop()
 
     def test_handler_returns_the_error_instead_of_raising(self):
         handler = _HANDLERS["connector"]
