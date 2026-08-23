@@ -7,6 +7,9 @@ venv/
 env/
 .pytest_cache/
 
+# Local self-backups (source snapshots should stay outside Git)
+.self_backups/
+
 # Jarvis runtime artifacts
 dataset/data/screenshots/
 dataset/data/trajectories/
