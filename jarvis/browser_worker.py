@@ -26,6 +26,7 @@ import wave
 EVENT_PREFIX = "__JARVIS_BROWSER_EVENT__:"
 INPUT_PREFIX = "__JARVIS_BROWSER_INPUT64__:"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_bridge_installed = False
 _emit_lock = threading.Lock()
 _speech_lock = threading.Lock()
 _speech_generation = 0
@@ -60,6 +61,16 @@ def _plain(value: Any) -> str:
 
 def emit(event: str, **payload: Any) -> None:
     """Write one atomic machine-readable event without touching stdout."""
+    global _bridge_installed
+    if not _bridge_installed:
+        try:
+            from jarvis.utils import logging as log
+            if getattr(log, "_browser_event_bridge_installed", False):
+                _bridge_installed = True
+        except Exception:
+            pass
+    if not _bridge_installed:
+        return
     record = {"event": event, **payload}
     try:
         encoded = json.dumps(record, ensure_ascii=False, default=str)
@@ -302,6 +313,9 @@ def install_event_bridge() -> None:
 
     from jarvis.utils import logging as log
 
+    global _bridge_installed
+    _bridge_installed = True
+
     if getattr(log, "_browser_event_bridge_installed", False):
         return
     log._browser_event_bridge_installed = True
@@ -309,6 +323,22 @@ def install_event_bridge() -> None:
 
     for name in ("info", "step", "think", "act", "ok", "warn", "error"):
         _wrap_activity(log, name)
+
+    original_proactive = getattr(log, "proactive", None)
+    if original_proactive is not None:
+        @functools.wraps(original_proactive)
+        def proactive(rule_name: str, message: str, title: str = "", event_type: str = "") -> None:
+            emit(
+                "proactive_alert",
+                title=title or rule_name,
+                message=message,
+                event_type=event_type,
+                rule_name=rule_name,
+                timestamp=time.time(),
+            )
+            return original_proactive(rule_name, message, title, event_type)
+
+        log.proactive = proactive
 
     original_rule = log.rule
 
@@ -474,6 +504,32 @@ def install_event_bridge() -> None:
         return result
 
     console._command = _browser_command
+
+    import signal
+
+    def _handle_interrupt_signal(signum: int, frame: Any) -> None:
+        try:
+            from jarvis.agent.loop import cancel_active_agent
+            cancel_active_agent()
+        except Exception:
+            pass
+        try:
+            from jarvis.utils import voice
+            voice.interrupt_speech()
+        except Exception:
+            pass
+        emit("activity", kind="warn", message="Task execution stopped by user")
+
+    if hasattr(signal, "SIGBREAK"):
+        try:
+            signal.signal(signal.SIGBREAK, _handle_interrupt_signal)
+        except Exception:
+            pass
+    try:
+        signal.signal(signal.SIGINT, _handle_interrupt_signal)
+    except Exception:
+        pass
+
 
 
 def main(argv: list[str] | None = None) -> int:

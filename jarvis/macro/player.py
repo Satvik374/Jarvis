@@ -79,10 +79,24 @@ class MacroPlayer:
                     "ok": False,
                     "message": f"Playback interrupted at step {idx}/{len(macro.steps)}.",
                     "steps_executed": executed,
+                    "failed_step_index": idx,
+                    "failed_step": step.to_dict(),
                 }
 
-            self._execute_step(step, speed_factor, params_dict, pyautogui)
-            executed += 1
+            try:
+                self._execute_step(step, speed_factor, params_dict, pyautogui)
+                executed += 1
+            except Exception as exc:
+                log.warn(f"Step {idx} ({step.summary()}) encountered an error during macro playback: {exc}")
+                return {
+                    "ok": False,
+                    "message": f"Step {idx} failed: {exc}",
+                    "error": str(exc),
+                    "steps_executed": executed,
+                    "failed_step_index": idx,
+                    "failed_step": step.to_dict(),
+                    "macro": macro.name,
+                }
 
             # Inter-step delay
             step_delay = max(0.05, step.delay / speed_factor)
@@ -137,8 +151,8 @@ class MacroPlayer:
             if text and pyautogui:
                 pyautogui.write(text, interval=0.01 / speed)
 
-        elif action == "press":
-            keys = args.get("keys", "")
+        elif action in {"press", "key", "hotkey"}:
+            keys = args.get("keys") or args.get("key", "")
             if keys and pyautogui:
                 if "+" in keys:
                     parts = [k.strip().lower() for k in keys.split("+")]
@@ -146,11 +160,23 @@ class MacroPlayer:
                 else:
                     pyautogui.press(keys.strip().lower())
 
-        elif action == "launch":
-            cmd = args.get("command", "")
+        elif action in {"launch", "open_app"}:
+            cmd = args.get("command") or args.get("app", "")
             if cmd:
                 subprocess.Popen(cmd, shell=True)
                 time.sleep(1.0 / speed)
+
+        elif action == "open_url":
+            import webbrowser
+            url = args.get("url", "")
+            if url:
+                webbrowser.open(url)
+                time.sleep(1.0 / speed)
+
+        elif action in {"run_command", "cmd"}:
+            cmd = args.get("command", "")
+            if cmd:
+                subprocess.run(cmd, shell=True, capture_output=True)
 
         elif action == "wait":
             sec = float(args.get("seconds", step.delay))

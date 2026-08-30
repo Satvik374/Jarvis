@@ -134,6 +134,26 @@ class VoiceConfig:
 
 
 @dataclass
+class LiveVoiceConfig:
+    # Real-Time Gemini Live Voice model (multimodal bidi live session via API key or gcloud / Vertex AI)
+    enabled: bool = False
+    model: str = "gemini-3.1-flash-live-preview"
+    voice_name: str = "Aoede"  # Aoede, Puck, Charon, Kore, Fenrir
+    location: str = "us-central1"
+    backend: str = "api_key"  # api_key | gcloud
+    api_key: str = ""
+    # Proactive mid-task in-progress narration: voice model monitors what the
+    # text-based model is doing and informs the user what has been done and what
+    # will be done next in mid task.
+    narrate_steps: bool = True
+    narration_verbosity: str = "normal"  # "brief" | "normal" | "detailed"
+    sample_rate_in: int = 16000
+    sample_rate_out: int = 24000
+    full_duplex: bool = True
+    barge_in_sensitivity: float = 0.5
+
+
+@dataclass
 class RemoteConfig:
     # Public HTTPS URL of the separately hosted Jarvis Remote relay. Leaving
     # this blank keeps remote support disabled until the owner opts in.
@@ -207,16 +227,31 @@ class HudConfig:
 
 
 @dataclass
+class ShadowConfig:
+    # Shadow Desktop & Virtual Workspace Execution (Ghost Automation)
+    # When enabled, Jarvis launches applications and performs clicks/typing in an
+    # isolated, hidden Win32 desktop without hijacking the user's physical mouse/keyboard.
+    enabled: bool = False
+    desktop_name: str = "JarvisShadowDesktop"
+    headless: bool = True
+    promote_on_finish: bool = False
+    pip_stream: bool = True
+    resolution: tuple[int, int] = (1920, 1080)
+
+
+@dataclass
 class Config:
     brain: BrainConfig = field(default_factory=BrainConfig)
     perception: PerceptionConfig = field(default_factory=PerceptionConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     data: DataConfig = field(default_factory=DataConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
+    live_voice: LiveVoiceConfig = field(default_factory=LiveVoiceConfig)
     remote: RemoteConfig = field(default_factory=RemoteConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
     hud: HudConfig = field(default_factory=HudConfig)
+    shadow: ShadowConfig = field(default_factory=ShadowConfig)
     # Voice mode: speak replies aloud (Gemini TTS) and allow spoken commands
     # (mic -> Gemini transcription). Toggle at runtime with ':voice on|off'.
     voice_enabled: bool = False
@@ -227,6 +262,7 @@ class Config:
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
 
 
 def _apply(dc: Any, values: dict[str, Any]) -> None:
@@ -264,16 +300,21 @@ def load_config(path: Path | str | None = None) -> Config:
         _apply(cfg.safety, data.get("safety", {}))
         _apply(cfg.data, data.get("data", {}))
         _apply(cfg.voice, data.get("voice", {}))
+        _apply(cfg.live_voice, data.get("live_voice", {}))
         _apply(cfg.remote, data.get("remote", {}))
         _apply(cfg.browser, data.get("browser", {}))
         _apply(cfg.daemon, data.get("daemon", {}))
         _apply(cfg.hud, data.get("hud", {}))
+        _apply(cfg.shadow, data.get("shadow", {}))
         cfg.voice_enabled = bool(data.get("voice_enabled", cfg.voice_enabled))
 
     # Environment overrides for the most common knobs.
     env = os.environ
     if v := env.get("JARVIS_BROWSER_HEADLESS"):
         cfg.browser.headless = v.lower() in {"1", "true", "yes"}
+    if v := env.get("JARVIS_SHADOW"):
+        cfg.shadow.enabled = v.lower() in {"1", "true", "yes"}
+
     if v := env.get("JARVIS_BROWSER_CDP"):
         cfg.browser.cdp_url = v
     if v := env.get("JARVIS_BACKEND") or env.get("BACKEND"):
@@ -299,18 +340,30 @@ def load_config(path: Path | str | None = None) -> Config:
             cfg.voice.barge_in_sensitivity = float(v)
         except ValueError:
             pass
+    if v := env.get("JARVIS_LIVE_MODEL"):
+        cfg.live_voice.model = v
+    if v := env.get("JARVIS_LIVE_VOICE"):
+        cfg.live_voice.voice_name = v
+    if v := env.get("JARVIS_LIVE_LOCATION"):
+        cfg.live_voice.location = v
+    if v := env.get("JARVIS_LIVE_NARRATE"):
+        cfg.live_voice.narrate_steps = v.lower() in {"1", "true", "yes"}
+    if v := env.get("JARVIS_LIVE_VERBOSITY"):
+        cfg.live_voice.narration_verbosity = v
+    if v := env.get("JARVIS_LIVE_API_KEY") or env.get("GEMINI_LIVE_API_KEY"):
+        cfg.live_voice.api_key = v
+        cfg.live_voice.backend = "api_key"
     if v := env.get("JARVIS_REMOTE_URL"):
         cfg.remote.relay_url = v
     if v := env.get("JARVIS_REMOTE_STATE_DIR"):
         cfg.remote.state_dir = v
     if v := env.get("JARVIS_API_KEY") or env.get("API_KEY") or env.get("OPENAI_API_KEY"):
         cfg.brain.api_key = v
-        # Ensure it is set in environment for standard libraries
         os.environ["OPENAI_API_KEY"] = v
     else:
         try:
             from .security import get_secret
-            if vault_key := (get_secret("JARVIS_API_KEY") or get_secret("OPENAI_API_KEY") or get_secret("GEMINI_API_KEY") or get_secret("ANTHROPIC_API_KEY")):
+            if vault_key := (get_secret("JARVIS_API_KEY") or get_secret("OPENAI_API_KEY") or get_secret("ANTHROPIC_API_KEY")):
                 cfg.brain.api_key = vault_key
                 os.environ["OPENAI_API_KEY"] = vault_key
         except Exception:
@@ -328,6 +381,8 @@ def load_config(path: Path | str | None = None) -> Config:
         cfg.brain.use_vision = True
     if env.get("JARVIS_VOICE") in {"1", "true", "True"}:
         cfg.voice_enabled = True
+    if env.get("JARVIS_LIVE") in {"1", "true", "True"}:
+        cfg.live_voice.enabled = True
     if env.get("JARVIS_WAKE") in {"1", "true", "True"}:
         cfg.wake_enabled = True
     if env.get("JARVIS_CONFIRM") in {"1", "true", "True"}:

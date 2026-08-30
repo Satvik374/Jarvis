@@ -6,6 +6,7 @@ __pycache__/
 venv/
 env/
 .pytest_cache/
+/.pytest-codex-live*/
 
 # Local self-backups (source snapshots should stay outside Git)
 .self_backups/
@@ -21,6 +22,10 @@ chat_memory.jsonl
 *.db
 *.sqlite
 dataset/data/sessions/
+dataset/data/macros/
+
+# Local exploratory tests and captured screens; never source artifacts.
+scratch/
 
 # Generated dataset (regenerate with dataset/build_dataset.py) - keep small samples out of git
 dataset/data/*.jsonl

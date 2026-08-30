@@ -6,6 +6,7 @@ import os
 import base64
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from jarvis import remote
@@ -352,6 +353,32 @@ class RelayProtocolTests(unittest.TestCase):
             "sender": "controller", "envelope": forged,
         })
         self.assertEqual(rejected.status_code, 401)
+
+    def test_mobile_assistant_uses_phone_specific_pairing_capability(self):
+        controller = remote.create_identity()
+        agent = remote.create_identity()
+        created = self.client.post("/v1/pairings", json={
+            "name": "Laptop", "kx_public": controller.kx_public,
+            "sign_public": controller.sign_public,
+        }).json()
+        claimed = self.client.post("/v1/pairings/claim", json={
+            "code": created["code"], "name": "Pixel", "kx_public": agent.kx_public,
+            "sign_public": agent.sign_public,
+        })
+        self.assertEqual(claimed.status_code, 200)
+        token = claimed.json().get("mobile_assistant_token", "")
+        self.assertGreater(len(token), 30)
+
+        denied = self.client.post("/v1/mobile-assistant", json={"prompt": "hello"})
+        self.assertEqual(denied.status_code, 401)
+        with patch("relay_server.main.mobile_vertex.respond",
+                   return_value={"reply": "Good day.", "command": ""}) as respond:
+            allowed = self.client.post("/v1/mobile-assistant", headers={
+                "Authorization": f"Bearer {token}"
+            }, json={"prompt": "hello", "history": []})
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(allowed.json()["reply"], "Good day.")
+        respond.assert_called_once_with("hello", [])
 
 
 if __name__ == "__main__":

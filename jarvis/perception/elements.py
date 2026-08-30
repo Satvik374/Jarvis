@@ -105,6 +105,16 @@ def observe(max_elements: int = 60, use_uia: bool = True,
 
 def _active_window_title() -> str:
     try:
+        from ..desktop import is_shadow_enabled, get_shadow_manager
+        if is_shadow_enabled():
+            windows = get_shadow_manager().list_windows()
+            if windows:
+                return windows[0].title
+            return "Shadow Desktop (Empty)"
+    except Exception:
+        pass
+
+    try:
         import pygetwindow as gw  # type: ignore
 
         w = gw.getActiveWindow()
@@ -131,23 +141,7 @@ def _title_match(window_title: str, doc_name: str) -> bool:
 
 def _detect_uia(max_elements: int, size: tuple[int, int],
                 window_title: str = "") -> list[Element]:
-    """Walk the UI Automation tree of the foreground window.
-
-    Browsers (and Electron apps) nest the actual page content deep inside a
-    ``Document`` control - far deeper than the window chrome. A naive
-    breadth-first walk spends the whole element budget on chrome (tabs,
-    toolbar, address bar) and never reaches the page, leaving the agent blind
-    to what it actually needs to click. So:
-
-      * chrome elements are capped (`_MAX_CHROME`) - enough for the address
-        bar, tabs and window buttons;
-      * as soon as a ``Document`` is found, its subtree is explored FIRST
-        (depth-first via appendleft) with a much deeper limit, so the page
-        content gets the remaining element budget;
-      * element centres must be truly on screen (off-screen/degenerate boxes
-        used to produce stacked, unclickable marks);
-      * near-duplicate centres are dropped.
-    """
+    """Walk the UI Automation tree of the foreground window or shadow workspace."""
     import os
     from collections import deque
 
@@ -171,9 +165,26 @@ def _detect_uia(max_elements: int, size: tuple[int, int],
 
     sw, sh = size
 
-    root = auto.GetForegroundControl()
+    root = None
+    try:
+        from ..desktop import is_shadow_enabled, get_shadow_manager
+        if is_shadow_enabled():
+            windows = get_shadow_manager().list_windows()
+            if windows:
+                root = auto.ControlFromHandle(windows[0].hwnd)
+            else:
+                # In shadow mode with no active windows, return empty list (never inspect host screen)
+                return []
+    except Exception:
+        pass
+
+    if root is None:
+        root = auto.GetForegroundControl()
+
     if root is None:
         return []
+
+
 
     # Chromium-based browsers build the page's accessibility tree LAZILY: the
     # first UIA query on a freshly focused tab can return an empty Document.

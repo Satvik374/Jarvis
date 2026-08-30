@@ -76,6 +76,7 @@ class Macro:
     target_apps: List[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
     author: str = "user"
+    summary_template: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -86,6 +87,7 @@ class Macro:
             "target_apps": self.target_apps,
             "created_at": self.created_at,
             "author": self.author,
+            "summary_template": self.summary_template,
         }
 
     @classmethod
@@ -99,6 +101,7 @@ class Macro:
             target_apps=data.get("target_apps", []),
             created_at=data.get("created_at", ""),
             author=data.get("author", "user"),
+            summary_template=data.get("summary_template", ""),
         )
 
     def format_plan(self) -> str:
@@ -113,6 +116,92 @@ class Macro:
         for i, s in enumerate(self.steps, start=1):
             lines.append(f"  {i}. {s.summary()}")
         return "\n".join(lines)
+
+    def format_summary(self, params: Optional[Dict[str, Any]] = None) -> str:
+        """Format a natural, human-like conversational response for task completion."""
+        params_dict = params or {}
+
+        # 1. If we have a custom summary_template, use and substitute it
+        template = self.summary_template.strip()
+        if not template:
+            template = self.description.strip()
+
+        # Substitute parameter slots
+        text = template
+        for k, v in params_dict.items():
+            text = text.replace(f"{{{k}}}", str(v))
+
+        # Convert imperative commands to natural past-tense assistant statements
+        return self._make_conversational(text)
+
+    @staticmethod
+    def _make_conversational(raw_text: str) -> str:
+        """Convert a command description into natural Jarvis speech (e.g. 'open spotify' -> 'I have opened Spotify')."""
+        if not raw_text:
+            return "I have completed the task."
+
+        text = raw_text.strip()
+
+        # Strip leading prompt filler (e.g. "please", "can you", "jarvis", "task complete:")
+        text = re.sub(r"^(?:please|can you|could you|jarvis|hey jarvis|kindly|task complete:?)\s+", "", text, flags=re.IGNORECASE).strip()
+
+        # If it already starts with "I have" or "I've", ensure proper casing and punctuation
+        if re.match(r"^(i have|i've)\b", text, re.IGNORECASE):
+            text = text[0].upper() + text[1:]
+            if not text.endswith((".", "!", "?")):
+                text += "."
+            return text
+
+        # If it starts with a past tense verb (e.g. "opened notepad", "launched spotify"), prepend "I have "
+        past_verbs = {
+            "opened", "launched", "started", "played", "typed", "written", "created",
+            "deleted", "closed", "switched", "focused", "found", "run", "calculated",
+            "restarted", "searched", "finished", "completed"
+        }
+        first_word = text.split()[0].lower() if text.split() else ""
+        if first_word in past_verbs:
+            text = f"I have {text}"
+            if not text.endswith((".", "!", "?")):
+                text += "."
+            return text
+
+        # Map common action verbs to past tense conversational phrases
+        verb_map = [
+            (r"^open\s+and\s+play\b", "I have opened and played"),
+            (r"^open\s+and\s+start\b", "I have opened and started"),
+            (r"^open\s+and\s+type\b", "I have opened and typed"),
+            (r"^open\s+and\s+search\b", "I have opened and searched for"),
+            (r"^open\b", "I have opened"),
+            (r"^launch\b", "I have launched"),
+            (r"^play\b", "I have started playing"),
+            (r"^search\s+for\b", "I have searched for"),
+            (r"^search\b", "I have searched for"),
+            (r"^type\b", "I have typed"),
+            (r"^write\b", "I have written"),
+            (r"^create\b", "I have created"),
+            (r"^delete\b", "I have deleted"),
+            (r"^close\b", "I have closed"),
+            (r"^switch\s+to\b", "I have switched to"),
+            (r"^focus\b", "I have focused"),
+            (r"^find\b", "I have found"),
+            (r"^run\b", "I have run"),
+            (r"^calculate\b", "I have calculated"),
+            (r"^restart\b", "I have restarted"),
+        ]
+
+        for pattern, replacement in verb_map:
+            if re.search(pattern, text, re.IGNORECASE):
+                text = re.sub(pattern, replacement, text, count=1, flags=re.IGNORECASE)
+                break
+        else:
+            text = f"I have completed: {text}"
+
+        text = text[0].upper() + text[1:]
+        if not text.endswith((".", "!", "?")):
+            text += "."
+        return text
+
+
 
 
 class MacroManager:
@@ -241,6 +330,110 @@ class MacroManager:
                         matches.append((m, score))
                         seen_names.add(m.name)
         return matches
+
+    def find_matching_macro(
+        self,
+        task: str,
+        min_score: float = 0.80,
+    ) -> Tuple[Optional[Macro], Dict[str, Any], float]:
+        """Find a pre-compiled macro plan matching the task intent, with extracted parameter slots.
+
+        Returns:
+            Tuple of (Macro or None, parameters dict, confidence score 0.0 - 1.0)
+        """
+        task_clean = (task or "").strip().lower()
+        if not task_clean:
+            return None, {}, 0.0
+
+        macros = self.list_macros()
+        if not macros:
+            return None, {}, 0.0
+
+        # 1. Exact / direct slug match
+        task_slug = re.sub(r"[^\w\-]+", "_", task_clean).strip("_")
+        for m in macros:
+            m_slug = re.sub(r"[^\w\-]+", "_", m.name.lower()).strip("_")
+            if m_slug == task_slug or m.name.lower() == task_clean:
+                params = self.extract_parameters(m, task)
+                return m, params, 1.0
+
+        # 2. Template / regex match against macro description / name
+        for m in macros:
+            desc_lower = (m.description or "").lower().strip()
+            if desc_lower:
+                if "{" in desc_lower and "}" in desc_lower:
+                    # Convert template like "open browser and search {query}" into regex
+                    regex_pat = re.escape(desc_lower)
+                    regex_pat = re.sub(r'\\\{[a-zA-Z0-9_]+\\\}', r'(.+)', regex_pat)
+                    if re.search(regex_pat, task_clean, re.IGNORECASE):
+                        params = self.extract_parameters(m, task)
+                        return m, params, 0.98
+
+                    # Also test stripped prefix before first parameter
+                    desc_prefix = desc_lower.split("{")[0].strip()
+                    if len(desc_prefix) > 4 and desc_prefix in task_clean:
+                        params = self.extract_parameters(m, task)
+                        return m, params, 0.95
+                else:
+                    if desc_lower in task_clean or task_clean in desc_lower:
+                        params = self.extract_parameters(m, task)
+                        return m, params, 0.95
+
+            # If task without quotes matches macro slug
+            m_slug = re.sub(r"[^\w\-]+", "_", m.name.lower()).strip("_")
+            if len(m_slug) > 6 and m_slug in task_slug:
+                params = self.extract_parameters(m, task)
+                return m, params, 0.90
+
+        # 3. Vector Semantic Search
+        try:
+            semantic_matches = self.search_macros(task, top_k=3)
+            if semantic_matches:
+                best_macro, score = semantic_matches[0]
+                if score >= min_score:
+                    params = self.extract_parameters(best_macro, task)
+                    return best_macro, params, float(score)
+        except Exception:
+            pass
+
+        return None, {}, 0.0
+
+    def extract_parameters(self, macro: Macro, task: str) -> Dict[str, Any]:
+        """Extract parameter slot values from a task string based on macro parameters."""
+        params: Dict[str, Any] = {}
+        if not macro.parameters:
+            return params
+
+        quotes = re.findall(r'["\']([^"\']+)["\']', task)
+
+        for param in macro.parameters:
+            p_name = param.strip().lower()
+            if p_name == "text":
+                if quotes:
+                    params["text"] = quotes[0]
+                else:
+                    type_match = re.search(r'\b(?:type|write|enter)\s+(.+?)(?:\s+in|\s+into|\s+and|$)', task, re.IGNORECASE)
+                    if type_match:
+                        params["text"] = type_match.group(1).strip()
+            elif p_name == "filename":
+                file_match = re.search(r'\b[\w\-.]+\.(?:txt|py|json|md|csv|png|jpg|pdf|docx|xlsx)\b', task, re.IGNORECASE)
+                if file_match:
+                    params["filename"] = file_match.group(0)
+                elif quotes:
+                    params["filename"] = quotes[0]
+            elif p_name == "url":
+                url_match = re.search(r'https?://[^\s]+', task)
+                if url_match:
+                    params["url"] = url_match.group(0)
+            elif p_name == "query":
+                q_match = re.search(r'\b(?:search|search for|google|find)\s+([a-zA-Z0-9\s]+?)(?:\s+in|\s+on|\s+using|$)', task, re.IGNORECASE)
+                if q_match:
+                    params["query"] = q_match.group(1).strip()
+                elif quotes:
+                    params["query"] = quotes[0]
+
+        return params
+
 
 
 _GLOBAL_MACRO_MGR: Optional[MacroManager] = None

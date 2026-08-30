@@ -68,9 +68,10 @@ class BrowserEngineTests(unittest.TestCase):
         self.assertIn("a", tags)
 
     def test_02_type_and_click(self):
+        self.driver.navigate(self.file_url, headless=True)
         # 1. Type into search input
-        type_res = self.driver.type_text("input[name=q]", "Artificial Intelligence")
-        self.assertTrue(type_res["ok"])
+        type_res = self.driver.type_text("#search-input", "Artificial Intelligence")
+        self.assertTrue(type_res["ok"], msg=f"type_res failed: {type_res.get('message')}")
 
         # 2. Click submit button
         click_res = self.driver.click("#submit-btn")

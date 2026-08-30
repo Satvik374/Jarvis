@@ -41,4 +41,12 @@ public final class MobileCommandExecutorTest {
         assertTrue(java.util.Arrays.asList(MobileCommandExecutor.CAPABILITIES)
                 .contains("scroll element <id> <forward|backward>"));
     }
+
+    @Test public void standaloneAssistantRejectsUnsafeRawGestures() {
+        assertTrue(MobileAssistantEngine.isAllowedCommand("open YouTube"));
+        assertTrue(MobileAssistantEngine.isAllowedCommand("tap element 7"));
+        assertTrue(MobileAssistantEngine.isAllowedCommand("swipe element 12 up"));
+        assertTrue(!MobileAssistantEngine.isAllowedCommand("tap 500 700"));
+        assertTrue(!MobileAssistantEngine.isAllowedCommand("run adb shell input keyevent 3"));
+    }
 }

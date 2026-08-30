@@ -68,11 +68,21 @@ def capture(monitor: int = 1) -> Screenshot:
 
     ``monitor=1`` is the primary display in mss numbering (0 = all combined).
     Temporarily hides the Floating HUD overlay so screenshots never capture it.
+    If Shadow Desktop mode is active, captures the isolated shadow workspace.
     """
+    try:
+        from ..desktop import is_shadow_enabled, get_shadow_capture
+        if is_shadow_enabled():
+            img = get_shadow_capture().capture_shadow_desktop()
+            return Screenshot(image=img, width=img.width, height=img.height)
+    except Exception:
+        pass
+
     with _hide_hud_for_capture():
         try:
             import mss  # type: ignore
             from PIL import Image  # type: ignore
+
 
             factory = getattr(mss, "MSS", getattr(mss, "mss", None))
             with factory() as sct:

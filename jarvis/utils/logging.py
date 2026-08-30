@@ -5,11 +5,14 @@ Kept dependency-free (no ``rich``) so Jarvis stays light on an 8 GB machine.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sys
 import textwrap
+import threading
 import time
+from typing import Any, Callable, Optional
 import unicodedata
 
 from .latex import display_latex_lines, looks_like_math, render_latex
@@ -73,18 +76,64 @@ def _width() -> int:
     return shutil.get_terminal_size(fallback=(80, 24)).columns
 
 
+_prompt_suspend_hook: Optional[Callable[[], None]] = None
+_prompt_restore_hook: Optional[Callable[[], None]] = None
+_print_lock = threading.RLock()
+
+
+def register_prompt_hooks(
+    suspend: Optional[Callable[[], None]],
+    restore: Optional[Callable[[], None]],
+) -> None:
+    """Register callbacks to coordinate background output with active prompt."""
+    global _prompt_suspend_hook, _prompt_restore_hook
+    _prompt_suspend_hook = suspend
+    _prompt_restore_hook = restore
+
+
+def unregister_prompt_hooks() -> None:
+    """Clear prompt coordination callbacks."""
+    global _prompt_suspend_hook, _prompt_restore_hook
+    _prompt_suspend_hook = None
+    _prompt_restore_hook = None
+
+
+class _log_output_context:
+    """Coordinate console printing with the active interactive prompt."""
+
+    def __enter__(self):
+        _print_lock.acquire()
+        if _prompt_suspend_hook is not None:
+            try:
+                _prompt_suspend_hook()
+            except Exception:
+                pass
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if _prompt_restore_hook is not None:
+                _prompt_restore_hook()
+        except Exception:
+            pass
+        finally:
+            _print_lock.release()
+        return False
+
+
 def rule(label: str = "", color: str = "grey") -> None:
     """A full-width horizontal divider, optionally with a centred label."""
-    label = " ".join(label.split())   # multi-line labels must not break the bar
-    ch = "-" if _ASCII else "─"
-    w = _width()
-    if label:
-        tag = f" {label} "
-        side = max(0, (w - len(tag)) // 2)
-        line = ch * side + tag + ch * max(0, w - side - len(tag))
-    else:
-        line = ch * w
-    print(_c(line, color))
+    with _log_output_context():
+        label = " ".join(label.split())   # multi-line labels must not break the bar
+        ch = "-" if _ASCII else "─"
+        w = _width()
+        if label:
+            tag = f" {label} "
+            side = max(0, (w - len(tag)) // 2)
+            line = ch * side + tag + ch * max(0, w - side - len(tag))
+        else:
+            line = ch * w
+        print(_c(line, color))
 
 
 def _stamp() -> str:
@@ -94,16 +143,28 @@ def _stamp() -> str:
 def _emit(glyph: str, gcolor: str, msg: str, mcolor: str | None = None) -> None:
     """One log line: timestamp + glyph, with wrapped continuation lines
     hanging-indented so they align under the message column."""
-    stamp = time.strftime("%H:%M:%S")
-    pad = " " * (len(stamp) + len(glyph) + 2)
-    avail = max(20, _width() - 1 - len(pad))
-    out: list[str] = []
-    for raw in str(msg).splitlines() or [""]:
-        out.extend(textwrap.wrap(raw, avail) or [""])
-    tint = (lambda t: _c(t, mcolor)) if mcolor else (lambda t: t)
-    print(f"{_c(stamp, 'dim')} {_c(glyph, gcolor)} {tint(out[0])}")
-    for cont in out[1:]:
-        print(pad + tint(cont))
+    with _log_output_context():
+        stamp = time.strftime("%H:%M:%S")
+        pad = " " * (len(stamp) + len(glyph) + 2)
+        avail = max(20, _width() - 1 - len(pad))
+        out: list[str] = []
+        for raw in str(msg).splitlines() or [""]:
+            out.extend(textwrap.wrap(raw, avail) or [""])
+        tint = (lambda t: _c(t, mcolor)) if mcolor else (lambda t: t)
+        try:
+            print(f"{_c(stamp, 'dim')} {_c(glyph, gcolor)} {tint(out[0])}")
+            for cont in out[1:]:
+                print(pad + tint(cont))
+        except (UnicodeEncodeError, OSError):
+            # Terminal charmap fallback
+            safe_glyph = "?" if glyph not in "*-~>!x " else glyph
+            try:
+                line0 = f"{stamp} [{safe_glyph}] {out[0]}".encode("ascii", errors="replace").decode("ascii")
+                print(line0)
+                for cont in out[1:]:
+                    print(pad + cont.encode("ascii", errors="replace").decode("ascii"))
+            except Exception:
+                pass
 
 
 def info(msg: str) -> None:
@@ -132,6 +193,12 @@ def warn(msg: str) -> None:
 
 def error(msg: str) -> None:
     _emit(_glyph("✗", "[x]"), "red", msg, mcolor="red")
+
+
+def debug(msg: str) -> None:
+    # Silent in normal output unless debug mode is enabled
+    if os.environ.get("JARVIS_DEBUG") or os.environ.get("DEBUG"):
+        _emit(_glyph("·", "."), "grey", msg, mcolor="dim")
 
 
 # --------------------------------------------------------------------------- #
@@ -425,23 +492,94 @@ def jarvis(msg: str) -> None:
     """Jarvis's own replies, in a sleek rounded panel so they stand out from
     the step-by-step log noise. Markdown in the reply is rendered, not printed
     raw."""
-    tl, tr, bl, br, hz, vt = (
-        ("+", "+", "+", "+", "-", "|") if _ASCII
-        else ("╭", "╮", "╰", "╯", "─", "│"))
-    w = min(_width() - 2, 96)              # total width incl. borders
-    inner = w - 4                          # "| text |"
-    lines: list[str] = []
-    for rendered, hang in render_markdown(msg):
-        lines.extend(_wrap(rendered, inner, hang))
-    head = f"{tl}{hz * 2} JARVIS "
-    top = head + hz * max(0, w - _vislen(head) - 1) + tr
-    print("\n" + _c256(top, _ARC[1]))
-    side = _c256(vt, _ARC[1])
-    reset = _COLORS["reset"]
-    for ln in lines:
-        # reset closes anything a hard-break left open; it costs no columns.
-        print(f"{side} {ln}{reset}{' ' * max(0, inner - _vislen(ln))} {side}")
-    print(_c256(bl + hz * (w - 2) + br, _ARC[1]) + "\n")
+    with _log_output_context():
+        tl, tr, bl, br, hz, vt = (
+            ("+", "+", "+", "+", "-", "|") if _ASCII
+            else ("╭", "╮", "╰", "╯", "─", "│"))
+        w = min(_width() - 2, 96)              # total width incl. borders
+        inner = w - 4                          # "| text |"
+        lines: list[str] = []
+        for rendered, hang in render_markdown(msg):
+            lines.extend(_wrap(rendered, inner, hang))
+        head = f"{tl}{hz * 2} JARVIS "
+        top = head + hz * max(0, w - _vislen(head) - 1) + tr
+        print("\n" + _c256(top, _ARC[1]))
+        side = _c256(vt, _ARC[1])
+        reset = _COLORS["reset"]
+        for ln in lines:
+            # reset closes anything a hard-break left open; it costs no columns.
+            print(f"{side} {ln}{reset}{' ' * max(0, inner - _vislen(ln))} {side}")
+        print(_c256(bl + hz * (w - 2) + br, _ARC[1]) + "\n")
+
+
+def proactive(
+    rule_name: str,
+    message: str,
+    title: str = "",
+    event_type: str = "",
+) -> None:
+    """Proactive background event notification card in a sleek cyber panel."""
+    with _log_output_context():
+        tl, tr, bl, br, hz, vt = (
+            ("+", "+", "+", "+", "-", "|") if _ASCII
+            else ("╭", "╮", "╰", "╯", "─", "│")
+        )
+        w = min(_width() - 2, 96)
+        inner = w - 4
+
+        ev_key = (event_type or "").lower()
+        if "morning" in ev_key:
+            icon, accent_code = ("🌅", 214) # warm gold
+        elif "evening" in ev_key:
+            icon, accent_code = ("🌙", 141) # purple
+        elif "battery_low" in ev_key:
+            icon, accent_code = ("🪫", 196) # red
+        elif "battery_charging" in ev_key or "charging" in ev_key:
+            icon, accent_code = ("⚡", 46)  # bright green
+        elif "battery" in ev_key:
+            icon, accent_code = ("🔋", 220) # yellow
+        elif "cpu" in ev_key:
+            icon, accent_code = ("🔥", 208) # orange
+        elif "memory" in ev_key or "ram" in ev_key:
+            icon, accent_code = ("💾", 208) # amber
+        elif "file" in ev_key:
+            icon, accent_code = ("📥", 39)  # cyan
+        elif "app" in ev_key or "window" in ev_key:
+            icon, accent_code = ("🚀", 75)  # blue
+        elif "clip" in ev_key:
+            icon, accent_code = ("📋", 183) # lavender
+        else:
+            icon, accent_code = ("⏰", 214) # gold
+
+        glyph_icon = _glyph(icon, "[!]")
+        clean_rule = (rule_name or "").strip()
+        tag_rule = f" › {clean_rule} " if clean_rule else " "
+        stamp = time.strftime("%H:%M:%S")
+
+        head = f"{tl}{hz * 2} {glyph_icon} PROACTIVE EVENT{tag_rule}"
+        top_line = head + hz * max(0, w - _vislen(head) - len(stamp) - 3) + f" {stamp} " + tr
+
+        body_md: list[str] = []
+        clean_title = (title or "").strip()
+        clean_msg = (message or "").strip()
+
+        if clean_title and clean_title.lower() != clean_rule.lower() and clean_title.lower() not in clean_msg.lower():
+            body_md.append(f"**{clean_title}**: {clean_msg}")
+        else:
+            body_md.append(clean_msg)
+
+        full_body = "\n".join(body_md)
+
+        lines: list[str] = []
+        for rendered, hang in render_markdown(full_body):
+            lines.extend(_wrap(rendered, inner, hang))
+
+        print("\n" + _c256(top_line, accent_code))
+        side = _c256(vt, accent_code)
+        reset = _COLORS["reset"]
+        for ln in lines:
+            print(f"{side} {ln}{reset}{' ' * max(0, inner - _vislen(ln))} {side}")
+        print(_c256(bl + hz * (w - 2) + br, accent_code) + "\n")
 
 
 class spinner:

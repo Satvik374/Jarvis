@@ -223,10 +223,24 @@ class _BrowserWorker(threading.Thread):
     # ------------------------------------------------------------------ #
 
     def _ensure_browser(self, headless_override: Optional[bool] = None) -> None:
-        if self._page and not self._page.is_closed():
-            return
+        try:
+            if self._context and self._page:
+                if not self._page.is_closed():
+                    return
+                # Page was closed, open a new page in the same context
+                if self._context.pages:
+                    self._page = self._context.pages[0]
+                    if not self._page.is_closed():
+                        return
+                self._page = self._context.new_page()
+                return
+        except Exception:
+            self._context = None
+            self._page = None
+            self._browser = None
 
         from playwright.sync_api import sync_playwright
+
 
         if self._playwright is None:
             self._playwright = sync_playwright().start()
@@ -392,14 +406,25 @@ class BrowserDriver:
 
             snap = self._worker._extract_snapshot()
             shot_path = self._worker._capture_screenshot()
+
+            page_url = target_url
+            page_title = "Web Page"
+            try:
+                if self._worker._page and not self._worker._page.is_closed():
+                    page_url = self._worker._page.url or target_url
+                    page_title = self._worker._page.title() or "Web Page"
+            except Exception:
+                pass
+
             return {
                 "ok": True,
-                "url": self._worker._page.url,
-                "title": self._worker._page.title(),
-                "snapshot": snap.format_text(),
+                "url": page_url,
+                "title": page_title,
+                "snapshot": snap.format_text() if hasattr(snap, "format_text") else str(snap),
                 "screenshot_path": shot_path,
             }
         return self._worker.execute(_impl)
+
 
     def click(self, target: str, timeout: int = 5000) -> Dict[str, Any]:
         def _impl():

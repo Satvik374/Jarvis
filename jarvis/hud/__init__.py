@@ -15,16 +15,19 @@ _CONTROLLER: Optional[HudController] = None
 def get_hud_controller(
     cfg: Optional[Config] = None,
     task_runner: Optional[Callable[[str], None]] = None,
+    agent: Optional[Any] = None,
 ) -> HudController:
     global _CONTROLLER
     if _CONTROLLER is None:
-        _CONTROLLER = HudController(cfg=cfg, task_runner=task_runner)
+        _CONTROLLER = HudController(cfg=cfg, task_runner=task_runner, agent=agent)
     else:
         if cfg is not None:
             _CONTROLLER.cfg = cfg
             _CONTROLLER.hud_cfg = getattr(cfg, "hud", None)
         if task_runner is not None:
             _CONTROLLER.task_runner = task_runner
+        if agent is not None:
+            _CONTROLLER.agent = agent
     return _CONTROLLER
 
 
@@ -37,10 +40,12 @@ def start_hud(
     cfg: Optional[Config] = None,
     task_runner: Optional[Callable[[str], None]] = None,
     start_overlay: bool = True,
+    agent: Optional[Any] = None,
 ) -> HudController:
-    controller = get_hud_controller(cfg=cfg, task_runner=task_runner)
-    controller.start(start_overlay=start_overlay)
+    controller = get_hud_controller(cfg=cfg, task_runner=task_runner, agent=agent)
+    controller.start(start_overlay=start_overlay, agent=agent)
     return controller
+
 
 
 def stop_hud() -> None:

@@ -1,138 +1,276 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#07151D"
-    android:fillViewport="true">
+    android:orientation="vertical">
 
-    <LinearLayout
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="24dp"
+        android:layout_marginTop="20dp"
+        android:text="JARVIS MOBILE"
+        android:textColor="#58E6FF"
+        android:textSize="26sp"
+        android:textStyle="bold" />
+
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/mainTabs"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="24dp">
+        android:layout_marginTop="8dp"
+        app:tabIndicatorColor="#58E6FF"
+        app:tabSelectedTextColor="#58E6FF"
+        app:tabTextColor="#A9CCD6" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="JARVIS MOBILE"
-            android:textColor="#58E6FF"
-            android:textSize="26sp"
-            android:textStyle="bold" />
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
 
-        <TextView
-            android:id="@+id/statusText"
+        <ScrollView
+            android:id="@+id/setupPane"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Not paired"
-            android:textColor="#D9F7FF"
-            android:textSize="15sp" />
+            android:layout_height="match_parent"
+            android:fillViewport="true">
 
-        <EditText
-            android:id="@+id/relayUrlInput"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:hint="Relay URL (https://...)"
-            android:inputType="textUri"
-            android:textColor="#FFFFFF"
-            android:textColorHint="#80AAB5" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="24dp">
 
-        <EditText
-            android:id="@+id/deviceNameInput"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:hint="Phone name (for example, Pixel 8)"
-            android:inputType="textCapSentences"
-            android:textColor="#FFFFFF"
-            android:textColorHint="#80AAB5" />
+                <TextView
+                    android:id="@+id/statusText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Not paired"
+                    android:textColor="#D9F7FF"
+                    android:textSize="15sp" />
 
-        <EditText
-            android:id="@+id/pairingCodeInput"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:hint="Pairing code from the Jarvis computer"
-            android:inputType="textCapCharacters"
-            android:maxLength="8"
-            android:textColor="#FFFFFF"
-            android:textColorHint="#80AAB5" />
+                <EditText
+                    android:id="@+id/relayUrlInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="24dp"
+                    android:hint="Relay URL (https://...)"
+                    android:inputType="textUri"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#80AAB5" />
 
-        <Button
-            android:id="@+id/pairButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Pair this phone" />
+                <EditText
+                    android:id="@+id/deviceNameInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:hint="Phone name (for example, Pixel 8)"
+                    android:inputType="textCapSentences"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#80AAB5" />
 
-        <EditText
-            android:id="@+id/fingerprintInput"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:hint="Matching fingerprint to trust"
-            android:inputType="textCapCharacters"
-            android:textColor="#FFFFFF"
-            android:textColorHint="#80AAB5" />
+                <EditText
+                    android:id="@+id/pairingCodeInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:hint="Pairing code from the Jarvis computer"
+                    android:inputType="textCapCharacters"
+                    android:maxLength="8"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#80AAB5" />
 
-        <Button
-            android:id="@+id/trustButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Trust paired computer" />
+                <Button
+                    android:id="@+id/pairButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="Pair this phone" />
 
-        <TextView
-            android:id="@+id/accessibilityStatusText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:background="#102A35"
-            android:padding="12dp"
-            android:text="Accessibility control: checking…"
-            android:textColor="#D9F7FF"
-            android:textSize="14sp" />
+                <EditText
+                    android:id="@+id/fingerprintInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:hint="Matching fingerprint to trust"
+                    android:inputType="textCapCharacters"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#80AAB5" />
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:text="Android 13+: if Accessibility says this sideloaded app is restricted or dangerous, open App info, tap ⋮, and choose Allow restricted settings first. Only allow it if you trust this APK."
-            android:textColor="#FFC96B"
-            android:textSize="13sp" />
+                <Button
+                    android:id="@+id/trustButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Trust paired computer" />
 
-        <Button
-            android:id="@+id/restrictedSettingsButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:text="1. Open App info / allow restricted settings" />
+                <TextView
+                    android:id="@+id/accessibilityStatusText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="24dp"
+                    android:background="#102A35"
+                    android:padding="12dp"
+                    android:text="Accessibility control: checking…"
+                    android:textColor="#D9F7FF"
+                    android:textSize="14sp" />
 
-        <Button
-            android:id="@+id/accessibilityButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="2. Enable Android accessibility control" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="Android 13+: if Accessibility says this sideloaded app is restricted or dangerous, open App info, tap ⋮, and choose Allow restricted settings first. Only allow it if you trust this APK."
+                    android:textColor="#FFC96B"
+                    android:textSize="13sp" />
 
-        <Button
-            android:id="@+id/startButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Start phone agent" />
+                <Button
+                    android:id="@+id/restrictedSettingsButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="1. Open App info / allow restricted settings" />
 
-        <Button
-            android:id="@+id/stopButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Stop phone agent" />
+                <Button
+                    android:id="@+id/accessibilityButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="2. Enable Android accessibility control" />
 
-        <TextView
+                <Button
+                    android:id="@+id/startButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="Start phone agent" />
+
+                <Button
+                    android:id="@+id/stopButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Stop phone agent" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="24dp"
+                    android:text="The Mobile Jarvis tab works directly with the cloud relay after this one-time pairing. Your phone does not need the computer running."
+                    android:textColor="#A9CCD6"
+                    android:textSize="14sp" />
+            </LinearLayout>
+        </ScrollView>
+
+        <LinearLayout
+            android:id="@+id/assistantPane"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:text="Computer command examples:\nmobile: open YouTube\nmobile: open https://youtube.com\nmobile: open Chrome to https://youtube.com\nmobile: open com.android.settings\nmobile: tap 500 700\nmobile: swipe 500 1400 500 400\nmobile: type hello\nmobile: back\n\nOpening apps and URLs does not require Accessibility. Tap, swipe, type, back, and home do."
-            android:textColor="#A9CCD6"
-            android:textSize="14sp" />
-    </LinearLayout>
-</ScrollView>
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:padding="20dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/assistantStatusText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="#102A35"
+                android:padding="12dp"
+                android:text="Standalone Mobile Jarvis — pair this phone once, then chat without the computer."
+                android:textColor="#D9F7FF"
+                android:textSize="14sp" />
+
+            <ScrollView
+                android:id="@+id/chatScroll"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="12dp"
+                android:layout_weight="1"
+                android:background="#0B2029">
+
+                <TextView
+                    android:id="@+id/assistantChatTranscript"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:padding="14dp"
+                    android:text="Jarvis: Good day. How may I help from your phone?"
+                    android:textColor="#E8FBFF"
+                    android:textIsSelectable="true"
+                    android:textSize="16sp" />
+            </ScrollView>
+
+            <com.jarvis.mobile.VoiceWaveView
+                android:id="@+id/voiceWave"
+                android:layout_width="match_parent"
+                android:layout_height="64dp"
+                android:layout_marginTop="8dp"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/stopVoiceButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:backgroundTint="#C62828"
+                android:text="✕  Stop voice capture"
+                android:textColor="#FFFFFF"
+                android:visibility="gone" />
+
+            <Switch
+                android:id="@+id/assistantActionsSwitch"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Allow Jarvis to run safe phone actions after I ask"
+                android:textColor="#D9F7FF" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/wakeButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Enable ‘Jarvis’ wake word" />
+
+                <Button
+                    android:id="@+id/wakeStopButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Stop wake word" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:orientation="horizontal">
+
+                <EditText
+                    android:id="@+id/assistantInput"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:hint="Ask Jarvis…"
+                    android:imeOptions="actionSend"
+                    android:inputType="textMultiLine|textCapSentences"
+                    android:maxLines="3"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#80AAB5" />
+
+                <Button
+                    android:id="@+id/assistantMicButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Voice" />
+
+                <Button
+                    android:id="@+id/assistantSendButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Send" />
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+</LinearLayout>

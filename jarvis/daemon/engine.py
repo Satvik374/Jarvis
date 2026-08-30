@@ -173,7 +173,13 @@ class ProactiveDaemon:
         return triggered_rules
 
     def _dispatch_action(self, rule: EventRule, event: Event) -> None:
-        log.info(f"⏰ [PROACTIVE EVENT] {rule.name} fired: {event.message}")
+        ev_type_val = event.type.value if hasattr(event.type, "value") else str(event.type)
+        log.proactive(
+            rule_name=rule.name,
+            message=event.message or rule.action_target,
+            title=event.title or rule.name,
+            event_type=ev_type_val,
+        )
 
         # 1. UI Web Event broadcast
         try:
@@ -181,7 +187,7 @@ class ProactiveDaemon:
             emit("proactive_alert",
                  title=event.title or rule.name,
                  message=event.message or rule.action_target,
-                 event_type=event.type.value,
+                 event_type=ev_type_val,
                  rule_name=rule.name,
                  timestamp=event.timestamp)
         except Exception:

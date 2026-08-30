@@ -266,6 +266,14 @@ class TestWhatsAppInbox(unittest.TestCase):
 
 
 class TestPromptNote(unittest.TestCase):
+    def setUp(self):
+        connectors.invalidate()
+        self._secret_patcher = mock.patch("jarvis.security.get_secret", return_value="")
+        self._secret_patcher.start()
+
+    def tearDown(self):
+        self._secret_patcher.stop()
+
     def test_note_is_empty_when_nothing_is_configured(self):
         with mock.patch.dict("os.environ", _NO_ENV):
             self.assertEqual(connectors.note(), "")

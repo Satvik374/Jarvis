@@ -46,7 +46,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--adapter", help="path to a trained LoRA adapter (hf backend)")
     parser.add_argument("--base-url", dest="base_url", help="override backend base URL")
     parser.add_argument("--vision", action="store_true", help="send screenshots to the model")
+    parser.add_argument("--shadow", action="store_true", default=None, help="run tasks in isolated shadow desktop (zero mouse interference)")
+    parser.add_argument("--no-shadow", action="store_false", dest="shadow", help="disable shadow desktop mode")
     parser.add_argument("--voice", action="store_true", help="speak replies aloud (and voice input in console)")
+    parser.add_argument("--live", "--voice-live", dest="live", action="store_true",
+                        help="launch straight into Real-Time Gemini Live Voice Supervisor mode")
+    parser.add_argument("--live-model", dest="live_model", help="override live voice model name")
+    parser.add_argument("--live-voice", dest="live_voice", help="override live voice name (Aoede/Puck/Charon/Kore/Fenrir)")
+
     parser.add_argument("--wake", action="store_true", help='launch straight into hands-free mode: say "Hey Jarvis" to command')
     parser.add_argument("--confirm", action="store_true", help="confirm each action")
     parser.add_argument("--steps", type=int, help="max steps per task")
@@ -106,8 +113,20 @@ def main(argv: list[str] | None = None) -> int:
         cfg.remote.relay_url = args.remote_url
     if args.vision:
         cfg.brain.use_vision = True
+    if args.shadow is not None:
+        cfg.shadow.enabled = args.shadow
+    if cfg.shadow.enabled:
+        from jarvis.desktop import set_shadow_enabled
+        set_shadow_enabled(True)
     if args.voice:
         cfg.voice_enabled = True
+    if args.live:
+        cfg.live_voice.enabled = True
+    if args.live_model:
+        cfg.live_voice.model = args.live_model
+    if args.live_voice:
+        cfg.live_voice.voice_name = args.live_voice
+
     if args.wake:
         cfg.wake_enabled = True
     if args.confirm:
@@ -185,28 +204,55 @@ def main(argv: list[str] | None = None) -> int:
         initial_task = " ".join(args.task).strip() or None
         return run_browser(child_args=child_args, initial_task=initial_task)
 
+    if args.live or cfg.live_voice.enabled:
+        from jarvis.live import run_live_mode
+        return run_live_mode(cfg)
+
     if args.task:
+        task_str = " ".join(args.task).strip()
         from jarvis.agent.brain import make_brain, BrainError
         from jarvis.agent.loop import Agent
+        from jarvis.live.speculative import get_fast_filler
+        from jarvis.live.telemetry_state import TaskTelemetryTracker
         try:
             agent = Agent(make_brain(cfg.brain), cfg)
         except BrainError as exc:
             log.error(str(exc))
             return 1
-        # Jarvis always speaks his replies (voice mode only adds the mic);
-        # configure before running so mid-task questions are spoken too.
         from jarvis.utils import voice
         voice.configure(agent.brain, cfg.voice)
-        # A real terminal can answer mid-task questions; a pipe cannot.
+
+        # 1. Speculative Fast Filler (<20ms instant acknowledgment by Communicating Agent)
+        fast_filler = get_fast_filler(task_str)
+        log.jarvis(f"🎙️ [Communicating Agent]: {fast_filler}")
+        voice.speak(fast_filler, wait=False)
+
+        # 2. Main Worker Agent executes in background with real-time telemetry
+        tracker = TaskTelemetryTracker()
+        tracker.reset_for_new_task(task_str, max_steps=cfg.safety.max_steps)
+
         import sys as _sys
         asker = None
         if _sys.stdin.isatty():
             from jarvis.console import _typed_asker
             asker = _typed_asker
-        result = agent.run(" ".join(args.task), asker=asker)
-        log.jarvis(result)
-        voice.speak(result, wait=True)   # sync: don't exit mid-sentence
-        return 0
+
+        try:
+            result = agent.run(task_str, asker=asker, on_progress=tracker.update_event)
+            log.jarvis(result)
+            try:
+                voice.speak(result, wait=False)
+            except Exception:
+                pass
+            return 0
+        except KeyboardInterrupt:
+            print()
+            log.warn("Task cancelled by user.")
+            try:
+                agent.cancel()
+            except Exception:
+                pass
+            return 0
 
     from jarvis.console import repl
     return repl(cfg)
@@ -287,6 +333,8 @@ def run_check(cfg) -> int:
     for mod, why in [("easyocr", "OCR fallback (optional, heavy)"),
                      ("pyperclip", "clipboard (optional)"),
                      ("sounddevice", "microphone input for voice mode"),
+                     ("websockets", "Gemini 3.1 Flash Live Voice streaming"),
+                     ("google.auth", "Google Cloud Vertex AI / ADC auth"),
                      ("kokoro_onnx", "local offline TTS (models/tts/)")]:
         (log.ok if _has(mod) else log.info)(
             f"{'found ' if _has(mod) else 'absent'} {mod:<14} - {why}")
@@ -326,4 +374,13 @@ def _check_ollama(cfg) -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print()
+        sys.exit(0)
+    except SystemExit as exc:
+        sys.exit(exc.code)
+    except Exception as exc:
+        log.error(f"Fatal error: {exc}")
+        sys.exit(1)

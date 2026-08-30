@@ -138,13 +138,30 @@ def complete_with_retry(brain: "Brain", system: str, messages: list[dict],
 
 
 def _coalesce_roles(messages: list[dict]) -> list[dict]:
-    """Merge consecutive same-role messages into one (Anthropic needs alternation)."""
+    """Merge consecutive same-role messages into one (alternation required by providers like Anthropic and Gemini)."""
     out: list[dict] = []
     for m in messages:
-        if out and out[-1]["role"] == m["role"]:
-            out[-1]["content"] = out[-1]["content"] + "\n\n" + m["content"]
+        if not out or out[-1]["role"] != m["role"]:
+            content = m.get("content", "")
+            if isinstance(content, list):
+                content = list(content)
+            out.append({"role": m["role"], "content": content})
+            continue
+
+        prev = out[-1]["content"]
+        curr = m.get("content", "")
+
+        if isinstance(prev, str) and isinstance(curr, str):
+            out[-1]["content"] = prev + "\n\n" + curr
+        elif isinstance(prev, list) and isinstance(curr, list):
+            out[-1]["content"] = prev + curr
+        elif isinstance(prev, list) and isinstance(curr, str):
+            out[-1]["content"] = prev + [{"type": "text", "text": curr}]
+        elif isinstance(prev, str) and isinstance(curr, list):
+            out[-1]["content"] = [{"type": "text", "text": prev}] + curr
         else:
-            out.append({"role": m["role"], "content": m["content"]})
+            out[-1]["content"] = str(prev) + "\n\n" + str(curr)
+
     return out
 
 
@@ -306,7 +323,7 @@ def _dtype_kwarg(dtype) -> dict:
 class OpenAICompatBrain(Brain):
     def complete(self, system, messages, image=None) -> str:
         msgs: list[dict] = [{"role": "system", "content": system}]
-        for m in messages:
+        for m in _coalesce_roles(messages):
             msgs.append({"role": m["role"], "content": m["content"]})
         imgs = self._as_images(image)
         if imgs and self.cfg.use_vision and msgs:
@@ -508,7 +525,7 @@ class GeminiVertexBrain(Brain):
         access_token, project_id = self._get_access_token_and_project()
 
         contents = []
-        for m in messages:
+        for m in _coalesce_roles(messages):
             role = "model" if m["role"] == "assistant" else "user"
             parts = []
             if isinstance(m["content"], str):
@@ -519,7 +536,10 @@ class GeminiVertexBrain(Brain):
                         parts.append({"text": part["text"]})
                     elif part.get("type") == "image_url":
                         pass
-            contents.append({"role": role, "parts": parts})
+            if contents and contents[-1]["role"] == role:
+                contents[-1]["parts"].extend(parts)
+            else:
+                contents.append({"role": role, "parts": parts})
 
         imgs = self._as_images(image)
         if imgs and self.cfg.use_vision and contents:

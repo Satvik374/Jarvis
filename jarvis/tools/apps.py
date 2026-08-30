@@ -29,18 +29,55 @@ _KNOWN = {
     "vscode": "code",
     "vs code": "code",
     "code": "code",
-    "spotify": "spotify",
+    "spotify": "spotify:",
 }
 
 
 def open_app(name: str) -> str:
     """Launch (or bring up) an application by friendly name or executable."""
+    from ..desktop import is_shadow_enabled, get_shadow_manager, ShadowDesktopManager
+    from .system import open_url
+
     key = name.strip().lower()
-    target = _KNOWN.get(key, name)
+
+    if key == "spotify":
+        appdata = os.environ.get("APPDATA", "")
+        localappdata = os.environ.get("LOCALAPPDATA", "")
+        spotify_path = os.path.join(appdata, "Spotify", "Spotify.exe")
+        store_spotify = os.path.join(localappdata, "Microsoft", "WindowsApps", "Spotify.exe")
+        if os.path.exists(spotify_path):
+            target = f'"{spotify_path}"'
+        elif os.path.exists(store_spotify):
+            target = f'"{store_spotify}"'
+        else:
+            target = "https://open.spotify.com"
+    elif key in {"chrome", "google chrome"}:
+        target = ShadowDesktopManager.find_browser_exe() or "chrome.exe"
+    elif key in {"edge", "msedge", "microsoft edge"}:
+        target = ShadowDesktopManager.find_browser_exe() or "msedge.exe"
+    else:
+        target = _KNOWN.get(key, name)
+
+    # Shadow Desktop execution
+    try:
+        if is_shadow_enabled():
+            mgr = get_shadow_manager()
+            if target.startswith(("http://", "https://")):
+                mgr.spawn_url(target)
+            else:
+                mgr.spawn_process(target)
+            time.sleep(1.0)
+            return f"launched '{name}' in Shadow Workspace"
+    except Exception:
+        pass
+
+    if target.startswith(("http://", "https://")):
+        return open_url(target)
 
     # Try to focus it first if a matching window already exists.
     if focus_window(name).startswith("focused"):
         return f"focused existing '{name}'"
+
 
     if target.startswith("ms-settings:") or target.startswith("http"):
         os.startfile(target)  # type: ignore[attr-defined]
@@ -66,6 +103,16 @@ def open_app(name: str) -> str:
 def focus_window(title: str) -> str:
     """Activate the first window whose title contains ``title``."""
     try:
+        from ..desktop import is_shadow_enabled, get_shadow_manager
+        if is_shadow_enabled():
+            win = get_shadow_manager().find_window(title)
+            if win:
+                return f"focused '{win.title}' in Shadow Workspace"
+            return f"no window matching '{title}' in Shadow Workspace"
+    except Exception:
+        pass
+
+    try:
         import pygetwindow as gw  # type: ignore
     except Exception:
         return "pygetwindow unavailable"
@@ -82,6 +129,7 @@ def focus_window(title: str) -> str:
         return f"focused '{w.title}'"
     except Exception as exc:
         return f"found '{w.title}' but could not focus: {exc}"
+
 
 
 def _own_console_ids() -> tuple[int, str]:
@@ -155,11 +203,19 @@ def close_window(title: str) -> str:
 
 def list_windows() -> list[str]:
     try:
+        from ..desktop import is_shadow_enabled, get_shadow_manager
+        if is_shadow_enabled():
+            return [w.title for w in get_shadow_manager().list_windows() if w.title]
+    except Exception:
+        pass
+
+    try:
         import pygetwindow as gw  # type: ignore
 
         return [w.title for w in gw.getAllWindows() if w.title.strip()]
     except Exception:
         return []
+
 
 
 def snap_window(direction: str, title: str | None = None) -> str:

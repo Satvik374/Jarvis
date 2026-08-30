@@ -19,6 +19,7 @@ import re
 import threading
 import time
 from pathlib import Path
+from typing import Any, Callable
 
 from ..config import Config
 from ..perception import screen as screen_mod
@@ -127,13 +128,29 @@ def _find_image(task: str):
         except Exception as exc:
             log.warn(f"could not load image {p.name}: {exc}")
             return None
-    return None
+_ACTIVE_AGENT: Agent | None = None
+_ACTIVE_AGENT_LOCK = threading.Lock()
+
+
+def get_active_agent() -> Agent | None:
+    with _ACTIVE_AGENT_LOCK:
+        return _ACTIVE_AGENT
+
+
+def cancel_active_agent() -> bool:
+    """Abort any currently executing agent task immediately."""
+    with _ACTIVE_AGENT_LOCK:
+        if _ACTIVE_AGENT is not None:
+            _ACTIVE_AGENT.cancel()
+            return True
+    return False
 
 
 class Agent:
     def __init__(self, brain: Brain, cfg: Config):
         self.brain = brain
         self.cfg = cfg
+        self.cancel_event = threading.Event()
         proj_root = Path(__file__).resolve().parent.parent.parent
         self.memory_path = proj_root / "memory.txt"
         # Conversational memory: only (user prompt, Jarvis response) pairs,
@@ -150,6 +167,14 @@ class Agent:
         self._shot_dir = proj_root / "dataset" / "data" / "screenshots"
         from ..memory.manager import get_memory_manager
         self.memory_mgr = get_memory_manager(memory_path=self.memory_path)
+        from ..macro import get_macro_manager, MacroPlayer
+        self.macro_mgr = get_macro_manager()
+        self.macro_player = MacroPlayer(macro_manager=self.macro_mgr)
+
+    def cancel(self) -> None:
+        """Signal the agent loop to abort the running task immediately."""
+        self.cancel_event.set()
+        log.warn("Agent cancel signal triggered.")
 
 
     # ------------------------------------------------------------------ #
@@ -216,7 +241,8 @@ class Agent:
 
         return [{"name": "Default Action Path", "description": "Execute the task directly using standard operations."}]
 
-    def run(self, task: str, asker=None) -> str:
+    def run(self, task: str, asker=None, cancel_event: threading.Event | None = None,
+            on_progress: Callable[[dict[str, Any]], None] | None = None) -> str:
         """Execute one task to completion; returns the final message.
 
         ``asker`` is an optional ``callable(question) -> answer`` wired by
@@ -225,352 +251,483 @@ class Agent:
         the task continues. Without it (cron, one-shot CLI without a TTY) an
         ``ask`` ends the run with the question, as before.
 
+        ``on_progress`` is an optional telemetry listener receiving structured
+        event dicts for real-time live voice monitoring and supervisor narration.
+
         Reinforcement loop: generate candidate plans -> try each -> a plan is
         only *rewarded* (saved to persistent memory, trajectory labelled
         success=True) when the finish is genuine AND the verifier confirms the
         task actually completed on screen. ask/cancel/brain-error end the whole
         run immediately - they are not "plan failures" to retry past.
         """
-        memory = self._read_memory(task=task)
-        chat_note = self._chat_context()   # persistent user<->Jarvis history
+        global _ACTIVE_AGENT
+        with _ACTIVE_AGENT_LOCK:
+            _ACTIVE_AGENT = self
+        self.cancel_event.clear()
+        effective_cancel = cancel_event or self.cancel_event
 
-        # Image input: an image-file path anywhere in the prompt attaches that
-        # image to every model call for this run (alongside the screenshot).
-        user_image = _find_image(task)
-        if user_image is not None:
-            log.info("attached image from prompt.")
-            if not self.cfg.brain.use_vision:
-                log.warn("vision is off - the attached image will be ignored "
-                         "(':vision on' to enable).")
+        def _notify(event_type: str, **kwargs: Any) -> None:
+            if on_progress is not None:
+                try:
+                    payload = {"event": event_type, **kwargs}
+                    on_progress(payload)
+                except Exception as _cb_exc:
+                    log.debug(f"Progress listener exception: {_cb_exc}")
 
-        # Plain conversation (greeting, small talk, a question that needs no
-        # computer access) -> reply directly with NO tools/perception/planning.
-        # Commands that clearly control the computer skip this entirely, and the
-        # classifier is conservative, so existing control behaviour is untouched.
-        if not self._looks_like_task(task):
-            reply = self._maybe_chat(task, chat_note, image=user_image)
-            if reply is not None:
-                self._append_chat(task, reply)
-                return reply
+        _notify("task_start", task=task)
 
-        log.step(f"Task: {task}")
-        reexplored = False     # #3: only re-plan once after evicting a stale plan
+        try:
+            memory = self._read_memory(task=task)
+            chat_note = self._chat_context()   # persistent user<->Jarvis history
 
-        # Generate candidate solutions (or reuse a learned plan from memory)
-        plans = self._generate_plans(task, memory)
-        log.info(f"Generated {len(plans)} candidate plan(s) to try.")
-        for idx, plan in enumerate(plans):
-            log.info(f"  Plan {idx + 1}: {plan['name']}")
-
-        final_message = "All candidate plans failed to complete the task."
-        successful_plan = None
-        # Only a VERIFIED success may be written to permanent memory. An
-        # inconclusive verdict (verifier disabled, call failed, unparseable)
-        # still reports the result to the user but must not be learned - that
-        # is exactly the false-positive reward verification exists to prevent.
-        rewardable = False
-        last_failure = ""      # why the previous plan failed (feeds next attempt)
-        abort_run = False      # ask/cancel/brain-error: stop everything
-
-        # We start with the initial observation
-        obs = self._perceive()
-
-        idx = 0
-        while idx < len(plans):
-            plan = plans[idx]
-            log.step(f"Trying Plan {idx + 1}/{len(plans)}: {plan['name']}")
-
-            # Construct system prompt with memory and current plan info
-            plan_note = f"\n\n=== CURRENT SOLUTION PLAN TO TRY ===\nPlan: {plan['name']}\nApproach: {plan['description']}"
-            if idx > 0:
-                plan_note += ("\nNote: A previous plan failed"
-                              + (f" ({last_failure})" if last_failure else "")
-                              + ". Try this alternative approach from the current screen state.")
-            plan_note += "\n===================================="
-
-            from .. import mcp
-            from .. import remote
-            from ..tools import connectors
-            system = (build_system_prompt(memory) + chat_note + agents_note()
-                      + connectors.note() + mcp.tools_note() + remote.note(self.cfg)
-                      + plan_note)
-
-            traj = Trajectory(task=task, backend=self.cfg.brain.backend,
-                              model=self.cfg.brain.model)
-            task_msg = f"TASK: {task}"
+            # Image input: an image-file path anywhere in the prompt attaches that
+            # image to every model call for this run (alongside the screenshot).
+            user_image = _find_image(task)
             if user_image is not None:
-                task_msg += ("\n(The user attached an image. Each turn, the "
-                             "FIRST image is that attachment; a second image, "
-                             "if present, is the current screen.)")
-            messages: list[dict] = [{"role": "user", "content": task_msg}]
+                log.info("attached image from prompt.")
+                if not self.cfg.brain.use_vision:
+                    log.warn("vision is off - the attached image will be ignored "
+                             "(':vision on' to enable).")
 
-            director = SelfHealingDirector(
-                config_self_healing=getattr(self.cfg.safety, "self_healing", True),
-                max_healing_attempts=getattr(self.cfg.safety, "max_healing_attempts", 3),
-            )
-            plan_succeeded = False
-            off_script = 0     # consecutive non-action replies from the model
-            last_changed = True    # did the previous action change the screen?
-            remote_image = None   # authenticated image returned by a paired device
+            # Plain conversation (greeting, small talk, a question that needs no
+            # computer access) -> reply directly with NO tools/perception/planning.
+            # Commands that clearly control the computer skip this entirely, and the
+            # classifier is conservative, so existing control behaviour is untouched.
+            if not self._looks_like_task(task):
+                reply = self._maybe_chat(task, chat_note, image=user_image)
+                if reply is not None:
+                    self._append_chat(task, reply)
+                    _notify("finish", result=reply, success=True, chat=True)
+                    return reply
 
-            for step_i in range(1, self.cfg.safety.max_steps + 1):
-                local_image = self._maybe_image(obs, step_i)
-                # Once a remote device returns a screenshot, keep that image in
-                # view instead of the unrelated controller desktop. This avoids
-                # grounding a mobile decision against the wrong screen.
-                image = remote_image if remote_image is not None else local_image
-                if user_image is not None:
-                    image = [user_image] + ([image] if image is not None else [])
-                messages_for_turn = self._with_observation(messages, obs)
+            # ------------------------------------------------------------------ #
+            # Fast-Path Procedural Memory (0ms LLM Latency Skill Execution)
+            # ------------------------------------------------------------------ #
+            fast_macro, fast_params, fast_conf = self.macro_mgr.find_matching_macro(task)
+            if fast_macro and fast_conf >= 0.85:
+                log.ok(f"⚡ Fast-Path: Found pre-compiled procedural plan '{fast_macro.name}' (confidence: {fast_conf:.2f}). Executing with 0ms LLM latency...")
+                _notify("fast_path_start", macro=fast_macro.name, confidence=fast_conf)
+                start_t = time.time()
+                play_res = self.macro_player.play(fast_macro, params=fast_params, cancel_event=effective_cancel)
+                if effective_cancel.is_set() or "interrupted" in play_res.get("message", "").lower():
+                    log.warn("Task cancelled by user.")
+                    final_msg = "Task cancelled by user."
+                    self._append_chat(task, final_msg)
+                    _notify("cancelled", task=task)
+                    return final_msg
 
-                try:
-                    with log.spinner(f"thinking (step {step_i}/{self.cfg.safety.max_steps})"):
-                        raw = complete_with_retry(self.brain, system,
-                                                  messages_for_turn, image=image)
-                except KeyboardInterrupt:
-                    # Ctrl+C mid-task: keep the partial trajectory as data
-                    # instead of silently losing the whole run.
-                    traj.outcome = "interrupted"
-                    traj.summary = "interrupted by user"
-                    self.writer.save(traj)
-                    raise
-                except Exception as exc:
-                    log.error(f"brain error: {exc}")
-                    final_message = f"Brain error: {exc}"
-                    traj.outcome = "error"
-                    # Record WHY, so failure analysis over trajectories can see
-                    # the actual error instead of a bare "error" label.
-                    traj.summary = f"brain error: {exc}"[:300]
-                    abort_run = True      # same brain will fail for every plan
-                    break
+                if play_res.get("ok"):
+                    elapsed = round(time.time() - start_t, 2)
+                    log.ok(f"⚡ Fast-Path completed '{fast_macro.name}' in {elapsed}s (zero LLM calls).")
+                    final_msg = fast_macro.format_summary(fast_params)
+                    self._append_chat(task, final_msg)
+                    log.pop(success=True)
+                    _notify("finish", result=final_msg, success=True, fast_path=True)
+                    return final_msg
 
-                decision = parse_decision(raw)
-                if decision.thought:
-                    log.think(decision.thought)
-
-                # The parser could not extract a real action (prose reply or a
-                # hallucinated action name). Do NOT treat that as a finish -
-                # push back once and let the model correct itself.
-                if decision.fallback:
-                    off_script += 1
-                    if off_script >= 3:
-                        log.warn("model went off-script 3 times; abandoning this plan.")
-                        traj.outcome = "off_script"
-                        last_failure = "the model repeatedly replied without a valid action"
-                        break
-                    log.warn("reply was not a valid action; asking the model to retry.")
-                    messages.append({"role": "assistant", "content": decision.raw[:400]})
-                    messages.append({"role": "user", "content":
-                                     "RESULT: Your reply was not a valid action. Reply with "
-                                     "exactly ONE JSON object: {\"thought\": ..., \"action\": "
-                                     "<one of the listed actions>, \"args\": {...}}. If the task "
-                                     "is complete, use the 'finish' action."})
-                    continue
-                off_script = 0
-
-                if not self._confirm(decision):
-                    final_message = "Cancelled by user."
-                    traj.outcome = "cancelled"
-                    abort_run = True      # the user said stop - stop everything
-                    break
-
-                try:
-                    result = registry.execute(decision.action, decision.args,
-                                              obs, self.cfg)
-                except Exception as exc:
-                    if _is_failsafe(exc):
-                        log.warn("FAIL-SAFE: mouse moved to a screen corner - "
-                                 "aborting the task.")
-                        final_message = ("Aborted by fail-safe (mouse moved to "
-                                         "a screen corner).")
-                        traj.outcome = "failsafe"
-                        abort_run = True
-                        break
-                    # Self-healing: an action crash is fed back to the model as
-                    # a failed result so it can adapt, instead of killing the
-                    # whole run with a traceback.
-                    log.warn(f"action {decision.action} crashed: {exc}")
-                    result = registry.ActionResult(
-                        False, f"the {decision.action} action crashed with an "
-                               f"internal error: {exc}. Try a different "
-                               f"approach or different arguments.")
-                if result.clear_image:
-                    remote_image = None
-                if result.image_path:
-                    loaded_action_image = _find_image(f'"{result.image_path}"')
-                    if loaded_action_image is not None and self.cfg.brain.use_vision:
-                        remote_image = loaded_action_image
-                        if decision.action == "remote_task":
-                            result.message += (
-                                " The authenticated image on the next turn is the REMOTE DEVICE "
-                                "screen; ignore the local desktop observation when interpreting it "
-                                "and continue through remote_task only."
-                            )
-                log.act(f"{decision.action}({_fmt_args(decision.args)}) -> {result.message}")
-
-                traj.add(Step(
-                    active_window=obs.active_window,
-                    elements=[e.to_dict() for e in obs.elements],
-                    menu=obs.menu(), thought=decision.thought,
-                    action=decision.action, args=decision.args,
-                    result=result.message, ok=result.ok,
-                ))
-
-                # Record the exchange so the model has memory of what it did.
-                messages.append({"role": "assistant",
-                                 "content": format_decision(decision.thought,
-                                                            decision.action,
-                                                            decision.args)})
-                messages.append({"role": "user",
-                                 "content": f"RESULT: {result.message}"})
-
-                if result.finished:
-                    if result.ask:
-                        # Interactive session: relay the answer and keep going.
-                        answer = self._ask_user(result.ask, asker)
-                        if answer:
-                            messages[-1]["content"] = (
-                                f"RESULT: the user answered: {answer}")
-                            obs = self._perceive()
-                            continue
-                        # No one to answer: the question ends the whole run -
-                        # it must reach the user, not be swallowed as a
-                        # "failed plan".
-                        final_message = result.ask
-                        traj.outcome = "ask"
-                        traj.summary = final_message
-                        abort_run = True
-                        break
-
-                    # Genuine finish: verify before rewarding.
-                    verdict, reason = self._verify_success(task, messages)
-                    traj.success = verdict
-                    if verdict is False:
-                        log.warn(f"verifier: task NOT actually complete - {reason}")
-                        traj.outcome = "finish_unverified"
-                        traj.summary = result.message
-                        last_failure = f"it claimed success but verification found: {reason}"
-                        # If every plan ends here, still tell the user what was
-                        # claimed instead of a generic "all plans failed".
-                        final_message = (f"{result.message} (note: I could not "
-                                         f"verify this completed: {reason})")
-                        break     # plan failed; try the next one
-
-                    final_message = result.message
-                    traj.outcome = "finish"
-                    traj.summary = final_message
-                    plan_succeeded = True
-                    rewardable = verdict is True
-                    break
-
-                if result.needs_observe:
-                    before_win = obs.active_window
-                    before = obs.active_window + "\n" + obs.menu()
-                    editable = self._clicked_editable(decision, obs)
-                    obs = self._perceive()
-                    after_win = obs.active_window
-                    last_changed = (obs.active_window + "\n" + obs.menu()) != before
-                    if not last_changed and editable:
-                        # Clicking a text/prompt box only sets focus + caret,
-                        # which never shows up in the element list. That is
-                        # success, not failure - tell the model to type, so it
-                        # does not re-click the box forever thinking it missed.
-                        messages[-1]["content"] += (
-                            " (note: the text field is now focused - the element "
-                            "list does not change when a field gains focus. This "
-                            "is expected; proceed to type, do NOT click it again.)")
-                    elif not last_changed:
-                        # Explicit no-effect signal - without it a small model
-                        # cannot tell that its click achieved nothing.
-                        messages[-1]["content"] += (
-                            " (note: the screen did NOT change after this "
-                            "action - if that was unexpected, try a different "
-                            "approach)")
-
-                    # Tree-of-Thought & Self-Healing Diagnosis
-                    if getattr(self.cfg.safety, "self_healing", True):
-                        diag, repair = director.diagnose_and_guide(
-                            thought=decision.thought,
-                            action=decision.action,
-                            args=decision.args,
-                            is_ok=result.ok,
-                            result_message=result.message,
-                            screen_changed=last_changed,
-                            before_window=before_win,
-                            after_window=after_win,
-                        )
-                        note = director.get_healing_note(diag, repair)
-                        if note:
-                            messages[-1]["content"] += f"\n[{note}]"
-                            if repair:
-                                obs = self._perceive()
                 else:
-                    if getattr(self.cfg.safety, "self_healing", True) and not result.ok:
-                        diag, repair = director.diagnose_and_guide(
-                            thought=decision.thought,
-                            action=decision.action,
-                            args=decision.args,
-                            is_ok=result.ok,
-                            result_message=result.message,
-                            screen_changed=False,
-                            before_window=obs.active_window,
-                            after_window=obs.active_window,
-                        )
-                        note = director.get_healing_note(diag, repair)
-                        if note:
-                            messages[-1]["content"] += f"\n[{note}]"
-            else:
-                final_message = f"Plan reached the {self.cfg.safety.max_steps}-step limit."
-                traj.outcome = "step_limit"
-                last_failure = "it hit the step limit without finishing"
+                    log.warn(f"⚠️ Fast-Path playback hit a roadblock ({play_res.get('message')}). Dropping back to System 2 LLM Agent Loop to adapt and self-heal...")
 
-            self.writer.save(traj)
+            if effective_cancel.is_set():
+                log.warn("Task cancelled by user before plan generation.")
+                _notify("cancelled", task=task)
+                return "Task cancelled by user."
 
-            if abort_run:
-                break
-            if plan_succeeded:
-                successful_plan = plan
-                log.ok(f"Plan '{plan['name']}' succeeded!")
-                break
-            log.warn(f"Plan '{plan['name']}' failed.")
+            log.step(f"Task: {task}")
+            reexplored = False     # #3: only re-plan once after evicting a stale plan
 
-            # #3 un-learn: a plan we REUSED from memory just failed, so the
-            # stored recipe is stale (UI changed) or was a false-positive
-            # reward. Evict it and brainstorm fresh alternatives instead of
-            # failing on a dead plan forever.
-            if plan.get("from_memory") and not reexplored:
-                self._evict_memory(task)
-                memory = self._read_memory()            # stale entry gone, rest kept
-                plans = self._brainstorm_plans(task)    # force fresh exploration
-                log.info(f"Re-planned: {len(plans)} alternative(s) to try.")
-                reexplored = True
-                idx = 0
-                obs = self._perceive()
-                continue
+            # Generate candidate solutions (or reuse a learned plan from memory)
+            plans = self._generate_plans(task, memory)
+            log.info(f"Generated {len(plans)} candidate plan(s) to try.")
+            for idx, plan in enumerate(plans):
+                log.info(f"  Plan {idx + 1}: {plan['name']}")
 
-            # Lazy planning: the direct attempt failed, so now (and only now)
-            # spend the LLM call to brainstorm alternative strategies to try.
-            if plan.get("provisional") and not reexplored:
-                plans = self._brainstorm_plans(task)
-                log.info(f"Direct attempt failed; brainstormed "
-                         f"{len(plans)} alternative plan(s).")
-                reexplored = True
-                idx = 0
-                obs = self._perceive()
-                continue
+            final_message = "All candidate plans failed to complete the task."
+            successful_plan = None
+            # Only a VERIFIED success may be written to permanent memory. An
+            # inconclusive verdict (verifier disabled, call failed, unparseable)
+            # still reports the result to the user but must not be learned - that
+            # is exactly the false-positive reward verification exists to prevent.
+            rewardable = False
+            last_failure = ""      # why the previous plan failed (feeds next attempt)
+            abort_run = False      # ask/cancel/brain-error: stop everything
 
-            idx += 1
-            # Refresh observation for the next plan start
+            # We start with the initial observation
             obs = self._perceive()
 
-        # Reward: persist the plan only when the verifier CONFIRMED it worked.
-        if successful_plan and rewardable:
-            self._append_memory(task, successful_plan)
+            idx = 0
+            while idx < len(plans):
+                if effective_cancel.is_set():
+                    log.warn("Task cancelled by user.")
+                    final_message = "Task cancelled by user."
+                    _notify("cancelled", task=task)
+                    break
 
-        # Remember the exchange (prompt + response only - no thoughts/plans).
-        self._append_chat(task, final_message)
-        log.pop(success=bool(successful_plan))   # audible "task finished" cue
-        return final_message
+                plan = plans[idx]
+                log.step(f"Trying Plan {idx + 1}/{len(plans)}: {plan['name']}")
+                _notify("plan_start", plan_index=idx + 1, total_plans=len(plans),
+                        plan_name=plan["name"], plan_description=plan.get("description", ""))
+
+                # Construct system prompt with memory and current plan info
+                plan_note = f"\n\n=== CURRENT SOLUTION PLAN TO TRY ===\nPlan: {plan['name']}\nApproach: {plan['description']}"
+                if idx > 0:
+                    plan_note += ("\nNote: A previous plan failed"
+                                  + (f" ({last_failure})" if last_failure else "")
+                                  + ". Try this alternative approach from the current screen state.")
+                plan_note += "\n===================================="
+
+                from .. import mcp
+                from .. import remote
+                from ..tools import connectors
+                from ..tools import tool_synthesis
+                system = (build_system_prompt(memory) + chat_note + agents_note()
+                          + connectors.note() + mcp.tools_note() + remote.note(self.cfg)
+                          + tool_synthesis.synthesized_tools_prompt_note(task)
+                          + plan_note)
+
+                traj = Trajectory(task=task, backend=self.cfg.brain.backend,
+                                  model=self.cfg.brain.model)
+                task_msg = f"TASK: {task}"
+                if user_image is not None:
+                    task_msg += ("\n(The user attached an image. Each turn, the "
+                                 "FIRST image is that attachment; a second image, "
+                                 "if present, is the current screen.)")
+                messages: list[dict] = [{"role": "user", "content": task_msg}]
+
+                director = SelfHealingDirector(
+                    config_self_healing=getattr(self.cfg.safety, "self_healing", True),
+                    max_healing_attempts=getattr(self.cfg.safety, "max_healing_attempts", 3),
+                )
+                plan_succeeded = False
+                off_script = 0     # consecutive non-action replies from the model
+                last_changed = True    # did the previous action change the screen?
+                remote_image = None   # authenticated image returned by a paired device
+
+                for step_i in range(1, self.cfg.safety.max_steps + 1):
+                    if effective_cancel.is_set():
+                        log.warn("Task cancelled by user.")
+                        final_message = "Task cancelled by user."
+                        traj.outcome = "cancelled"
+                        abort_run = True
+                        _notify("cancelled", task=task, step=step_i)
+                        break
+
+                    _notify("step_start", step=step_i, max_steps=self.cfg.safety.max_steps)
+
+                    local_image = self._maybe_image(obs, step_i)
+                    # Once a remote device returns a screenshot, keep that image in
+                    # view instead of the unrelated controller desktop. This avoids
+                    # grounding a mobile decision against the wrong screen.
+                    image = remote_image if remote_image is not None else local_image
+                    if user_image is not None:
+                        image = [user_image] + ([image] if image is not None else [])
+                    messages_for_turn = self._with_observation(messages, obs)
+
+                    try:
+                        with log.spinner(f"thinking (step {step_i}/{self.cfg.safety.max_steps})"):
+                            raw = complete_with_retry(self.brain, system,
+                                                      messages_for_turn, image=image)
+                    except KeyboardInterrupt:
+                        # Ctrl+C mid-task: keep the partial trajectory as data
+                        # instead of silently losing the whole run.
+                        traj.outcome = "interrupted"
+                        traj.summary = "interrupted by user"
+                        self.writer.save(traj)
+                        _notify("cancelled", task=task, step=step_i)
+                        raise
+                    except Exception as exc:
+                        log.error(f"brain error: {exc}")
+                        final_message = f"Brain error: {exc}"
+                        traj.outcome = "error"
+                        # Record WHY, so failure analysis over trajectories can see
+                        # the actual error instead of a bare "error" label.
+                        traj.summary = f"brain error: {exc}"[:300]
+                        abort_run = True      # same brain will fail for every plan
+                        _notify("error", error=str(exc), step=step_i)
+                        break
+
+                    if effective_cancel.is_set():
+                        log.warn("Task cancelled by user.")
+                        final_message = "Task cancelled by user."
+                        traj.outcome = "cancelled"
+                        abort_run = True
+                        _notify("cancelled", task=task, step=step_i)
+                        break
+
+                    decision = parse_decision(raw)
+                    if decision.thought:
+                        log.think(decision.thought)
+
+                    # The parser could not extract a real action (prose reply or a
+                    # hallucinated action name). Do NOT treat that as a finish -
+                    # push back once and let the model correct itself.
+                    if decision.fallback:
+                        off_script += 1
+                        if off_script >= 3:
+                            log.warn("model went off-script 3 times; abandoning this plan.")
+                            traj.outcome = "off_script"
+                            last_failure = "the model repeatedly replied without a valid action"
+                            break
+                        log.warn("reply was not a valid action; asking the model to retry.")
+                        messages.append({"role": "assistant", "content": decision.raw[:400]})
+                        messages.append({"role": "user", "content":
+                                         "RESULT: Your reply was not a valid action. Reply with "
+                                         "exactly ONE JSON object: {\"thought\": ..., \"action\": "
+                                         "<one of the listed actions>, \"args\": {...}}. If the task "
+                                         "is complete, use the 'finish' action."})
+                        continue
+                    off_script = 0
+
+                    _notify("step_action", step=step_i, max_steps=self.cfg.safety.max_steps,
+                            thought=decision.thought, action=decision.action, args=decision.args)
+
+                    if not self._confirm(decision):
+                        final_message = "Cancelled by user."
+                        traj.outcome = "cancelled"
+                        abort_run = True      # the user said stop - stop everything
+                        _notify("cancelled", task=task, step=step_i)
+                        break
+
+                    if effective_cancel.is_set():
+                        final_message = "Cancelled by user."
+                        traj.outcome = "cancelled"
+                        abort_run = True
+                        _notify("cancelled", task=task, step=step_i)
+                        break
+
+                    try:
+                        result = registry.execute(decision.action, decision.args,
+                                                  obs, self.cfg)
+                    except Exception as exc:
+                        if _is_failsafe(exc):
+                            log.warn("FAIL-SAFE: mouse moved to a screen corner - "
+                                     "aborting the task.")
+                            final_message = ("Aborted by fail-safe (mouse moved to "
+                                             "a screen corner).")
+                            traj.outcome = "failsafe"
+                            abort_run = True
+                            _notify("error", error="Fail-safe triggered", step=step_i)
+                            break
+                        # Self-healing: an action crash is fed back to the model as
+                        # a failed result so it can adapt, instead of killing the
+                        # whole run with a traceback.
+                        log.warn(f"action {decision.action} crashed: {exc}")
+                        result = registry.ActionResult(
+                            False, f"the {decision.action} action crashed with an "
+                                   f"internal error: {exc}. Try a different "
+                                   f"approach or different arguments.")
+                    if result.clear_image:
+                        remote_image = None
+                    if result.image_path:
+                        loaded_action_image = _find_image(f'"{result.image_path}"')
+                        if loaded_action_image is not None and self.cfg.brain.use_vision:
+                            remote_image = loaded_action_image
+                            if decision.action == "remote_task":
+                                result.message += (
+                                    " The authenticated image on the next turn is the REMOTE DEVICE "
+                                    "screen; ignore the local desktop observation when interpreting it "
+                                    "and continue through remote_task only."
+                                )
+                    log.act(f"{decision.action}({_fmt_args(decision.args)}) -> {result.message}")
+
+                    traj.add(Step(
+                        active_window=obs.active_window,
+                        elements=[e.to_dict() for e in obs.elements],
+                        menu=obs.menu(), thought=decision.thought,
+                        action=decision.action, args=decision.args,
+                        result=result.message, ok=result.ok,
+                    ))
+
+                    _notify("step_result", step=step_i, max_steps=self.cfg.safety.max_steps,
+                            thought=decision.thought, action=decision.action, args=decision.args,
+                            result=result.message, ok=result.ok, finished=result.finished,
+                            ask=bool(result.ask))
+
+                    if effective_cancel.is_set():
+                        final_message = "Cancelled by user."
+                        traj.outcome = "cancelled"
+                        abort_run = True
+                        _notify("cancelled", task=task, step=step_i)
+                        break
+
+                    # Record the exchange so the model has memory of what it did.
+                    messages.append({"role": "assistant",
+                                     "content": format_decision(decision.thought,
+                                                                decision.action,
+                                                                decision.args)})
+                    messages.append({"role": "user",
+                                     "content": f"RESULT: {result.message}"})
+
+                    if result.finished:
+                        if result.ask:
+                            # Interactive session: relay the answer and keep going.
+                            _notify("ask", question=result.ask, step=step_i)
+                            answer = self._ask_user(result.ask, asker)
+                            if answer:
+                                messages[-1]["content"] = (
+                                    f"RESULT: the user answered: {answer}")
+                                if traj.steps:
+                                    traj.steps[-1].result = f"User answered: {answer}"
+                                _notify("answer_received", question=result.ask, answer=answer, step=step_i)
+                                log.jarvis(f"🎙️ [Communicating Agent]: Understood, proceeding with: '{answer}'")
+                                obs = self._perceive()
+                                continue
+                            # No one to answer: the question ends the whole run -
+                            # it must reach the user, not be swallowed as a
+                            # "failed plan".
+                            final_message = result.ask
+                            traj.outcome = "ask"
+                            traj.summary = final_message
+                            abort_run = True
+                            _notify("finish", result=final_message, success=False, ask=True, step=step_i)
+                            break
+
+                        # Genuine finish: verify before rewarding.
+                        verdict, reason = self._verify_success(task, messages)
+                        traj.success = verdict
+                        if verdict is False:
+                            log.warn(f"verifier: task NOT actually complete - {reason}")
+                            traj.outcome = "finish_unverified"
+                            traj.summary = result.message
+                            last_failure = f"it claimed success but verification found: {reason}"
+                            # If every plan ends here, still tell the user what was
+                            # claimed instead of a generic "all plans failed".
+                            final_message = (f"{result.message} (note: I could not "
+                                             f"verify this completed: {reason})")
+                            break     # plan failed; try the next one
+
+                        final_message = result.message
+                        traj.outcome = "finish"
+                        traj.summary = final_message
+                        plan_succeeded = True
+                        rewardable = verdict is True
+                        _notify("finish", result=final_message, success=True, step=step_i)
+                        break
+
+                    if result.needs_observe:
+                        before_win = obs.active_window
+                        before = obs.active_window + "\n" + obs.menu()
+                        editable = self._clicked_editable(decision, obs)
+                        obs = self._perceive()
+                        after_win = obs.active_window
+                        last_changed = (obs.active_window + "\n" + obs.menu()) != before
+                        if not last_changed and editable:
+                            # Clicking a text/prompt box only sets focus + caret,
+                            # which never shows up in the element list. That is
+                            # success, not failure - tell the model to type, so it
+                            # does not re-click the box forever thinking it missed.
+                            messages[-1]["content"] += (
+                                " (note: the text field is now focused - the element "
+                                "list does not change when a field gains focus. This "
+                                "is expected; proceed to type, do NOT click it again.)")
+                        elif not last_changed:
+                            # Explicit no-effect signal - without it a small model
+                            # cannot tell that its click achieved nothing.
+                            messages[-1]["content"] += (
+                                " (note: the screen did NOT change after this "
+                                "action - if that was unexpected, try a different "
+                                "approach)")
+
+                        # Tree-of-Thought & Self-Healing Diagnosis
+                        if getattr(self.cfg.safety, "self_healing", True):
+                            diag, repair = director.diagnose_and_guide(
+                                thought=decision.thought,
+                                action=decision.action,
+                                args=decision.args,
+                                is_ok=result.ok,
+                                result_message=result.message,
+                                screen_changed=last_changed,
+                                before_window=before_win,
+                                after_window=after_win,
+                            )
+                            note = director.get_healing_note(diag, repair)
+                            if note:
+                                messages[-1]["content"] += f"\n[{note}]"
+                                if repair:
+                                    obs = self._perceive()
+                    else:
+                        if getattr(self.cfg.safety, "self_healing", True) and not result.ok:
+                            diag, repair = director.diagnose_and_guide(
+                                thought=decision.thought,
+                                action=decision.action,
+                                args=decision.args,
+                                is_ok=result.ok,
+                                result_message=result.message,
+                                screen_changed=False,
+                                before_window=obs.active_window,
+                                after_window=obs.active_window,
+                            )
+                            note = director.get_healing_note(diag, repair)
+                            if note:
+                                messages[-1]["content"] += f"\n[{note}]"
+                else:
+                    final_message = f"Plan reached the {self.cfg.safety.max_steps}-step limit."
+                    traj.outcome = "step_limit"
+                    last_failure = "it hit the step limit without finishing"
+
+                self.writer.save(traj)
+
+                if abort_run:
+
+                    break
+                if plan_succeeded:
+                    successful_plan = plan
+                    log.ok(f"Plan '{plan['name']}' succeeded!")
+                    break
+                log.warn(f"Plan '{plan['name']}' failed.")
+
+                # #3 un-learn: a plan we REUSED from memory just failed, so the
+                # stored recipe is stale (UI changed) or was a false-positive
+                # reward. Evict it and brainstorm fresh alternatives instead of
+                # failing on a dead plan forever.
+                if plan.get("from_memory") and not reexplored:
+                    self._evict_memory(task)
+                    memory = self._read_memory()            # stale entry gone, rest kept
+                    plans = self._brainstorm_plans(task)    # force fresh exploration
+                    log.info(f"Re-planned: {len(plans)} alternative(s) to try.")
+                    reexplored = True
+                    idx = 0
+                    obs = self._perceive()
+                    continue
+
+                # Lazy planning: the direct attempt failed, so now (and only now)
+                # spend the LLM call to brainstorm alternative strategies to try.
+                if plan.get("provisional") and not reexplored:
+                    plans = self._brainstorm_plans(task)
+                    log.info(f"Direct attempt failed; brainstormed "
+                             f"{len(plans)} alternative plan(s).")
+                    reexplored = True
+                    idx = 0
+                    obs = self._perceive()
+                    continue
+
+                idx += 1
+                # Refresh observation for the next plan start
+                obs = self._perceive()
+
+
+            # Reward: persist the plan only when the verifier CONFIRMED it worked.
+            if successful_plan and rewardable:
+                self._append_memory(task, successful_plan)
+                # Automatic compilation into Procedural Memory / Macro Plan:
+                try:
+                    from ..macro import get_trajectory_compiler
+                    compiler = get_trajectory_compiler(macro_manager=self.macro_mgr)
+                    if 'traj' in locals() and traj and traj.steps:
+                        compiler.compile_and_save(task, traj, sync_memory=True)
+                except Exception as exc:
+                    log.warn(f"Automatic procedural macro compilation skipped: {exc}")
+
+            # Remember the exchange (prompt + response only - no thoughts/plans).
+            self._append_chat(task, final_message)
+            log.pop(success=bool(successful_plan))   # audible "task finished" cue
+            return final_message
+        finally:
+            with _ACTIVE_AGENT_LOCK:
+                if _ACTIVE_AGENT is self:
+                    _ACTIVE_AGENT = None
+
+
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -915,9 +1072,8 @@ class Agent:
             + (rag_note if rag_note else "")
         )
         messages: list[dict] = []
-        if chat_note:
-            messages.append({"role": "user", "content": "Recent conversation:" + chat_note})
-        messages.append({"role": "user", "content": task})
+        user_content = f"Recent conversation:{chat_note}\n\n{task}" if chat_note else task
+        messages.append({"role": "user", "content": user_content})
         try:
             with log.spinner("thinking"):
                 raw = self.brain.complete(system, messages, image=image)
@@ -1021,8 +1177,12 @@ class Agent:
     def _with_observation(self, messages: list[dict], obs) -> list[dict]:
         """Append the current screen state to the latest user turn."""
         state = format_observation(obs.active_window, obs.screen_size, obs.menu())
-        out = list(messages)
-        out.append({"role": "user", "content": state})
+        out = [dict(m) for m in messages]
+        if out and out[-1].get("role") == "user":
+            existing = str(out[-1].get("content", ""))
+            out[-1]["content"] = (existing + "\n\n" + state).strip() if existing else state
+        else:
+            out.append({"role": "user", "content": state})
         return out
 
     # Roles that accept typed text: clicking one to focus it is a success even

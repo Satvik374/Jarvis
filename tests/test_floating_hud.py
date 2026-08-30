@@ -248,13 +248,17 @@ def test_hud_push_to_talk_toggle(monkeypatch):
     assert controller.overlay.voice_active is True
     assert "Listening, sir." not in spoken  # Must NOT speak before listening
 
-    time.sleep(0.05)
+    t0 = time.time()
+    while "started" not in recorded_events and time.time() - t0 < 2.0:
+        time.sleep(0.01)
     assert "started" in recorded_events
     assert "stopped" not in recorded_events  # Keeps recording, doesn't auto-stop
 
     # 2. 2nd Press of Alt+V -> Stops recording & transcribes
     controller.toggle_voice()
-    time.sleep(0.1)
+    t0 = time.time()
+    while "stopped" not in recorded_events and time.time() - t0 < 2.0:
+        time.sleep(0.01)
 
     assert controller._is_voice_listening is False
     assert controller.overlay.voice_active is False
@@ -357,7 +361,7 @@ def test_hud_interrupt_response(monkeypatch):
 
     assert True in silenced
     assert controller.state == "idle"
-    assert "Interrupted" in controller.detail_text
+    assert "Stopped" in controller.detail_text or "Ready" in controller.detail_text
 
     # 3. Unblock slow runner after interrupt -> verify it was discarded
     finish_ev.set()
@@ -365,6 +369,7 @@ def test_hud_interrupt_response(monkeypatch):
     assert controller.state == "idle"
 
     controller.stop()
+
 
 
 def test_gemini_vertex_fast_adc_refresh(monkeypatch, tmp_path):

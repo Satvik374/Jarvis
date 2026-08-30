@@ -7,6 +7,7 @@ parameter substitution and Long-Term Memory (RAG + Knowledge Graph) synchronizat
 
 from __future__ import annotations
 
+from .compiler import TrajectoryCompiler, get_trajectory_compiler
 from .manager import Macro, MacroManager, MacroStep, get_macro_manager
 from .player import MacroPlayer
 from .recorder import MacroRecorder
@@ -18,4 +19,6 @@ __all__ = [
     "MacroPlayer",
     "MacroManager",
     "get_macro_manager",
+    "TrajectoryCompiler",
+    "get_trajectory_compiler",
 ]

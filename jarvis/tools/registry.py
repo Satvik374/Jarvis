@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from . import mouse, keyboard, apps, files, system, mouse_control
+from . import mouse, keyboard, apps, files, system, mouse_control, converter, code_intel, session_exec, diagnostics, web_extractor, db_query, git_intel, net_intel, media_intel, archive_intel, data_validate, crypto_intel, diff_patch, process_intel, regex_intel, api_mock, cron_intel, tool_synthesis
 from .schema import ACTIONS_BY_NAME
 from ..config import Config
 from ..perception.elements import Observation
@@ -180,6 +180,15 @@ def _h_click(args, obs, cfg):
     if pt is None:
         return ActionResult(False, f"click failed: {err}")
     count = int(_num(args, "count", 1, 1, 10))
+    try:
+        from ..desktop import is_shadow_enabled, get_virtual_input
+        if is_shadow_enabled():
+            get_virtual_input().click(pt[0], pt[1], clicks=count)
+            return ActionResult(True, "left-clicked " + _target_desc(args, obs)
+                                + (f" x{count}" if count > 1 else "") + " (shadow workspace)")
+    except Exception:
+        pass
+
     mouse.click(*pt, clicks=count)
     return ActionResult(True, "left-clicked " + _target_desc(args, obs)
                         + (f" x{count}" if count > 1 else ""))
@@ -189,6 +198,13 @@ def _h_double_click(args, obs, cfg):
     pt, err = _resolve_point(args, obs, cfg)
     if pt is None:
         return ActionResult(False, f"double_click failed: {err}")
+    try:
+        from ..desktop import is_shadow_enabled, get_virtual_input
+        if is_shadow_enabled():
+            get_virtual_input().click(pt[0], pt[1], clicks=2)
+            return ActionResult(True, "double-clicked " + _target_desc(args, obs) + " (shadow workspace)")
+    except Exception:
+        pass
     mouse.double_click(*pt)
     return ActionResult(True, "double-clicked " + _target_desc(args, obs))
 
@@ -197,6 +213,13 @@ def _h_triple_click(args, obs, cfg):
     pt, err = _resolve_point(args, obs, cfg)
     if pt is None:
         return ActionResult(False, f"triple_click failed: {err}")
+    try:
+        from ..desktop import is_shadow_enabled, get_virtual_input
+        if is_shadow_enabled():
+            get_virtual_input().click(pt[0], pt[1], clicks=3)
+            return ActionResult(True, "triple-clicked " + _target_desc(args, obs) + " (shadow workspace)")
+    except Exception:
+        pass
     mouse.triple_click(*pt)
     return ActionResult(True, "triple-clicked " + _target_desc(args, obs))
 
@@ -205,6 +228,13 @@ def _h_right_click(args, obs, cfg):
     pt, err = _resolve_point(args, obs, cfg)
     if pt is None:
         return ActionResult(False, f"right_click failed: {err}")
+    try:
+        from ..desktop import is_shadow_enabled, get_virtual_input
+        if is_shadow_enabled():
+            get_virtual_input().click(pt[0], pt[1], button="right", clicks=1)
+            return ActionResult(True, "right-clicked " + _target_desc(args, obs) + " (shadow workspace)")
+    except Exception:
+        pass
     mouse.right_click(*pt)
     return ActionResult(True, "right-clicked " + _target_desc(args, obs))
 
@@ -213,6 +243,13 @@ def _h_move(args, obs, cfg):
     pt, err = _resolve_point(args, obs, cfg)
     if pt is None:
         return ActionResult(False, f"move failed: {err}")
+    try:
+        from ..desktop import is_shadow_enabled
+        if is_shadow_enabled():
+            return ActionResult(True, "moved virtual cursor to " + _target_desc(args, obs) + " (shadow workspace)",
+                                needs_observe=False)
+    except Exception:
+        pass
     mouse.move(*pt)
     return ActionResult(True, "moved mouse to " + _target_desc(args, obs),
                         needs_observe=False)
@@ -235,6 +272,13 @@ def _h_scroll(args, obs, cfg):
     # value overflows it the same way as bad coordinates.
     dy = int(_num(args, "dy", 3, -50, 50))
     dx = int(_num(args, "dx", 0, -50, 50))
+    try:
+        from ..desktop import is_shadow_enabled, get_virtual_input
+        if is_shadow_enabled():
+            get_virtual_input().scroll(dy, dx)
+            return ActionResult(True, f"scrolled dy={dy} (shadow workspace)")
+    except Exception:
+        pass
     return ActionResult(True, mouse.scroll(dy, dx))
 
 
@@ -258,6 +302,13 @@ def _h_type(args, obs, cfg):
     text = str(args.get("text", ""))
     if not text:
         return ActionResult(False, "type needs text")
+    try:
+        from ..desktop import is_shadow_enabled, get_virtual_input
+        if is_shadow_enabled():
+            get_virtual_input().type_text(text)
+            return ActionResult(True, f"typed '{text}' (shadow workspace)")
+    except Exception:
+        pass
     return ActionResult(True, keyboard.type_text(text))
 
 
@@ -265,7 +316,15 @@ def _h_press(args, obs, cfg):
     keys = str(args.get("keys", ""))
     if not keys:
         return ActionResult(False, "press needs keys")
+    try:
+        from ..desktop import is_shadow_enabled, get_virtual_input
+        if is_shadow_enabled():
+            get_virtual_input().press_key(keys)
+            return ActionResult(True, f"pressed key '{keys}' (shadow workspace)")
+    except Exception:
+        pass
     return ActionResult(True, keyboard.press(keys))
+
 
 
 def _h_key_sequence(args, obs, cfg):
@@ -389,6 +448,33 @@ def _h_python(args, obs, cfg):
                         needs_observe=False)
 
 
+def _h_session_exec(args, obs, cfg):
+    op = str(args.get("op", "exec")).strip()
+    command = str(args.get("command", ""))
+    name = str(args.get("name", "default"))
+    shell_type = str(args.get("shell_type", "powershell"))
+    try:
+        timeout = max(1, min(300, int(args.get("timeout", 30) or 30)))
+    except (TypeError, ValueError):
+        timeout = 30
+    cwd = str(args.get("cwd", "")).strip() or None
+    if cwd:
+        from .files import _expand
+        cwd = str(_expand(cwd))
+    msg = session_exec.session_exec(
+        op=op,
+        command=command,
+        name=name,
+        shell_type=shell_type,
+        timeout=timeout,
+        cwd=cwd,
+        blocked=cfg.safety.blocked_command_patterns,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (msg.startswith("refused:") or msg.startswith("unknown session_exec op") or msg.startswith("failed to write"))
+    return ActionResult(ok, msg, needs_observe=False)
+
+
 def _h_http_request(args, obs, cfg):
     url = str(args.get("url", ""))
     if not url.strip():
@@ -397,10 +483,47 @@ def _h_http_request(args, obs, cfg):
         True,
         system.http_request(
             str(args.get("method", "GET") or "GET"), url,
-            headers=args.get("headers"), params=args.get("params"),
+            headers=args.get("headers"),
+            params=args.get("params"),
             json_body=args.get("json_body"), data=args.get("data"),
             timeout=args.get("timeout", 30)),
         needs_observe=False)
+
+
+def _h_extract_web_data(args, obs, cfg):
+    url = str(args.get("url", "")).strip()
+    html_content = str(args.get("html_content", "")).strip()
+    mode = str(args.get("mode", "tables")).strip()
+    output_format = str(args.get("output_format", "json")).strip()
+    res = web_extractor.extract_web_data(
+        url=url,
+        html_content=html_content,
+        mode=mode,
+        output_format=output_format,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("failed to fetch") or res.startswith("unknown extract_web_data mode") or res.startswith("extract_web_data requires"))
+    return ActionResult(ok, res, needs_observe=False)
+
+
+def _h_media_intel(args, obs, cfg):
+    path = str(args.get("path", "")).strip()
+    op = str(args.get("op", "info")).strip()
+    target = str(args.get("target", "")).strip()
+    start_sec = float(args.get("start_sec", 0.0) or 0.0)
+    end_sec = float(args.get("end_sec", 0.0) or 0.0)
+    threshold_db = float(args.get("threshold_db", -40.0) or -40.0)
+    res = media_intel.media_intel(
+        op=op,
+        path=path,
+        target=target,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        threshold_db=threshold_db,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("file not found:") or res.startswith("unknown media_intel op") or res.startswith("invalid slice") or '"error":' in res)
+    return ActionResult(ok, res, needs_observe=False)
 
 
 def _h_download_file(args, obs, cfg):
@@ -640,6 +763,64 @@ def _h_agent_swarm(args, obs, cfg):
     return ActionResult(True, msg, needs_observe=False)
 
 
+def _h_code_intel(args, obs, cfg):
+    op = str(args.get("op", "symbols")).strip()
+    path = str(args.get("path", "."))
+    query = str(args.get("query", ""))
+    max_depth = int(args.get("max_depth", 3) or 3)
+    res = code_intel.code_intel(
+        op=op,
+        path=path,
+        query=query,
+        max_depth=max_depth,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("path not found:") or res.startswith("unknown code_intel op"))
+    return ActionResult(ok, res, needs_observe=False)
+
+
+def _h_db_query(args, obs, cfg):
+    path = str(args.get("path", "")).strip()
+    sql = str(args.get("sql", "")).strip()
+    op = str(args.get("op", "query")).strip()
+    params = args.get("params")
+    if not isinstance(params, list) and params is not None:
+        params = [params]
+    limit = int(args.get("limit", 100) or 100)
+    output_format = str(args.get("output_format", "table")).strip()
+    res = db_query.db_query(
+        path=path,
+        sql=sql,
+        op=op,
+        params=params,
+        limit=limit,
+        output_format=output_format,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("database file not found:") or res.startswith("database query error:") or res.startswith("unknown db_query op"))
+    return ActionResult(ok, res, needs_observe=False)
+
+
+def _h_git_intel(args, obs, cfg):
+    path = str(args.get("path", "."))
+    op = str(args.get("op", "status")).strip()
+    target = str(args.get("target", "")).strip()
+    message = str(args.get("message", "")).strip()
+    limit = int(args.get("limit", 10) or 10)
+    staged = bool(args.get("staged", False))
+    res = git_intel.git_intel(
+        op=op,
+        path=path,
+        target=target,
+        message=message,
+        limit=limit,
+        staged=staged,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("git error:") or res.startswith("path not found:") or res.startswith("unknown git_intel op"))
+    return ActionResult(ok, res, needs_observe=False)
+
+
 
 def _h_find_files(args, obs, cfg):
     return ActionResult(
@@ -666,6 +847,197 @@ def _h_delete_file(args, obs, cfg):
     msg = files.delete_path(str(args.get("path", "")),
                             allow=cfg.safety.allow_paths)
     return ActionResult(msg.startswith("sent to"), msg, needs_observe=False)
+
+
+def _h_convert_file(args, obs, cfg):
+    source = str(args.get("source", ""))
+    target = str(args.get("target", ""))
+    target_format = str(args.get("target_format", ""))
+    options = args.get("options")
+    if isinstance(options, str):
+        try:
+            import json
+            options = json.loads(options)
+        except Exception:
+            options = {}
+    elif not isinstance(options, dict):
+        options = {}
+    msg = converter.convert_file(
+        source=source,
+        target=target,
+        target_format=target_format,
+        options=options,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (msg.startswith("refused:") or msg.startswith("source file not found:") or msg.startswith("could not convert") or msg.startswith("unsupported"))
+    return ActionResult(ok, msg, needs_observe=False)
+
+
+def _h_archive_intel(args, obs, cfg):
+    path = str(args.get("path", "")).strip()
+    op = str(args.get("op", "list")).strip()
+    target = str(args.get("target", "")).strip()
+    archive_format = str(args.get("archive_format", "zip")).strip()
+    level = int(args.get("level", 6) or 6)
+    files_list = args.get("files")
+    if isinstance(files_list, str):
+        files_list = [f.strip() for f in files_list.split(",") if f.strip()]
+    elif not isinstance(files_list, list):
+        files_list = None
+
+    res = archive_intel.archive_intel(
+        op=op,
+        path=path,
+        target=target,
+        files=files_list,
+        archive_format=archive_format,
+        level=level,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("archive not found:") or res.startswith("unknown archive_intel op") or res.startswith("security violation:") or '"error":' in res or '"status": "CORRUPT"' in res)
+    return ActionResult(ok, res, needs_observe=False)
+
+
+def _h_data_validate(args, obs, cfg):
+    op = str(args.get("op", "validate")).strip()
+    data = args.get("data")
+    schema = args.get("schema")
+    target = args.get("target")
+    res = data_validate.data_validate(
+        op=op,
+        data=data,
+        schema=schema,
+        target=target,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("invalid JSON") or res.startswith("failed to read") or res.startswith("unknown data_validate op") or '"status": "INVALID"' in res)
+    return ActionResult(ok, res, needs_observe=False)
+
+
+def _h_crypto_intel(args, obs, cfg):
+    op = str(args.get("op", "hash")).strip()
+    target = str(args.get("target", "")).strip()
+    algo = str(args.get("algo", "sha256")).strip()
+    key = str(args.get("key", "")).strip()
+    expected = str(args.get("expected", "")).strip()
+    length = int(args.get("length", 32) or 32)
+    salt = str(args.get("salt", "")).strip()
+    iterations = int(args.get("iterations", 100000) or 100000)
+    res = crypto_intel.crypto_intel(
+        op=op,
+        target=target,
+        algo=algo,
+        key=key,
+        expected=expected,
+        length=length,
+        salt=salt,
+        iterations=iterations,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("crypto_intel") or res.startswith("unknown crypto_intel op") or '"verified": false' in res)
+    return ActionResult(ok, res, needs_observe=False)
+
+
+def _h_diff_patch(args, obs, cfg):
+    op = str(args.get("op", "diff")).strip()
+    source = str(args.get("source", "")).strip()
+    target = str(args.get("target", "")).strip()
+    patch_text = str(args.get("patch_text", "")).strip()
+    dry_run = bool(args.get("dry_run", False))
+    res = diff_patch.diff_patch(
+        op=op,
+        source=source,
+        target=target,
+        patch_text=patch_text,
+        dry_run=dry_run,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("target file not found:") or res.startswith("patch requires") or res.startswith("unknown diff_patch op"))
+    return ActionResult(ok, res, needs_observe=False)
+
+
+def _h_process_intel(args, obs, cfg):
+    op = str(args.get("op", "list")).strip()
+    pid = args.get("pid")
+    try:
+        pid = int(pid) if pid is not None and str(pid).strip() else None
+    except (ValueError, TypeError):
+        pid = None
+    name = str(args.get("name", "")).strip()
+    sort_by = str(args.get("sort_by", "memory")).strip()
+    limit = int(args.get("limit", 20) or 20)
+    force = bool(args.get("force", False))
+    res = process_intel.process_intel(
+        op=op,
+        pid=pid,
+        name=name,
+        sort_by=sort_by,
+        limit=limit,
+        force=force,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("refused:") or res.startswith("Failed to list") or res.startswith("unknown process_intel op") or '"error":' in res)
+    return ActionResult(ok, res, needs_observe=False)
+
+
+def _h_regex_intel(args, obs, cfg):
+    op = str(args.get("op", "extract")).strip()
+    pattern = str(args.get("pattern", "")).strip()
+    text = str(args.get("text", "")).strip()
+    replacement = str(args.get("replacement", ""))
+    preset = str(args.get("preset", "all")).strip()
+    flags = str(args.get("flags", "")).strip()
+    res = regex_intel.regex_intel(
+        op=op,
+        pattern=pattern,
+        text=text,
+        replacement=replacement,
+        preset=preset,
+        flags=flags,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("regex_intel op") or res.startswith("unknown regex_intel op") or '"error":' in res)
+    return ActionResult(ok, res, needs_observe=False)
+
+
+def _h_api_mock(args, obs, cfg):
+    op = str(args.get("op", "start")).strip()
+    port = int(args.get("port", 8999) or 8999)
+    path = str(args.get("path", "/")).strip()
+    method = str(args.get("method", "GET")).strip()
+    status = int(args.get("status", 200) or 200)
+    body = args.get("body", "")
+    delay = float(args.get("delay", 0.0) or 0.0)
+    res = api_mock.api_mock(
+        op=op,
+        port=port,
+        path=path,
+        method=method,
+        status=status,
+        body=body,
+        delay=delay,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("unknown api_mock op") or '"status": "server_not_running"' in res or '"error":' in res)
+    return ActionResult(ok, res, needs_observe=False)
+
+
+def _h_cron_intel(args, obs, cfg):
+    op = str(args.get("op", "explain")).strip()
+    expr = str(args.get("expr", "* * * * *")).strip()
+    count = int(args.get("count", 5) or 5)
+    timezone_name = str(args.get("timezone_name", "UTC")).strip()
+    base_time = str(args.get("base_time", "")).strip()
+    res = cron_intel.cron_intel(
+        op=op,
+        expr=expr,
+        count=count,
+        timezone_name=timezone_name,
+        base_time=base_time,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("unknown cron_intel op") or '"valid": false' in res or '"error":' in res)
+    return ActionResult(ok, res, needs_observe=False)
 
 
 def _h_list_dir(args, obs, cfg):
@@ -790,6 +1162,34 @@ def _h_take_screenshot(args, obs, cfg):
     except Exception as exc:
         return ActionResult(False, f"could not save screenshot: {exc}",
                             needs_observe=False)
+
+
+def _h_system_diagnostics(args, obs, cfg):
+    op = str(args.get("op", "health")).strip()
+    auto_fix = bool(args.get("auto_fix", False))
+    res = diagnostics.system_diagnostics(
+        op=op,
+        auto_fix=auto_fix,
+        cfg=cfg,
+        allow=cfg.safety.allow_paths,
+    )
+    return ActionResult(True, res, needs_observe=False)
+
+
+def _h_net_intel(args, obs, cfg):
+    op = str(args.get("op", "port_check")).strip()
+    host = str(args.get("host", "127.0.0.1")).strip()
+    port = int(args.get("port", 80) or 80)
+    timeout = int(args.get("timeout", 3) or 3)
+    res = net_intel.net_intel(
+        op=op,
+        host=host,
+        port=port,
+        timeout=timeout,
+        allow=cfg.safety.allow_paths,
+    )
+    ok = not (res.startswith("failed to query") or res.startswith("unknown net_intel op") or '"status": "ERROR"' in res or '"status": "INVALID"' in res)
+    return ActionResult(ok, res, needs_observe=False)
 
 
 def _h_clipboard_read(args, obs, cfg):
@@ -1300,6 +1700,51 @@ def _h_hud_control(args, obs, cfg):
     return ActionResult(False, f"Unknown hud_control action '{action}'. Supported: show, hide, toggle, set_state, status.", needs_observe=False)
 
 
+def _h_synthesize_tool(args, obs, cfg):
+    name = str(args.get("name", "")).strip()
+    description = str(args.get("description", "")).strip()
+    code = str(args.get("code", "")).strip()
+    parameters = args.get("parameters")
+    tags = args.get("tags")
+    test_args = args.get("test_args")
+    mgr = tool_synthesis.get_tool_manager()
+    ok, msg = mgr.synthesize(
+        name=name,
+        description=description,
+        code=code,
+        parameters=parameters,
+        tags=tags,
+        test_args=test_args,
+    )
+    return ActionResult(ok, msg, needs_observe=False)
+
+
+def _h_execute_synthesized_tool(args, obs, cfg):
+    name = str(args.get("name", "")).strip()
+    tool_args = args.get("args") or {}
+    timeout = args.get("timeout", 60)
+    cwd = args.get("cwd")
+    mgr = tool_synthesis.get_tool_manager()
+    ok, msg = mgr.execute(name=name, args=tool_args, timeout=timeout, cwd=cwd)
+    return ActionResult(ok, msg, needs_observe=False)
+
+
+def _h_list_synthesized_tools(args, obs, cfg):
+    query = args.get("query")
+    mgr = tool_synthesis.get_tool_manager()
+    tools = mgr.list_tools(filter_query=query)
+    if not tools:
+        return ActionResult(True, "No synthesized tools found.", needs_observe=False)
+    lines = [f"Found {len(tools)} synthesized tool(s):"]
+    for t in tools:
+        lines.append(f"- Tool: '{t['name']}' (used {t['usage_count']}x): {t['description']}")
+        if t.get("parameters"):
+            import json as _json
+            lines.append(f"  Parameters: {_json.dumps(t['parameters'])}")
+        lines.append(f"  Path: {t['file_path']}")
+    return ActionResult(True, "\n".join(lines), needs_observe=False)
+
+
 def _h_ask(args, obs, cfg):
     q = str(args.get("question", "Could you clarify?"))
     return ActionResult(True, q, needs_observe=False, finished=True, ask=q)
@@ -1328,6 +1773,10 @@ _HANDLERS = {
     "browser_action": _h_browser_action,
     "http_request": _h_http_request,
     "python": _h_python,
+    "synthesize_tool": _h_synthesize_tool,
+    "execute_synthesized_tool": _h_execute_synthesized_tool,
+    "list_synthesized_tools": _h_list_synthesized_tools,
+    "session_exec": _h_session_exec,
     "download_file": _h_download_file,
     "wait_for": _h_wait_for,
     "run_command": _h_run_command,
@@ -1335,7 +1784,12 @@ _HANDLERS = {
     "media": _h_media,
     "notify": _h_notify,
     "take_screenshot": _h_take_screenshot,
+    "system_diagnostics": _h_system_diagnostics,
+    "net_intel": _h_net_intel,
+    "process_intel": _h_process_intel,
+    "media_intel": _h_media_intel,
     "web_search": _h_web_search,
+    "extract_web_data": _h_extract_web_data,
     "schedule_task": _h_schedule_task,
     "read_file": _h_read_file,
     "read_document": _h_read_document,
@@ -1345,6 +1799,9 @@ _HANDLERS = {
     "agent": _h_agent,
     "agent_swarm": _h_agent_swarm,
     "code_task": _h_code_task,
+    "code_intel": _h_code_intel,
+    "db_query": _h_db_query,
+    "git_intel": _h_git_intel,
     "self_upgrade": _h_self_upgrade,
     "self_heal": _h_self_heal,
     "daemon_rule": _h_daemon_rule,
@@ -1355,6 +1812,14 @@ _HANDLERS = {
     "copy_file": _h_copy_file,
     "move_file": _h_move_file,
     "delete_file": _h_delete_file,
+    "convert_file": _h_convert_file,
+    "archive_intel": _h_archive_intel,
+    "data_validate": _h_data_validate,
+    "crypto_intel": _h_crypto_intel,
+    "diff_patch": _h_diff_patch,
+    "regex_intel": _h_regex_intel,
+    "api_mock": _h_api_mock,
+    "cron_intel": _h_cron_intel,
     "clipboard_read": _h_clipboard_read,
     "clipboard_write": _h_clipboard_write,
     "remember": _h_remember,

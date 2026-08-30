@@ -222,6 +222,47 @@ class ProactiveDaemonEngineTests(unittest.TestCase):
         self.assertEqual(len(fired), 1)
         self.assertEqual(fired[0].id, "task_rule")
 
+    def test_03_proactive_logging_formatting(self):
+        import io
+        import sys
+        from jarvis.utils import logging as log
+
+        buf = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = buf
+        try:
+            log.proactive(
+                rule_name="Morning Routine Briefing",
+                message="Good morning, sir. System is online. Ready for your morning briefing.",
+                title="Morning Briefing",
+                event_type="morning_routine",
+            )
+        finally:
+            sys.stdout = old_stdout
+
+        output = buf.getvalue()
+        self.assertIn("PROACTIVE EVENT", output)
+        self.assertIn("Morning Routine Briefing", output)
+        self.assertIn("Good morning, sir.", output)
+
+    def test_04_browser_event_no_leak_when_unbridged(self):
+        import io
+        import sys
+        from jarvis import browser_worker
+
+        buf = io.StringIO()
+        old_stderr = sys.stderr
+        sys.stderr = buf
+        try:
+            # Ensure unbridged
+            browser_worker._bridge_installed = False
+            browser_worker.emit("proactive_alert", title="Test Alert", message="No leak")
+        finally:
+            sys.stderr = old_stderr
+
+        output = buf.getvalue()
+        self.assertEqual(output, "", "emit() must not leak to stderr in CLI mode")
+
 
 class DaemonToolActionTests(unittest.TestCase):
     def setUp(self):

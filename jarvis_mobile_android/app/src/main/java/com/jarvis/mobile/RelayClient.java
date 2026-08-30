@@ -1,6 +1,7 @@
 package com.jarvis.mobile;
 
 import android.net.Uri;
+import android.util.Base64;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -51,7 +52,27 @@ final class RelayClient {
         String pairId = response.getString("pair_id");
         byte[] secret = Protocol.deriveSecret(identity.kxPrivate, controller.getString("kx_public"), pairId);
         return new PairingRecord(endpoint, pairId, phoneName, controller.getString("name"), Protocol.b64(secret),
-                identity.signPrivate, controller.getString("sign_public"), false, 0);
+                identity.signPrivate, controller.getString("sign_public"),
+                response.optString("mobile_assistant_token", ""), false, 0);
+    }
+
+    /** Calls the cloud-hosted Mobile Jarvis gateway; it never contacts the paired computer. */
+    AssistantReply askMobileAssistant(PairingRecord pairing, String prompt, JSONArray history) throws Exception {
+        if (pairing.mobileAssistantToken.isBlank()) {
+            throw new IllegalStateException("This pairing predates Mobile Jarvis. Pair this phone again to enable it.");
+        }
+        JSONObject body = new JSONObject().put("prompt", prompt);
+        if (history != null) body.put("history", history);
+        JSONObject response = request("POST", "/v1/mobile-assistant", body, 50,
+                "Bearer " + pairing.mobileAssistantToken);
+        String audio = response.optString("audio", "");
+        return new AssistantReply(
+                response.optString("reply", ""),
+                response.optString("command", ""),
+                audio.isBlank() ? new byte[0] : Base64.decode(audio, Base64.DEFAULT),
+                response.optInt("audio_sample_rate", 24_000),
+                response.optString("audio_mime_type", "audio/L16;rate=24000"),
+                response.optBoolean("tts_available", true));
     }
 
     void send(PairingRecord pairing, JSONObject payload) throws Exception {
@@ -93,11 +114,19 @@ final class RelayClient {
     }
 
     private JSONObject request(String method, String path, JSONObject body, int timeoutSeconds) throws Exception {
+        return request(method, path, body, timeoutSeconds, "");
+    }
+
+    private JSONObject request(String method, String path, JSONObject body, int timeoutSeconds,
+                               String authorization) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(endpoint + path).openConnection();
         connection.setRequestMethod(method);
         connection.setConnectTimeout(8_000);
         connection.setReadTimeout(Math.max(10_000, timeoutSeconds * 1_000));
         connection.setRequestProperty("Accept", "application/json");
+        if (authorization != null && !authorization.isBlank()) {
+            connection.setRequestProperty("Authorization", authorization);
+        }
         if (body != null) {
             connection.setDoOutput(true);
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
@@ -116,6 +145,25 @@ final class RelayClient {
             throw new IllegalStateException("Relay returned " + status + ": " + detail);
         }
         return new JSONObject(response);
+    }
+
+    static final class AssistantReply {
+        final String reply;
+        final String command;
+        final byte[] pcmAudio;
+        final int sampleRate;
+        final String mimeType;
+        final boolean ttsAvailable;
+
+        AssistantReply(String reply, String command, byte[] pcmAudio, int sampleRate,
+                       String mimeType, boolean ttsAvailable) {
+            this.reply = reply == null ? "" : reply;
+            this.command = command == null ? "" : command;
+            this.pcmAudio = pcmAudio == null ? new byte[0] : pcmAudio;
+            this.sampleRate = Math.max(8_000, Math.min(48_000, sampleRate));
+            this.mimeType = mimeType == null ? "" : mimeType;
+            this.ttsAvailable = ttsAvailable;
+        }
     }
 
     private static String read(InputStream stream) throws Exception {

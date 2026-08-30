@@ -52,6 +52,7 @@ def run_command(command: str, blocked: tuple[str, ...] = (),
     try:
         proc = subprocess.run(
             command, shell=True, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
             timeout=timeout, cwd=cwd or None, stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
@@ -86,9 +87,12 @@ def run_python(code: str, timeout: int = 60, cwd: str | None = None) -> str:
     except (TypeError, ValueError):
         timeout = 60
     import sys
+    sub_env = dict(os.environ)
+    sub_env["PYTHONIOENCODING"] = "utf-8"
     try:
         proc = subprocess.run(
             [sys.executable, "-c", code], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=sub_env,
             timeout=timeout, cwd=cwd or None, stdin=subprocess.DEVNULL,
         )
 
@@ -152,8 +156,20 @@ def http_request(method: str, url: str, headers=None, params=None,
 def open_url(url: str) -> str:
     if not url.startswith(("http://", "https://", "file://")):
         url = "https://" + url
+
+    try:
+        from ..desktop import is_shadow_enabled, get_shadow_manager
+        if is_shadow_enabled():
+            mgr = get_shadow_manager()
+            mgr.spawn_url(url)
+            return f"opened {url} in Shadow Workspace"
+
+    except Exception:
+        pass
+
     webbrowser.open(url)
     return f"opened {url}"
+
 
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

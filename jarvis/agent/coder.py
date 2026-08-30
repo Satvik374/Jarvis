@@ -24,7 +24,8 @@ from .subagent import run_loop
 ALLOWED = frozenset({
     "read_file", "read_document", "write_file", "write_files", "edit_file",
     "make_dir", "list_dir", "find_files", "copy_file", "move_file",
-    "delete_file", "run_command", "python", "read_url", "open_url",
+    "delete_file", "convert_file", "api_mock", "archive_intel", "code_intel", "cron_intel", "crypto_intel", "data_validate", "db_query", "diff_patch", "git_intel", "media_intel", "net_intel", "process_intel", "regex_intel", "session_exec", "system_diagnostics",
+    "extract_web_data", "run_command", "python", "read_url", "open_url",
     "http_request", "download_file", "wait", "finish", "ask",
 })
 

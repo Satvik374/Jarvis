@@ -30,6 +30,26 @@ voice:
   silence_after: 0.6
 
 # Voice is opt-in. Use --voice, JARVIS_VOICE=1, or :voice on.
+
+# Real-Time Gemini Flash Live Voice Model (full-duplex bidirectional streaming
+# via Gemini API key / Google Generative Language Live WebSocket).
+# The live voice model converses with the user, prompts the text-based Jarvis AI
+# to do work, and monitors mid-task progress to narrate what has been done and
+# what will be done next.
+live_voice:
+  enabled: false
+  model: models/gemini-2.5-flash-native-audio-latest   # models/gemini-2.5-flash-native-audio-latest
+  voice_name: Aoede                      # Aoede, Puck, Charon, Kore, Fenrir
+  location: us-central1
+  backend: api_key                       # api_key | gcloud
+  # Read from JARVIS_LIVE_API_KEY, GEMINI_API_KEY, or Windows Credential Vault.
+  # Keep credentials out of this shared project file.
+  api_key: ""
+  narrate_steps: true                    # proactive mid-task voice narration
+  narration_verbosity: normal            # brief | normal | detailed
+
+# Voice mode (Gemini TTS + Gemini STT). Toggle live with ':voice on|off'
+# or launch with --voice.
 voice_enabled: false
 
 safety:

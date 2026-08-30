@@ -1466,6 +1466,10 @@
         updateSessionTitleInUI(payload.id, payload.title);
         toast(`Session title: ${payload.title}`);
         break;
+      case "proactive_alert":
+        addActivity("proactive", `[${payload.title || payload.rule_name || 'Alert'}] ${payload.message}`, payload.timestamp);
+        toast(`⏰ ${payload.title || 'Proactive Alert'}: ${payload.message}`, "info");
+        break;
       default:
         break;
     }

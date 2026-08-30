@@ -185,23 +185,39 @@ def delete_path(path: str, allow: tuple[str, ...] = ()) -> str:
     if not _within(p, allow):
         return (f"refused: {p} is outside allowed locations "
                 f"(home dir + configured allow_paths)")
-    ps = ("Add-Type -AssemblyName Microsoft.VisualBasic;"
-          "$p = $env:JARVIS_DEL_PATH;"
-          "if (Test-Path -LiteralPath $p -PathType Container) {"
-          "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory("
-          "$p,'OnlyErrorDialogs','SendToRecycleBin')"
-          "} else {"
-          "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
-          "$p,'OnlyErrorDialogs','SendToRecycleBin')}")
+
+    # Try send2trash if installed
     try:
-        proc = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-            env=dict(os.environ, JARVIS_DEL_PATH=str(p)),
-            capture_output=True, text=True, timeout=30)
-    except Exception as exc:
-        return f"could not delete: {exc}"
-    if proc.returncode != 0 or p.exists():
-        return f"delete failed: {(proc.stderr or '').strip()[:200]}"
+        import send2trash  # type: ignore
+        send2trash.send2trash(str(p))
+        return f"sent to Recycle Bin: {p}"
+    except Exception:
+        pass
+
+    if os.name == "nt":
+        ps = ("Add-Type -AssemblyName Microsoft.VisualBasic;"
+              "$p = $env:JARVIS_DEL_PATH;"
+              "if (Test-Path -LiteralPath $p -PathType Container) {"
+              "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory("
+              "$p,'OnlyErrorDialogs','SendToRecycleBin')"
+              "} else {"
+              "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
+              "$p,'OnlyErrorDialogs','SendToRecycleBin')}")
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                env=dict(os.environ, JARVIS_DEL_PATH=str(p)),
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=30)
+            if proc.returncode == 0 and not p.exists():
+                return f"sent to Recycle Bin: {p}"
+            if proc.stderr:
+                return f"delete failed: {(proc.stderr or '').strip()[:200]}"
+        except Exception as exc:
+            return f"could not delete: {exc}"
+
+    if p.exists():
+        return f"delete failed: could not recycle {p}"
     return f"sent to Recycle Bin: {p}"
 
 

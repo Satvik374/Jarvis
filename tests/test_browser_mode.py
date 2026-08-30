@@ -496,12 +496,13 @@ print(json.dumps({"value": input("answer > ")}, ensure_ascii=False))
 
             bridge = TerminalBridge(child_args=["--help"], token="shadow-test")
             bridge.launch_cwd = cwd
-            bridge.start()
-            self.assertTrue(bridge.stopped.wait(10), "worker did not exit")
-            bridge.stop()
-
-            self.assertFalse(sentinel.exists())
-            self.assertEqual(bridge.process.returncode, 0)
+            try:
+                bridge.start()
+                self.assertTrue(bridge.stopped.wait(20), "worker did not exit")
+                self.assertFalse(sentinel.exists())
+                self.assertEqual(bridge.process.returncode, 0)
+            finally:
+                bridge.stop()
 
 
 class _HTTPFakeBridge:

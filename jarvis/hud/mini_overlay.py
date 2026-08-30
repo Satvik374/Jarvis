@@ -477,7 +477,12 @@ class FloatingMiniHUD:
         self._msg_queue.put(("macro", recording))
 
     def _tick_loop(self) -> None:
-        if not self._root:
+        if not self._root or not self._running:
+            return
+        try:
+            if not self._root.winfo_exists():
+                return
+        except Exception:
             return
 
         # 1. Process queued messages
@@ -495,16 +500,16 @@ class FloatingMiniHUD:
                         self.detail_text = f"State: {st.capitalize()}"
 
                     color = STATE_COLORS.get(self.state, "#00f0ff")
-                    if self._state_lbl:
+                    if self._state_lbl and getattr(self._state_lbl, "winfo_exists", lambda: False)():
                         self._state_lbl.config(text=self.state.upper(), fg=color)
-                    if self._detail_lbl:
+                    if self._detail_lbl and getattr(self._detail_lbl, "winfo_exists", lambda: False)():
                         self._detail_lbl.config(text=self.detail_text)
-                    if self._outer_frame:
+                    if self._outer_frame and getattr(self._outer_frame, "winfo_exists", lambda: False)():
                         self._outer_frame.config(highlightbackground=color, highlightcolor=color)
 
                 elif item[0] == "response":
                     _, prompt, reply = item
-                    if hasattr(self, "_response_text") and self._response_text:
+                    if hasattr(self, "_response_text") and self._response_text and getattr(self._response_text, "winfo_exists", lambda: False)():
                         self._response_text.config(state=tk.NORMAL)
                         self._response_text.delete("1.0", tk.END)
                         self._response_text.insert(tk.END, f"▸ YOU: {prompt}\n\n✦ JARVIS: {reply}")
@@ -517,7 +522,7 @@ class FloatingMiniHUD:
                         self.show()
                     if not self.is_expanded:
                         self.toggle_expand()
-                    if hasattr(self, "_entry") and self._entry:
+                    if hasattr(self, "_entry") and self._entry and getattr(self._entry, "winfo_exists", lambda: False)():
                         self._entry.delete(0, tk.END)
                         self._entry.insert(0, text)
                         self._entry.focus_set()
@@ -525,58 +530,75 @@ class FloatingMiniHUD:
 
                 elif item[0] == "voice":
                     self.is_voice_active = item[1]
-                    if self._btn_voice:
+                    if self._btn_voice and getattr(self._btn_voice, "winfo_exists", lambda: False)():
                         self._btn_voice.config(bg="#00ffdd" if self.is_voice_active else "#071828",
                                                fg="#010610" if self.is_voice_active else "#00f0ff")
 
                 elif item[0] == "macro":
                     self.is_macro_recording = item[1]
-                    if self._btn_macro:
+                    if self._btn_macro and getattr(self._btn_macro, "winfo_exists", lambda: False)():
                         self._btn_macro.config(bg="#ff4e45" if self.is_macro_recording else "#071828",
                                                fg="#ffffff" if self.is_macro_recording else "#00f0ff")
             except Exception:
                 break
 
         # 2. Render Reactor Core Canvas
-        self._render_reactor()
+        try:
+            self._render_reactor()
+        except Exception:
+            pass
 
         # 3. Schedule next frame (30 FPS)
-        if self._root:
-            self._root.after(33, self._tick_loop)
+        if self._root and self._running:
+            try:
+                self._root.after(33, self._tick_loop)
+            except Exception:
+                pass
 
     def _render_reactor(self) -> None:
-        if not self._canvas:
+        if not self._canvas or not self._running:
             return
 
-        self._canvas.delete("all")
-        color = STATE_COLORS.get(self.state, "#00f0ff")
-        self._pulse_phase += 0.12
+        try:
+            if not self._canvas.winfo_exists():
+                return
+            self._canvas.delete("all")
+            color = STATE_COLORS.get(self.state, "#00f0ff")
+            self._pulse_phase += 0.12
 
-        cx, cy = 24, 24
-        pulse = math.sin(self._pulse_phase) * 1.5
+            cx, cy = 24, 24
+            pulse = math.sin(self._pulse_phase) * 1.5
 
-        # Outer arc ring
-        r1 = 18 + pulse
-        self._canvas.create_oval(cx - r1, cy - r1, cx + r1, cy + r1, outline=color, width=1.5)
+            # Outer arc ring
+            r1 = 18 + pulse
+            self._canvas.create_oval(cx - r1, cy - r1, cx + r1, cy + r1, outline=color, width=1.5)
 
-        # Rotating dash arcs
-        angle = (self._pulse_phase * 40) % 360
-        r_arc = max(4, r1 - 3)
-        self._canvas.create_arc(cx - r_arc, cy - r_arc, cx + r_arc, cy + r_arc,
-                                start=angle, extent=65, outline="#ffffff", width=1.5, style="arc")
-        self._canvas.create_arc(cx - r_arc, cy - r_arc, cx + r_arc, cy + r_arc,
-                                start=angle + 180, extent=65, outline="#ffffff", width=1.5, style="arc")
+            # Rotating dash arcs
+            angle = (self._pulse_phase * 40) % 360
+            r_arc = max(4, r1 - 3)
+            self._canvas.create_arc(cx - r_arc, cy - r_arc, cx + r_arc, cy + r_arc,
+                                    start=angle, extent=65, outline="#ffffff", width=1.5, style="arc")
+            self._canvas.create_arc(cx - r_arc, cy - r_arc, cx + r_arc, cy + r_arc,
+                                    start=angle + 180, extent=65, outline="#ffffff", width=1.5, style="arc")
 
-        # Inner pulsing core dot
-        r2 = 5 + math.sin(self._pulse_phase * 1.5) * 1.0
-        self._canvas.create_oval(cx - r2, cy - r2, cx + r2, cy + r2, fill=color, outline="")
+            # Inner pulsing core dot
+            r2 = 5 + math.sin(self._pulse_phase * 1.5) * 1.0
+            self._canvas.create_oval(cx - r2, cy - r2, cx + r2, cy + r2, fill=color, outline="")
+        except Exception:
+            pass
 
     def stop(self) -> None:
         self._running = False
         self._visible = False
-        if self._root:
+        root = self._root
+        self._root = None
+        self._canvas = None
+        self._entry = None
+        self._state_lbl = None
+        self._detail_lbl = None
+        self._outer_frame = None
+        if root:
             try:
-                self._root.destroy()
+                root.destroy()
             except Exception:
                 pass
-            self._root = None

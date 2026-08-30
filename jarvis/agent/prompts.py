@@ -206,6 +206,13 @@ Rules:
      list/tools). Any enabled server's tools are listed under MCP TOOLS above -
      call one with mcp_call. Prefer a built-in action when one already fits;
      reach for an MCP tool for capabilities you otherwise lack.
+  15. DYNAMIC TOOL SYNTHESIS & REUSE: When facing complex computational tasks,
+     custom format conversions, bulk file manipulation, or repetitive scripts,
+     use synthesize_tool to write, test, and register a Python tool. It is saved
+     permanently under tools_synthesized/ and indexed in long-term memory.
+     For subsequent tasks, check REMEMBERED SYNTHESIZED TOOLS and execute them
+     directly with execute_synthesized_tool(name="...", args={...}) instead of
+     rewriting code or manually clicking!
   13. PERSISTENT MEMORY: You have permanent memory stored in "memory.txt".
      - Its current contents are automatically shown above in the system prompt.
      - To store any fact, user preference, instruction, or rule FOREVER across sessions, call remember(fact="...", category="...").

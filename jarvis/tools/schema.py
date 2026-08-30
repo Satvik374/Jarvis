@@ -274,6 +274,63 @@ ACTIONS: tuple[Action, ...] = (
                   {"code": "print(sum(1 for _ in open(r'C:/data/log.txt')))"}),
     ),
     Action(
+        "synthesize_tool", "Synthesize, validate, test, and permanently register a new reusable Python tool or script. "
+        "The tool is saved to disk under tools_synthesized/<name>.py, indexed into persistent Long-Term Memory / Knowledge Graph, "
+        "and immediately made available for execution via execute_synthesized_tool across all future sessions.",
+        (Param("name", "str", "Unique snake_case identifier name for the tool, e.g. 'batch_image_resizer', 'csv_cleaner'."),
+         Param("description", "str", "Clear description of the task, inputs, and what the tool accomplishes."),
+         Param("code", "str", "Complete, self-contained Python script implementing the tool. Can define a run(**kwargs) function or main()."),
+         Param("parameters", "dict", "Optional dictionary describing expected parameters, e.g. {'folder': {'type': 'str', 'description': 'path to folder'}}.", required=False),
+         Param("tags", "list", "Optional list of searchable keywords/tags.", required=False),
+         Param("test_args", "dict", "Optional sample arguments to execute a test run and verify functionality before saving.", required=False)),
+        category="coding",
+        examples=({
+            "name": "csv_to_markdown_table",
+            "description": "Convert any CSV file into a cleanly formatted Markdown table.",
+            "code": "import csv, io\ndef run(csv_path):\n    with open(csv_path, 'r', encoding='utf-8') as f:\n        rows = list(csv.reader(f))\n    if not rows: return ''\n    headers = rows[0]\n    lines = ['| ' + ' | '.join(headers) + ' |', '| ' + ' | '.join(['---'] * len(headers)) + ' |']\n    for r in rows[1:]:\n        lines.append('| ' + ' | '.join(r) + ' |')\n    return '\\n'.join(lines)\n",
+            "parameters": {"csv_path": {"type": "str", "description": "Path to CSV file"}},
+            "tags": ["csv", "markdown", "table", "converter"]
+        },),
+    ),
+    Action(
+        "execute_synthesized_tool", "Execute a previously synthesized and remembered Python tool or script by name. "
+        "Runs in a sandboxed subprocess with parameters passed as JSON, capturing stdout, stderr, and return values.",
+        (Param("name", "str", "Name of the synthesized tool to execute."),
+         Param("args", "dict", "Dictionary of arguments to pass to the tool.", required=False),
+         Param("timeout", "int", "Max seconds to run (default 60).", required=False, default=60),
+         Param("cwd", "str", "Optional working directory.", required=False)),
+        category="coding",
+        examples=({
+            "name": "csv_to_markdown_table",
+            "args": {"csv_path": "data.csv"}
+        },),
+    ),
+    Action(
+        "list_synthesized_tools", "List, search, and inspect all dynamic tools and scripts that Jarvis has synthesized and remembered. "
+        "Allows looking up available custom tools, their parameters, and file locations.",
+        (Param("query", "str", "Optional search keyword or task description to find matching tools.", required=False),),
+        category="coding",
+        examples=({"query": "csv"}, {"query": "image resize"}),
+    ),
+    Action(
+        "session_exec", "Execute commands in a persistent stateful interactive session "
+        "(PowerShell, CMD, Bash, Python). Unlike run_command, variables, virtual environments, "
+        "directory changes, and REPL state persist across turns. "
+        "Operations: 'exec' (run command in named session), 'start' (launch named session), "
+        "'list' (show active sessions), 'close' (terminate session).",
+        (Param("command", "str", "Command or expression to run (for op='exec').", required=False),
+         Param("op", "str", "Operation: 'exec', 'start', 'list', or 'close' (default 'exec').", required=False, default="exec"),
+         Param("name", "str", "Session identifier name, e.g. 'dev', 'build', 'py' (default 'default').", required=False, default="default"),
+         Param("shell_type", "str", "Shell type for start: 'powershell', 'cmd', 'bash', 'python' (default 'powershell').", required=False, default="powershell"),
+         Param("timeout", "int", "Max seconds to wait for command output (default 30).", required=False, default=30)),
+        category="system",
+        examples=({"command": "$x = 42", "op": "exec"},
+                  {"command": "Write-Output $x", "op": "exec"},
+                  {"op": "start", "name": "py", "shell_type": "python"},
+                  {"op": "list"},
+                  {"op": "close", "name": "dev"}),
+    ),
+    Action(
         "agent", "Delegate a self-contained sub-task to a specialist "
         "sub-agent (see the SUB-AGENTS list in the system prompt). It works "
         "in its own isolated context with its own tools and returns only its "
@@ -323,6 +380,55 @@ ACTIONS: tuple[Action, ...] = (
                   {"description": "Create a playable Snake game in HTML5 "
                    "canvas with score and restart",
                    "workdir": "~/JarvisProjects/snake"}),
+    ),
+    Action(
+        "code_intel", "Analyze codebases using AST parsing, symbol extraction, "
+        "cross-project symbol search, dependency mapping, or architectural tree summaries. "
+        "Operations: 'symbols' (classes/functions/methods/types/docstrings in a file/folder), "
+        "'search' (search for symbol definitions across codebase), 'dependencies' (third-party and internal imports), "
+        "'summary' (structural tree overview with symbol counts).",
+        (Param("op", "str", "Operation: 'symbols', 'search', 'dependencies', or 'summary' (default 'symbols').", required=False, default="symbols"),
+         Param("path", "str", "File or folder path to analyze (default: current directory).", required=False, default="."),
+         Param("query", "str", "Symbol name to search for (used with op='search').", required=False),
+         Param("max_depth", "int", "Maximum folder depth for summary tree (default 3).", required=False, default=3)),
+        category="coding",
+        examples=({"op": "symbols", "path": "jarvis/agent/loop.py"},
+                  {"op": "search", "query": "Brain", "path": "jarvis"},
+                  {"op": "dependencies", "path": "."},
+                  {"op": "summary", "path": "jarvis"}),
+    ),
+    Action(
+        "db_query", "Inspect database schema, list tables, analyze query plans, "
+        "and execute SQL statements (SQLite, and relational databases). "
+        "Operations: 'query' (run SQL and format output as table/json/csv), "
+        "'schema' (introspect tables, columns, types, foreign keys, indexes), "
+        "'tables' (list all tables with row counts), 'explain' (explain query execution plan).",
+        (Param("sql", "str", "SQL query or DDL statement to execute.", required=False),
+         Param("path", "str", "Database file path or connection string (default: Jarvis memory database).", required=False, default=""),
+         Param("op", "str", "Operation: 'query', 'schema', 'tables', or 'explain' (default 'query').", required=False, default="query"),
+         Param("limit", "int", "Maximum rows to return for SELECT queries (default 100).", required=False, default=100),
+         Param("output_format", "str", "Result format: 'table', 'json', or 'csv' (default 'table').", required=False, default="table")),
+        category="coding",
+        examples=({"op": "schema", "path": "data/app.db"},
+                  {"sql": "SELECT * FROM users WHERE active = 1", "path": "app.db", "output_format": "json"},
+                  {"op": "tables", "path": "app.db"},
+                  {"sql": "EXPLAIN QUERY PLAN SELECT * FROM logs", "op": "explain", "path": "app.db"}),
+    ),
+    Action(
+        "git_intel", "Inspect and operate on Git repositories. "
+        "Operations: 'status' (enumerate branch, staged, unstaged, untracked files), "
+        "'log' (structured commit history), 'diff' (unified diff of staged/unstaged changes), "
+        "'branches' (list local and remote branches), 'commit' (stage files and create commit).",
+        (Param("op", "str", "Operation: 'status', 'log', 'diff', 'branches', or 'commit' (default 'status').", required=False, default="status"),
+         Param("path", "str", "Repository path (default: current directory).", required=False, default="."),
+         Param("message", "str", "Commit message for op='commit'.", required=False),
+         Param("limit", "int", "Maximum number of commits for op='log' (default 10).", required=False, default=10),
+         Param("staged", "bool", "Show staged changes diff for op='diff' (default False).", required=False, default=False)),
+        category="coding",
+        examples=({"op": "status"},
+                  {"op": "log", "limit": 5},
+                  {"op": "diff"},
+                  {"op": "commit", "message": "feat: add new feature"}),
     ),
     Action(
         "self_upgrade", "Modify JARVIS'S OWN source code - upgrade one of your "
@@ -498,12 +604,193 @@ ACTIONS: tuple[Action, ...] = (
         (Param("path", "str", "File or folder to delete."),),
         category="files", examples=({"path": "~/Downloads/old_setup.exe"},),
     ),
+    Action(
+        "convert_file", "Convert and transform files across formats: "
+        "Markdown -> styled HTML, CSV <-> JSON <-> YAML, CSV <-> XLSX (Excel), "
+        "Images (PNG/JPEG/WEBP/BMP/GIF/ICO with resize/quality options), "
+        "Base64 encode/decode, and UTF-8 / line ending normalization. "
+        "Pass 'target' (output path) and/or 'target_format' (e.g. 'html', 'json', 'csv', 'yaml', 'xlsx', 'webp', 'png', 'base64').",
+        (Param("source", "str", "Path to the source file to convert."),
+         Param("target", "str", "Path where converted file should be saved.", required=False),
+         Param("target_format", "str", "Target format: 'html', 'json', 'csv', 'yaml', 'xlsx', 'png', 'jpg', 'webp', 'bmp', 'base64', 'utf8', 'crlf', 'lf'.", required=False),
+         Param("options", "dict", "Optional conversion options: {'theme': 'dark'|'light'|'cyber', 'title': '...', 'resize_width': int, 'resize_height': int, 'quality': int, 'delimiter': str, 'auto_types': bool}.", required=False)),
+        category="files",
+        examples=({"source": "~/notes.md", "target": "~/notes.html", "options": {"theme": "dark"}},
+                  {"source": "~/data.csv", "target_format": "json"},
+                  {"source": "~/photo.png", "target": "~/photo.webp", "options": {"resize_width": 800, "quality": 85}},
+                  {"source": "~/data.csv", "target": "~/data.xlsx"}),
+    ),
+    Action(
+        "archive_intel", "Inspect, test, pack, and safely extract archives (ZIP, TAR, TAR.GZ, TAR.BZ2, TAR.XZ). "
+        "Built-in Zip-Slip path-traversal protection. "
+        "Operations: 'list' (view entries, sizes, compression savings), 'test' (verify integrity and checksums), "
+        "'create' (pack directory/files into archive), 'extract' (safely unpack archive to destination).",
+        (Param("path", "str", "Path to archive or source directory/file."),
+         Param("op", "str", "Operation: 'list', 'test', 'create', or 'extract' (default 'list').", required=False, default="list"),
+         Param("target", "str", "Destination path or extraction directory.", required=False),
+         Param("archive_format", "str", "Archive format for create: 'zip', 'tar.gz', 'tar.bz2', 'tar.xz' (default 'zip').", required=False, default="zip"),
+         Param("level", "int", "Compression level from 0 to 9 (default 6).", required=False, default=6)),
+        category="files",
+        examples=({"path": "~/backup.zip", "op": "list"},
+                  {"path": "~/archive.tar.gz", "op": "test"},
+                  {"path": "~/my_project", "target": "~/project.zip", "op": "create"},
+                  {"path": "~/data.zip", "target": "~/data_unpacked", "op": "extract"}),
+    ),
+    Action(
+        "data_validate", "Validate JSON data structures against schemas, infer JSON schemas, "
+        "compute deep structural diffs, or sanitize payloads. "
+        "Supports types (string, integer, number, boolean, array, object, null) and constraints "
+        "(required, enum, minimum, maximum, pattern, minLength, maxLength, properties, items). "
+        "Operations: 'validate' (schema validation), 'infer' (generate JSON schema from data), "
+        "'diff' (deep object diff), 'sanitize' (clean whitespace and types based on schema).",
+        (Param("op", "str", "Operation: 'validate', 'infer', 'diff', or 'sanitize' (default 'validate').", required=False, default="validate"),
+         Param("data", "str", "JSON string, JSON file path, or object to validate/inspect."),
+         Param("schema", "str", "JSON schema definition string, schema file path, or schema object.", required=False),
+         Param("target", "str", "Comparison target for op='diff'.", required=False)),
+        category="coding",
+        examples=({"op": "validate", "data": "config.json", "schema": "schema.json"},
+                  {"op": "infer", "data": "sample.json"},
+                  {"op": "diff", "data": "old_config.json", "target": "new_config.json"},
+                  {"op": "sanitize", "data": "payload.json", "schema": "schema.json"}),
+    ),
+    Action(
+        "crypto_intel", "Compute cryptographic hashes, verify checksums, generate HMAC signatures, "
+        "and produce secure random tokens/keys (SHA-256, SHA-512, MD5, BLAKE2, PBKDF2). "
+        "Operations: 'hash' (checksum file/text), 'verify' (constant-time checksum match), "
+        "'hmac' (keyed signature), 'token' (cryptographic hex, uuid4, password), 'pbkdf2' (salted password derivation).",
+        (Param("op", "str", "Operation: 'hash', 'verify', 'hmac', 'token', or 'pbkdf2' (default 'hash').", required=False, default="hash"),
+         Param("target", "str", "Target text, file path, or token type.", required=False, default=""),
+         Param("algo", "str", "Hash algorithm: 'sha256', 'sha512', 'md5', 'blake2b' (default 'sha256').", required=False, default="sha256"),
+         Param("key", "str", "Secret key for op='hmac'.", required=False),
+         Param("expected", "str", "Expected hash digest for op='verify'.", required=False),
+         Param("length", "int", "Token length in bytes/chars for op='token' (default 32).", required=False, default=32)),
+        category="security",
+        examples=({"op": "hash", "target": "~/download.iso", "algo": "sha256"},
+                  {"op": "verify", "target": "~/file.zip", "expected": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+                  {"op": "hmac", "target": "webhook payload", "key": "secret_key"},
+                  {"op": "token", "target": "hex", "length": 32},
+                  {"op": "token", "target": "password", "length": 24}),
+    ),
+    Action(
+        "diff_patch", "Compute unified text diffs, similarity ratios, line statistics, "
+        "and safely apply unified diff patches to files. "
+        "Operations: 'diff' (unified diff between files/strings), 'similarity' (sequence matcher ratio), "
+        "'stats' (lines added/deleted/modified count), 'patch' (apply unified patch to file with dry_run).",
+        (Param("op", "str", "Operation: 'diff', 'similarity', 'stats', or 'patch' (default 'diff').", required=False, default="diff"),
+         Param("source", "str", "Original file path or text string (or patch content for op='patch').", required=False, default=""),
+         Param("target", "str", "New file path or text string to compare with (or target file for op='patch').", required=False, default=""),
+         Param("patch_text", "str", "Unified patch content for op='patch'.", required=False),
+         Param("dry_run", "bool", "Test patch without modifying file for op='patch' (default False).", required=False, default=False)),
+        category="coding",
+        examples=({"op": "diff", "source": "v1.py", "target": "v2.py"},
+                  {"op": "similarity", "source": "draft1.txt", "target": "draft2.txt"},
+                  {"op": "stats", "source": "old.py", "target": "new.py"},
+                  {"op": "patch", "target": "app.py", "patch_text": "@@ -1,3 +1,3 @@\n-print('hi')\n+print('hello')", "dry_run": True}),
+    ),
+    Action(
+        "regex_intel", "Test regex pattern validity, extract matches with character spans & named groups, "
+        "perform regex substitutions, and automatically redact sensitive PII/secrets. "
+        "Operations: 'extract' (find all matches/groups/spans), 'test' (verify regex compilation and match), "
+        "'replace' (regex substitution with group backreferences), 'redact' (mask emails, IPs, API keys, cards, phones).",
+        (Param("op", "str", "Operation: 'extract', 'test', 'replace', or 'redact' (default 'extract').", required=False, default="extract"),
+         Param("pattern", "str", "Regular expression pattern.", required=False, default=""),
+         Param("text", "str", "Input text or file path to evaluate.", required=False, default=""),
+         Param("replacement", "str", "Replacement text for op='replace'.", required=False, default=""),
+         Param("preset", "str", "Redaction preset for op='redact': 'all', 'email', 'ipv4', 'jwt', 'api_key', 'credit_card', 'phone' (default 'all').", required=False, default="all"),
+         Param("flags", "str", "Regex flags string (e.g. 'i' for ignorecase, 'm' for multiline, 's' for dotall).", required=False, default="")),
+        category="coding",
+        examples=({"op": "test", "pattern": r"^v\d+\.\d+\.\d+$", "text": "v1.2.3"},
+                  {"op": "extract", "pattern": r"(?P<key>\w+)=(?P<val>\w+)", "text": "user=admin env=prod"},
+                  {"op": "replace", "pattern": r"\bfoo\b", "text": "foo bar foo", "replacement": "baz"},
+                  {"op": "redact", "text": "Contact support@example.com with API key sk-12345678901234567890"}),
+    ),
+    Action(
+        "api_mock", "Spawn in-process HTTP mock servers, configure mock endpoints, "
+        "simulate API responses with custom headers/status codes/delays, and inspect recorded request history. "
+        "Operations: 'start' (launch mock server on port), 'route' (register endpoint mock rule), "
+        "'history' (inspect captured HTTP requests), 'clear' (clear logs/routes), 'stop' (shut down server).",
+        (Param("op", "str", "Operation: 'start', 'route', 'history', 'clear', or 'stop' (default 'start').", required=False, default="start"),
+         Param("port", "int", "Local port number (default 8999).", required=False, default=8999),
+         Param("path", "str", "Endpoint URL path (default '/').", required=False, default="/"),
+         Param("method", "str", "HTTP method: 'GET', 'POST', 'PUT', 'DELETE', or '*' (default 'GET').", required=False, default="GET"),
+         Param("status", "int", "HTTP response status code (default 200).", required=False, default=200),
+         Param("body", "str", "Response body text, JSON object, or file path.", required=False, default=""),
+         Param("delay", "float", "Artificial latency delay in seconds (default 0.0).", required=False, default=0.0)),
+        category="coding",
+        examples=({"op": "start", "port": 8999},
+                  {"op": "route", "port": 8999, "path": "/api/user", "method": "GET", "body": {"id": 1, "name": "Alice"}},
+                  {"op": "route", "port": 8999, "path": "/webhook", "method": "POST", "status": 201},
+                  {"op": "history", "port": 8999},
+                  {"op": "stop", "port": 8999}),
+    ),
+    Action(
+        "cron_intel", "Validate cron expressions, translate cron syntax into natural English explanations, "
+        "and calculate upcoming execution timestamps across timezones. "
+        "Operations: 'explain' (describe cron schedule in English), 'next' (generate next N occurrence timestamps), "
+        "'validate' (validate 5-part cron syntax and field ranges).",
+        (Param("op", "str", "Operation: 'explain', 'next', or 'validate' (default 'explain').", required=False, default="explain"),
+         Param("expr", "str", "Standard 5-part cron expression (default '* * * * *').", required=False, default="* * * * *"),
+         Param("count", "int", "Number of upcoming occurrences to compute for op='next' (default 5).", required=False, default=5),
+         Param("timezone_name", "str", "IANA timezone name (default 'UTC').", required=False, default="UTC"),
+         Param("base_time", "str", "Base start timestamp in ISO-8601 format for op='next'.", required=False, default="")),
+        category="coding",
+        examples=({"op": "explain", "expr": "*/15 9-17 * * 1-5"},
+                  {"op": "next", "expr": "0 9 * * 1", "count": 3, "timezone_name": "America/New_York"},
+                  {"op": "validate", "expr": "0 0 1 1 *"}),
+    ),
     # ---- clipboard -------------------------------------------------------
     Action(
         "system_status", "Report machine diagnostics (CPU, memory, disk, "
         "battery, uptime). Use to answer 'how's my system / battery / cpu / "
         "memory / disk' without opening any app.", (),
         category="system", examples=({},),
+    ),
+    Action(
+        "system_diagnostics", "Run comprehensive environmental diagnostics, "
+        "subsystem health inspection, database integrity checks, and automated self-repair. "
+        "Checks Python dependencies, AI Brain credentials, screen resolution, browser engine, "
+        "memory database integrity (PRAGMA integrity_check), and credential vault encryption. "
+        "Operations: 'health' (full subsystem audit), 'repair' (auto-optimize and vacuum databases).",
+        (Param("op", "str", "Operation: 'health', 'check', or 'repair' (default 'health').", required=False, default="health"),
+         Param("auto_fix", "bool", "Automatically apply self-repair fixes during check (default False).", required=False, default=False)),
+        category="system",
+        examples=({"op": "health"},
+                  {"op": "repair"},
+                  {"op": "health", "auto_fix": True}),
+    ),
+    Action(
+        "net_intel", "Execute network, port, DNS, and TLS/SSL diagnostics. "
+        "Operations: 'port_check' (probe TCP port reachability and measure latency), "
+        "'dns' (resolve IPv4/IPv6 addresses and canonical names), "
+        "'ssl' (inspect TLS/SSL certificates, expiration dates, and SANs), "
+        "'listening' (enumerate local active listening TCP ports).",
+        (Param("op", "str", "Operation: 'port_check', 'dns', 'ssl', or 'listening' (default 'port_check').", required=False, default="port_check"),
+         Param("host", "str", "Target hostname or IP address (default '127.0.0.1').", required=False, default="127.0.0.1"),
+         Param("port", "int", "Target port number for port_check/ssl (default 80 or 443).", required=False, default=80),
+         Param("timeout", "int", "Socket timeout in seconds (default 3).", required=False, default=3)),
+        category="system",
+        examples=({"op": "port_check", "host": "127.0.0.1", "port": 8000},
+                  {"op": "dns", "host": "google.com"},
+                  {"op": "ssl", "host": "github.com", "port": 443},
+                  {"op": "listening"}),
+    ),
+    Action(
+        "process_intel", "Monitor system processes, inspect CPU/memory resource usage, "
+        "search active tasks, and safely terminate processes with OS protection. "
+        "Operations: 'list' / 'top' (enumerate top processes sorted by memory or CPU), "
+        "'inspect' (deep metadata for specific PID), 'find' (search processes by name substring), "
+        "'terminate' (terminate process or process tree with safety blacklist protection).",
+        (Param("op", "str", "Operation: 'list', 'inspect', 'find', or 'terminate' (default 'list').", required=False, default="list"),
+         Param("pid", "int", "Target Process ID for inspect/terminate.", required=False),
+         Param("name", "str", "Process name or search substring for find/terminate.", required=False, default=""),
+         Param("sort_by", "str", "Sort metric for op='list': 'memory' or 'cpu' (default 'memory').", required=False, default="memory"),
+         Param("limit", "int", "Maximum number of processes to return (default 20).", required=False, default=20),
+         Param("force", "bool", "Forcefully terminate process for op='terminate' (default False).", required=False, default=False)),
+        category="system",
+        examples=({"op": "list", "sort_by": "memory", "limit": 10},
+                  {"op": "inspect", "pid": 1234},
+                  {"op": "find", "name": "python"},
+                  {"op": "terminate", "name": "stuck_worker.exe"}),
     ),
     Action(
         "web_search", "Search the web with DuckDuckGo and get back text "
@@ -515,6 +802,39 @@ ACTIONS: tuple[Action, ...] = (
         category="system",
         examples=({"query": "who won the 2022 world cup"},
                   {"query": "python read a file", "max_results": 3}),
+    ),
+    Action(
+        "extract_web_data", "Extract structured data from web pages and HTML documents. "
+        "Modes: 'tables' (parses all HTML tables into structured JSON rows or CSV), "
+        "'metadata' (extracts title, meta tags, OpenGraph, and JSON-LD microdata schemas), "
+        "'links' (extracts internal links, external links, and downloadable files like PDF/ZIP/CSV), "
+        "'article' (extracts clean readable article text with boilerplate nav/footers stripped).",
+        (Param("url", "str", "URL of the webpage to scrape and extract data from.", required=False),
+         Param("html_content", "str", "Raw HTML string to parse directly instead of fetching URL.", required=False),
+         Param("mode", "str", "Extraction mode: 'tables', 'metadata', 'links', or 'article' (default 'tables').", required=False, default="tables"),
+         Param("output_format", "str", "Output format for tables: 'json' or 'csv' (default 'json').", required=False, default="json")),
+        category="system",
+        examples=({"url": "https://en.wikipedia.org/wiki/List_of_countries_by_GDP_(nominal)", "mode": "tables", "output_format": "csv"},
+                  {"url": "https://news.ycombinator.com", "mode": "links"},
+                  {"url": "https://github.com/trending", "mode": "metadata"}),
+    ),
+    Action(
+        "media_intel", "Inspect audio and media files, compute waveform energy envelopes, "
+        "detect speech/silence intervals, and slice audio segments (WAV, MP3, FLAC, MP4). "
+        "Operations: 'info' (container, duration, sample rate, channels, bit depth, bitrate), "
+        "'waveform' (RMS energy envelope and peak amplitude), 'silence' (speech vs silence timestamps), "
+        "'slice' (extract segment from start_sec to end_sec into target path).",
+        (Param("path", "str", "Path to audio or media file."),
+         Param("op", "str", "Operation: 'info', 'waveform', 'silence', or 'slice' (default 'info').", required=False, default="info"),
+         Param("target", "str", "Output path for sliced audio with op='slice'.", required=False),
+         Param("start_sec", "float", "Start timestamp in seconds for op='slice' (default 0.0).", required=False, default=0.0),
+         Param("end_sec", "float", "End timestamp in seconds for op='slice' (default 0.0).", required=False, default=0.0),
+         Param("threshold_db", "float", "Silence threshold in decibels for op='silence' (default -40.0).", required=False, default=-40.0)),
+        category="system",
+        examples=({"path": "~/recording.wav", "op": "info"},
+                  {"path": "~/speech.wav", "op": "waveform"},
+                  {"path": "~/meeting.wav", "op": "silence"},
+                  {"path": "~/podcast.wav", "op": "slice", "start_sec": 10.5, "end_sec": 35.0, "target": "~/clip.wav"}),
     ),
     Action(
         "schedule_task", "Schedule a task to run automatically later or on a "

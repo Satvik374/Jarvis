@@ -13,6 +13,7 @@ import re
 import sys
 import threading
 import time
+from typing import Any
 
 from pathlib import Path
 
@@ -41,6 +42,7 @@ _SLASH_COMMANDS = (
     ("/remember", "[fact] - store a fact in permanent memory forever"),
     ("/memory", "list permanent memories and learned plans"),
     ("/help", "show all commands"),
+    ("/live", "launch Real-Time Gemini 3.1 Flash Live Voice model supervisor"),
     ("/voice", "voice-ONLY mode: talk instead of typing"),
     ("/macro", "watch & learn: record, list, or replay desktop workflows"),
     ("/secret", "Windows Credential Manager / DPAPI vault: set/get/list/migrate"),
@@ -48,7 +50,9 @@ _SLASH_COMMANDS = (
     ("/cam", "[snap|inspect] - physical webcam vision tools"),
     ("/daemon", "[status|list|enable|disable|tick] - proactive background daemon & event triggers"),
     ("/hud", "[show|hide|toggle|status] - global floating mini HUD & system-wide hotkeys"),
+    ("/shadow", "[on|off|toggle|status|promote] - zero-interference shadow desktop & virtual workspace"),
     ("/cron", "list/add/remove scheduled jobs"),
+
     ("/connect", "Gmail/Discord/WhatsApp connector status and test"),
     ("/remote", "list, remove, trust, or send tasks to paired devices"),
     ("/mcp", "list/add/remove MCP servers (extra tool connectors)"),
@@ -160,6 +164,27 @@ def _char_input(prompt: str, kbhit, getwch, grace: float = 0.05,
     lines: list[str] = []
     pending: str | None = None     # one char read ahead past a '\r'
     menu_on = False
+    input_lock = threading.Lock()
+
+    def suspend_prompt() -> None:
+        with input_lock:
+            if menu_on:
+                menu(None, 1)
+            w = log._width()
+            echo("\r" + " " * max(1, w - 1) + "\r")
+
+    def restore_prompt() -> None:
+        with input_lock:
+            cur = "".join(buf)
+            prefix = prompt if not lines else ""
+            echo(prefix + cur)
+            if pos < len(buf):
+                echo("\b" * (len(buf) - pos))
+            if not lines and cur.startswith("/"):
+                col = (vis_prompt if not lines else 0) + pos + 1
+                menu(_matches(cur), col)
+
+    log.register_prompt_hooks(suspend_prompt, restore_prompt)
 
     def update_menu() -> None:
         nonlocal menu_on
@@ -216,91 +241,94 @@ def _char_input(prompt: str, kbhit, getwch, grace: float = 0.05,
             i += step
         return i
 
-    while True:
-        if pending is not None:
-            ch, pending = pending, None
-            waited = 0.0                           # read ahead inside a paste
-        else:
-            t0 = time.monotonic()
-            ch = getwch()
-            waited = time.monotonic() - t0         # ~0 == it was already queued
-        if ch == "\x03":                           # Ctrl+C
-            if menu_on:
-                menu(None, 1)
-            raise KeyboardInterrupt
-        if ch in "\r\n":
-            if grace:
-                time.sleep(grace)  # let the rest of a paste reach the buffer
-            if ch == "\r" and kbhit():
-                nxt = getwch()
-                if nxt == "\n":                    # LF of a CRLF pair
-                    if grace:
-                        time.sleep(grace)
-                else:
-                    pending = nxt                  # more paste follows
-            # A trailing newline at the END of a paste also leaves an idle
-            # buffer, so "idle" alone submits the paste before the user can
-            # type after it. A key that was already queued when we asked for
-            # it (waited ~0) came from the paste, never from a keypress.
-            typed = not grace or waited >= _KEY_GAP
-            if typed and pending is None and not kbhit():   # a real Enter
+    try:
+        while True:
+            if pending is not None:
+                ch, pending = pending, None
+                waited = 0.0                           # read ahead inside a paste
+            else:
+                t0 = time.monotonic()
+                ch = getwch()
+                waited = time.monotonic() - t0         # ~0 == it was already queued
+            if ch == "\x03":                           # Ctrl+C
                 if menu_on:
                     menu(None, 1)
+                raise KeyboardInterrupt
+            if ch in "\r\n":
+                if grace:
+                    time.sleep(grace)  # let the rest of a paste reach the buffer
+                if ch == "\r" and kbhit():
+                    nxt = getwch()
+                    if nxt == "\n":                    # LF of a CRLF pair
+                        if grace:
+                            time.sleep(grace)
+                    else:
+                        pending = nxt                  # more paste follows
+                # A trailing newline at the END of a paste also leaves an idle
+                # buffer, so "idle" alone submits the paste before the user can
+                # type after it. A key that was already queued when we asked for
+                # it (waited ~0) came from the paste, never from a keypress.
+                typed = not grace or waited >= _KEY_GAP
+                if typed and pending is None and not kbhit():   # a real Enter
+                    if menu_on:
+                        menu(None, 1)
+                    echo("\n")
+                    lines.append("".join(buf))
+                    return "\n".join(lines)
+                lines.append("".join(buf))             # pasted newline: keep going
+                buf = []
+                pos = 0
                 echo("\n")
-                lines.append("".join(buf))
-                return "\n".join(lines)
-            lines.append("".join(buf))             # pasted newline: keep going
-            buf = []
-            pos = 0
-            echo("\n")
-            update_menu()
-            continue
-        if ch == "\x08":                           # backspace
-            if pos > 0:
-                del buf[pos - 1]
-                pos -= 1
-                echo("\b")
-                redraw_tail(1)
-            update_menu()
-            continue
-        if ch == "\t":
-            cur = "".join(buf)
-            if not lines and cur.startswith("/") and " " not in cur:
-                m = _matches(cur)
-                if m:
-                    move_to(len(buf))              # complete at the end
-                    insert(m[0][0][len(cur):] + " ")
-            update_menu()
-            continue
-        if ch == "\x16":                           # Ctrl+V: image clipboard
-            path = _clipboard_to_path()
-            if path:
-                insert(f'"{path}" ')
-            update_menu()
-            continue
-        if ch in ("\x00", "\xe0"):                 # extended key: two chars
-            code = getwch()
-            if code == "K":                        # left
-                move_to(pos - 1)
-            elif code == "M":                      # right
-                move_to(pos + 1)
-            elif code == "s":                      # Ctrl+left: word back
-                move_to(word_edge(-1))
-            elif code == "t":                      # Ctrl+right: word forward
-                move_to(word_edge(1))
-            elif code == "G":                      # Home
-                move_to(0)
-            elif code == "O":                      # End
-                move_to(len(buf))
-            elif code == "S":                      # Delete
-                if pos < len(buf):
-                    del buf[pos]
+                update_menu()
+                continue
+            if ch == "\x08":                           # backspace
+                if pos > 0:
+                    del buf[pos - 1]
+                    pos -= 1
+                    echo("\b")
                     redraw_tail(1)
-            # Up/Down and the F-keys have nothing to do here (no history yet).
+                update_menu()
+                continue
+            if ch == "\t":
+                cur = "".join(buf)
+                if not lines and cur.startswith("/") and " " not in cur:
+                    m = _matches(cur)
+                    if m:
+                        move_to(len(buf))              # complete at the end
+                        insert(m[0][0][len(cur):] + " ")
+                update_menu()
+                continue
+            if ch == "\x16":                           # Ctrl+V: image clipboard
+                path = _clipboard_to_path()
+                if path:
+                    insert(f'"{path}" ')
+                update_menu()
+                continue
+            if ch in ("\x00", "\xe0"):                 # extended key: two chars
+                code = getwch()
+                if code == "K":                        # left
+                    move_to(pos - 1)
+                elif code == "M":                      # right
+                    move_to(pos + 1)
+                elif code == "s":                      # Ctrl+left: word back
+                    move_to(word_edge(-1))
+                elif code == "t":                      # Ctrl+right: word forward
+                    move_to(word_edge(1))
+                elif code == "G":                      # Home
+                    move_to(0)
+                elif code == "O":                      # End
+                    move_to(len(buf))
+                elif code == "S":                      # Delete
+                    if pos < len(buf):
+                        del buf[pos]
+                        redraw_tail(1)
+                # Up/Down and the F-keys have nothing to do here (no history yet).
+                update_menu()
+                continue
+            insert(ch)
             update_menu()
-            continue
-        insert(ch)
-        update_menu()
+    finally:
+        log.unregister_prompt_hooks()
 
 
 def _greeting() -> str:
@@ -372,12 +400,243 @@ def _status_bar(cfg: Config) -> str:
     def dot(on: bool) -> str:
         return _c("● on", "green") if on else _c("○ off", "grey")
     sep = _c(" │ ", "grey")
+    shadow_on = getattr(getattr(cfg, "shadow", None), "enabled", False)
     return (f"  {_c('BRAIN', 'dim')} {_c(cfg.brain.backend, 'cyan')}:{cfg.brain.model}" + sep +
+            f"{_c('SHADOW', 'dim')} {dot(shadow_on)}" + sep +
             f"{_c('VISION', 'dim')} {dot(cfg.brain.use_vision)}" + sep +
             f"{_c('UIA', 'dim')} {dot(cfg.perception.use_uia)}" + sep +
             f"{_c('OCR', 'dim')} {dot(cfg.perception.use_ocr)}" + sep +
             f"{_c('VOICE', 'dim')} {dot(cfg.voice_enabled)}" + sep +
             f"{_c('STEPS', 'dim')} {cfg.safety.max_steps}")
+
+
+
+def _build_console_narration(step: int, thought: str, action: str, args: dict) -> str:
+    """Natural conversational step narration from the Side Agent."""
+    if action in {"launch", "open_app"}:
+        app = args.get("app") or args.get("name") or "application"
+        return f"Opening {app} now."
+    elif action == "focus_window":
+        title = args.get("title", "window")
+        return f"Focusing the {title} window."
+    elif action == "click":
+        elem = args.get("element") or args.get("id")
+        return f"Clicking target on screen (element {elem})." if elem is not None else "Clicking target on screen."
+    elif action in {"type", "type_text"}:
+        return "Typing input into the focused field."
+    elif action in {"write_file", "edit_file"}:
+        path = args.get("path", "file")
+        return f"Writing updates to {path}."
+    elif action in {"python", "run_command"}:
+        return "Executing command in terminal."
+    elif action in {"web_search", "read_url"}:
+        return "Searching web data."
+    elif thought and len(thought) > 10:
+        return f"Step {step}: {thought.split('.')[0].strip()}."
+    return f"Step {step}: executing {action}."
+
+
+_SIDE_AGENT_REPLY_KEYS = ("response", "summary", "answer", "message", "content", "text")
+
+
+def _format_side_agent_reply(raw_reply: str) -> str:
+    """Unwrap structured model output into console-ready Markdown.
+
+    Some backends return a JSON envelope despite being asked for prose, e.g.
+    ``{"response": "1. First step\\n2. Second step"}``.  Printing that
+    envelope made useful Side Agent replies look like an API payload.  The
+    console logger already renders Markdown, so extract the human-facing field
+    and leave its paragraphs, lists, and code blocks intact.
+    """
+    reply = str(raw_reply or "").strip()
+    if not reply:
+        return "I do not have a response yet, sir."
+
+    candidates = [reply]
+    fenced_json = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", reply,
+                                flags=re.IGNORECASE | re.DOTALL)
+    if fenced_json:
+        candidates.append(fenced_json.group(1).strip())
+
+    decoded: Any = None
+    for candidate in candidates:
+        if not candidate.startswith(("{", "[", '"')):
+            continue
+        try:
+            decoded = json.loads(candidate)
+            break
+        except (TypeError, ValueError):
+            continue
+
+    # A few providers double-encode their text as a JSON string.  Decode at
+    # most twice so malformed model output can never loop indefinitely.
+    for _ in range(2):
+        if isinstance(decoded, str):
+            nested = decoded.strip()
+            if nested.startswith(("{", "[")):
+                try:
+                    decoded = json.loads(nested)
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            return nested or reply
+        if not isinstance(decoded, dict):
+            break
+
+        lowered = {str(key).lower(): value for key, value in decoded.items()}
+        value = next((lowered[key] for key in _SIDE_AGENT_REPLY_KEYS
+                      if key in lowered), None)
+        if value is None:
+            break
+        decoded = value
+
+    if isinstance(decoded, str) and decoded.strip():
+        return decoded.strip()
+    return reply
+
+
+def _handle_side_agent_chat(query: str, tracker: Any, brain: Any, cfg: Config) -> str:
+    """Side / Communicating Agent handles conversation, status, and Q&A while Main Worker runs."""
+    summary = tracker.get_status_summary()
+    q_lower = query.lower().strip()
+
+    # Fast-path for direct status and progress checks
+    if any(k in q_lower for k in ["what are you doing", "status", "progress", "what step", "what's happening", "how's it going", "what are you working on"]):
+        if summary["status"] == "idle":
+            return "I am currently idle and ready for your next directive, sir."
+        step_info = f"Step {summary['current_step']}/{summary['total_steps']}" if summary['current_step'] > 0 else "initializing"
+        act_info = f"executing '{summary['current_action']}'" if summary['current_action'] else "planning"
+        thought_info = f" ({summary['current_thought']})" if summary['current_thought'] else ""
+        return f"The Main Worker is currently executing '{summary['active_task']}' ({step_info}). It is {act_info}{thought_info}."
+
+    system_prompt = (
+        "You are the Communicating Side Agent for JARVIS. The user is talking to you in the terminal while "
+        "the silent Main Worker Agent executes tasks on the Windows computer in the background.\n"
+        "You speak in a crisp, polite, intelligent, executive tone.\n"
+        f"{tracker.format_live_context_for_prompt()}\n\n"
+        "Answer the user's question or converse with them directly. If they ask about the task, refer to the live status above. "
+        "Return plain Markdown only: use short paragraphs, numbered steps, and bullets where helpful. "
+        "Never return JSON, an API envelope, or a field such as 'response' or 'summary'."
+    )
+    messages = [{"role": "user", "content": query}]
+    try:
+        return _format_side_agent_reply(brain.complete(system_prompt, messages))
+    except Exception as exc:
+        return f"The Main Worker is currently {summary['status']} on '{summary['active_task']}'."
+
+
+def _handle_idle_conversation(query: str, agent: Agent) -> str | None:
+    """Return a front-agent reply for ordinary chat, else leave it for work.
+
+    The console's dual-agent dispatch previously treated every idle input as a
+    background task.  Consequently even ``hey`` received an automation filler
+    and then a misleading "Completed" status.  Reuse the Agent's conservative
+    chat gate here: it handles greetings directly but returns ``None`` for a
+    computer task, where the Main Worker remains the only executor.
+    """
+    if not getattr(agent.cfg.brain, "conversational", True):
+        return None
+    if agent._looks_like_task(query):
+        return None
+
+    reply = agent._maybe_chat(query, agent._chat_context())
+    if reply:
+        agent._append_chat(query, reply)
+        return reply
+    return None
+
+
+def _cancel_console_worker(
+    worker: threading.Thread | None,
+    cancel_event: threading.Event,
+    done_event: threading.Event,
+    answer_queue: Any,
+    waiting_for_answer: list[bool],
+    agent: Agent,
+    tracker: Any,
+) -> bool:
+    """Cancel a console worker and unblock every one of its wait states.
+
+    Merely setting the Agent cancellation event is not enough when the worker
+    is blocked in the mid-task answer bridge.  Put an empty response into that
+    queue as well, so Ctrl+C and :stop take effect immediately instead of
+    waiting for the answer timeout.
+    """
+    if worker is None or done_event.is_set() or not worker.is_alive():
+        return False
+
+    cancel_event.set()
+    agent.cancel()
+    # Ctrl+C is an interruption, not merely a request to stop future desktop
+    # actions.  Silence any in-flight acknowledgement or progress narration
+    # too, otherwise it appears as though the task is still running.
+    try:
+        voice.interrupt_speech()
+    except Exception:
+        # Voice output must never prevent a user from stopping automation.
+        pass
+    waiting_for_answer[0] = False
+    try:
+        answer_queue.put_nowait("")
+    except Exception:
+        pass
+    try:
+        tracker.update_event({"event": "cancelled"})
+    except Exception:
+        pass
+    return True
+
+
+def _shutdown_repl(
+    sched: Any = None,
+    cfg: Any = None,
+    active_worker_cancel: Any = None,
+    active_worker_thread: Any = None,
+) -> None:
+    """Safely and gracefully shut down all background services and exit cleanly."""
+    try:
+        if active_worker_cancel is not None:
+            active_worker_cancel.set()
+        if active_worker_thread is not None and active_worker_thread.is_alive():
+            active_worker_thread.join(timeout=0.5)
+    except Exception:
+        pass
+
+    try:
+        if sched is not None:
+            sched.stop()
+            scheduler.set_default(None)
+    except Exception:
+        pass
+
+    try:
+        from . import hud
+        hud.stop_hud()
+    except Exception:
+        pass
+
+    try:
+        from . import daemon
+        daemon.stop_daemon()
+    except Exception:
+        pass
+
+    try:
+        from . import mcp
+        mcp.get_manager().close_all()
+    except Exception:
+        pass
+
+    try:
+        from .utils import voice
+        voice.interrupt_speech()
+    except Exception:
+        pass
+
+    try:
+        log.jarvis("Goodbye, sir. All systems offline.")
+    except Exception:
+        pass
 
 
 def repl(cfg: Config | None = None) -> int:
@@ -392,201 +651,393 @@ def repl(cfg: Config | None = None) -> int:
     except BrainError as exc:
         log.error(str(exc))
         return 1
+    except (KeyboardInterrupt, EOFError):
+        return 0
+
     agent = Agent(brain, cfg)
     voice.configure(brain, cfg.voice)
 
-    # Refresh cloud credentials while the user is reading the greeting. This
-    # keeps first-command latency off the interactive critical path; failures
-    # remain silent here and are reported normally by the real request.
-    threading.Thread(
-        target=lambda: _warm_brain(brain),
-        daemon=True,
-        name="brain-warmup",
-    ).start()
+    sched = None
+    active_worker_thread: threading.Thread | None = None
+    active_worker_cancel = threading.Event()
+    active_worker_done = threading.Event()
+    active_worker_done.set()
 
-    # Cron: a background thread fires scheduled jobs through the same agent.
-    # Every job run holds the desktop lock so it never fights a foreground task.
-    def _cron_runner(command: str) -> None:
-        log.rule(f"cron: {command[:50]}", "magenta")
-        with scheduler.desktop():
-            result = agent.run(command)
-        log.jarvis(f"[scheduled] {result}")
-        try:      # toast so the result is seen even away from the console
-            from .tools import system as system_tools
-            system_tools.notify(result[:200], title="JARVIS · scheduled task")
-        except Exception:
-            pass
-        try:
-            voice.speak(result, wait=True)
-        except Exception:
-            pass
+    try:
+        # Refresh cloud credentials while the user is reading the greeting. This
+        # keeps first-command latency off the interactive critical path; failures
+        # remain silent here and are reported normally by the real request.
+        threading.Thread(
+            target=lambda: _warm_brain(brain),
+            daemon=True,
+            name="brain-warmup",
+        ).start()
 
-    sched = scheduler.Scheduler(
-        Path(__file__).resolve().parent.parent / "cron_jobs.json",
-        runner=_cron_runner)
-    scheduler.set_default(sched)
-    sched.start()
-
-    # Proactive Background Daemon: monitor hardware, OS events, and routines
-    from . import daemon
-    daemon.start_daemon(cfg=cfg, task_runner=_cron_runner)
-
-    # Floating Mini HUD: Always-On-Top global capsule overlay & hotkeys
-    def _hud_task_runner(command: str) -> str:
-        log.rule(f"HUD › {command[:60]}", "cyan")
-        started = time.time()
-        try:
-            from .sessions import get_session_manager
-            get_session_manager().append_message("user", command)
-        except Exception:
-            pass
-        try:
-            from .browser_worker import emit
-            emit("input", message=command, mode="command")
-        except Exception:
-            pass
-        try:
+        # Cron: a background thread fires scheduled jobs through the same agent.
+        # Every job run holds the desktop lock so it never fights a foreground task.
+        def _cron_runner(command: str) -> None:
+            log.rule(f"cron: {command[:50]}", "magenta")
             with scheduler.desktop():
-                result = agent.run(command, asker=_typed_asker)
-        except Exception as exc:
-            log.error(f"HUD execution error: {exc}")
-            result = f"Error: {exc}"
-        log.jarvis(result)
-        try:
-            voice.speak(result, wait=False)
-        except Exception:
-            pass
-        log.rule(f"done in {time.time() - started:.1f}s")
-        try:
-            from .browser_worker import emit
-            emit("input_request", prompt="› ", mode="command")
-            emit("state", state="listening", label="Awaiting directive")
-        except Exception:
-            pass
-        return result
+                result = agent.run(command)
+            log.jarvis(f"[scheduled] {result}")
+            try:      # toast so the result is seen even away from the console
+                from .tools import system as system_tools
+                system_tools.notify(result[:200], title="JARVIS · scheduled task")
+            except Exception:
+                pass
+            try:
+                voice.speak(result, wait=True)
+            except Exception:
+                pass
 
-    from . import hud
-    if getattr(cfg, "hud", None) and cfg.hud.enabled:
-        hud.start_hud(cfg=cfg, task_runner=_hud_task_runner)
+        sched = scheduler.Scheduler(
+            Path(__file__).resolve().parent.parent / "cron_jobs.json",
+            runner=_cron_runner)
+        scheduler.set_default(sched)
+        sched.start()
 
-    # MCP: warm up any configured connectors in the background so their tools
-    # are ready by the time the user gives a task.
-    from . import mcp
-    mcp.get_manager().connect_all(background=True)
+        # Proactive Background Daemon: monitor hardware, OS events, and routines
+        from . import daemon
+        daemon.start_daemon(cfg=cfg, task_runner=_cron_runner)
 
-    # Account connectors: open Gmail's IMAP session and pre-load the unread
-    # list now, so the first "any new mail?" answers from cache instantly.
-    from .tools import connectors
-    connectors.warm(background=True)
+        # Floating Mini HUD: Always-On-Top global capsule overlay & hotkeys
+        def _hud_task_runner(command: str) -> str:
+            log.rule(f"HUD › {command[:60]}", "cyan")
+            started = time.time()
+            try:
+                from .sessions import get_session_manager
+                get_session_manager().append_message("user", command)
+            except Exception:
+                pass
+            try:
+                from .browser_worker import emit
+                emit("input", message=command, mode="command")
+            except Exception:
+                pass
+            try:
+                with scheduler.desktop():
+                    result = agent.run(command, asker=_typed_asker)
+            except Exception as exc:
+                log.error(f"HUD execution error: {exc}")
+                result = f"Error: {exc}"
+            log.jarvis(result)
+            try:
+                voice.speak(result, wait=False)
+            except Exception:
+                pass
+            log.rule(f"done in {time.time() - started:.1f}s")
+            try:
+                from .browser_worker import emit
+                emit("input_request", prompt="› ", mode="command")
+                emit("state", state="listening", label="Awaiting directive")
+            except Exception:
+                pass
+            return result
 
-    greeting = _greeting()
-    log.jarvis(f"{greeting} (':help' for commands, ':voice on' to talk, "
-               "':wake' for hands-free, ':cron' to schedule, ':quit' to exit)")
-    # Jarvis always speaks, in every mode; voice mode only adds the mic (STT).
-    voice.speak(greeting, wait=cfg.voice_enabled or cfg.wake_enabled)
-    prompt = f"\n{_COLORS['cyan']}╭─{_COLORS['reset']}{_COLORS['bold']} {_c('you', 'cyan')} {_COLORS['dim']}›{_COLORS['reset']} "
+        from . import hud
+        if getattr(cfg, "hud", None) and cfg.hud.enabled:
+            hud.start_hud(cfg=cfg, task_runner=_hud_task_runner, agent=agent)
 
-    # Launched with --voice / voice_enabled: greeted aloud above, go straight
-    # to voice-only mode (the greeting replaces the loop's own announcement).
-    if cfg.voice_enabled:
-        try:
-            _voice_loop(agent, cfg, announce=False)
-        except KeyboardInterrupt:
-            print()
-        cfg.voice_enabled = False
-        _persist_voice(False)
-        log.ok("voice mode off - typed prompt, replies still spoken. "
-               "(':voice on' to resume)")
 
-    # Launched with --wake / wake_enabled: go straight into hands-free mode -
-    # say "Hey Jarvis", get asked what you want, give the task, get a spoken
-    # summary, then it's back to listening for the wake word - repeat.
-    if cfg.wake_enabled:
-        try:
-            _wake_loop(agent, cfg, announce=False)
-        except KeyboardInterrupt:
-            print()
-        cfg.wake_enabled = False
-        log.ok('hands-free mode off; back to the typed prompt. '
-               "(':wake' to resume)")
+        # MCP: warm up any configured connectors in the background so their tools
+        # are ready by the time the user gives a task.
+        from . import mcp
+        mcp.get_manager().connect_all(background=True)
 
-    while True:
-        try:
-            task = _read_input(prompt).strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-        if not task:
-            continue
-        if task.startswith("/"):
-            body = task[1:].strip()
-            head = body.split(None, 1)[0].lower() if body else ""
-            if head == "enhance":
-                rest = body.split(None, 1)[1] if " " in body else ""
-                task = _enhance(rest, agent)
-                if not task:
+        # Account connectors: open Gmail's IMAP session and pre-load the unread
+        # list now, so the first "any new mail?" answers from cache instantly.
+        from .tools import connectors
+        connectors.warm(background=True)
+
+        greeting = _greeting()
+        log.jarvis(f"{greeting} (':help' for commands, ':voice on' to talk, "
+                   "':wake' for hands-free, ':cron' to schedule, ':quit' to exit)")
+        # Jarvis always speaks, in every mode; voice mode only adds the mic (STT).
+        voice.speak(greeting, wait=cfg.voice_enabled or cfg.wake_enabled)
+        prompt_idle = f"\n{_COLORS['cyan']}╭─{_COLORS['reset']}{_COLORS['bold']} {_c('you', 'cyan')} {_COLORS['dim']}›{_COLORS['reset']} "
+        # A prompt remains editable while work runs.  Do not put dynamic worker
+        # state inside it: a background completion can occur after it renders,
+        # leaving a stale "Worker Active" label beside an idle prompt.
+
+        # Launched with --voice / voice_enabled: greeted aloud above, go straight
+        # to voice-only mode (the greeting replaces the loop's own announcement).
+        if cfg.voice_enabled:
+            try:
+                _voice_loop(agent, cfg, announce=False)
+            except KeyboardInterrupt:
+                print()
+            cfg.voice_enabled = False
+            _persist_voice(False)
+            log.ok("voice mode off - typed prompt, replies still spoken. "
+                   "(':voice on' to resume)")
+
+        # Launched with --wake / wake_enabled: go straight into hands-free mode -
+        # say "Hey Jarvis", get asked what you want, give the task, get a spoken
+        # summary, then it's back to listening for the wake word - repeat.
+        if cfg.wake_enabled:
+            try:
+                _wake_loop(agent, cfg, announce=False)
+            except KeyboardInterrupt:
+                print()
+            cfg.wake_enabled = False
+            log.ok('hands-free mode off; back to the typed prompt. '
+                   "(':wake' to resume)")
+
+        # This state belongs to the typed dual-agent console, not wake-word
+        # mode. Keeping it inside the block above left normal console tasks
+        # with an undefined tracker and answer queue on their first command.
+        from .live.speculative import get_fast_filler
+        from .live.telemetry_state import TaskTelemetryTracker
+        import queue as _queue
+
+        tracker = TaskTelemetryTracker()
+        worker_question_queue: _queue.Queue[str] = _queue.Queue()
+        waiting_for_user_answer = [False]
+
+        def _console_progress_narrator(event: dict[str, Any]):
+            tracker.update_event(event)
+            ev = event.get("event")
+            if ev == "step_action":
+                act = event.get("action", "")
+                thought = event.get("thought", "")
+                step_num = event.get("step", 1)
+                args = event.get("args", {})
+                narration = _build_console_narration(step_num, thought, act, args)
+                log.jarvis(f"🎙️ [Side Agent]: {narration}")
+                voice.speak(narration, wait=False)
+            elif ev == "plan_start":
+                pname = event.get("plan_name", "")
+                log.jarvis(f"🎙️ [Side Agent]: Initiating plan: {pname}.")
+                voice.speak(f"Initiating plan: {pname}.", wait=False)
+            elif ev == "ask":
+                q = event.get("question", "")
+                waiting_for_user_answer[0] = True
+                log.jarvis(f"⚠️ [Worker Question]: {q}")
+                voice.speak(f"Question for you: {q}", wait=False)
+            elif ev == "answer_received":
+                waiting_for_user_answer[0] = False
+
+        def _side_agent_ask_bridge(question: str, answer_queue: _queue.Queue[str]) -> str:
+            waiting_for_user_answer[0] = True
+            try:
+                answer = answer_queue.get(timeout=120.0)
+                waiting_for_user_answer[0] = False
+                return answer
+            except _queue.Empty:
+                waiting_for_user_answer[0] = False
+                return ""
+
+        def _run_worker_job(
+            task_cmd: str,
+            start_time: float,
+            cancel_event: threading.Event,
+            answer_queue: _queue.Queue[str],
+            done_event: threading.Event,
+        ):
+            """Background worker thread executing the silent Main Worker Agent."""
+            try:
+                with scheduler.desktop():
+                    result = agent.run(
+                        task_cmd,
+                        asker=lambda question: _side_agent_ask_bridge(question, answer_queue),
+                        cancel_event=cancel_event,
+                        on_progress=_console_progress_narrator,
+                    )
+                # The work is finished before the final console/TTS output.
+                # Mark it now so Ctrl+C on a prompt rendered in that small
+                # window exits normally rather than "cancelling" completed work.
+                done_event.set()
+                if not cancel_event.is_set():
+                    log.jarvis(f"🎙️ [Communicating Agent]: Completed: {result}")
+                    voice.speak(f"Completed: {result}", wait=False)
+                    log.rule(f"done in {time.time() - start_time:.1f}s")
+            except Exception as exc:
+                if not cancel_event.is_set():
+                    log.error(f"unexpected error: {exc}")
+                    log.jarvis(f"🎙️ [Communicating Agent]: Task failed: {exc}")
+            finally:
+                done_event.set()
+
+        while True:
+            is_busy = (
+                active_worker_thread is not None
+                and active_worker_thread.is_alive()
+                and not active_worker_done.is_set()
+            )
+            current_prompt = prompt_idle
+            try:
+                task = _read_input(current_prompt).strip()
+            except (EOFError, KeyboardInterrupt):
+                if _cancel_console_worker(
+                    active_worker_thread,
+                    active_worker_cancel,
+                    active_worker_done,
+                    worker_question_queue,
+                    waiting_for_user_answer,
+                    agent,
+                    tracker,
+                ):
+                    log.warn("Cancelling active background worker task...")
+                    if active_worker_thread:
+                        active_worker_thread.join(timeout=1.5)
                     continue
-                # fall through: run the enhanced prompt as a normal task
-            elif head == "paste":
-                rest = body.split(None, 1)[1] if " " in body else ""
-                task = _paste_task(rest)
-                if not task:
-                    continue
-                # fall through: run the prompt with the image path attached
-            else:
-                task = ":" + body    # /help, /voice, /quit... mirror ':' commands
-        if task.startswith(":"):
-            c = task[1:].strip().lower()
-            if c == "wake":
-                try:
-                    _wake_loop(agent, cfg)
-                except KeyboardInterrupt:
-                    print()
-                    log.ok("hands-free mode off; back to the prompt.")
-                continue
-            if c.startswith("voice"):
-                # Voice mode is voice-ONLY: entering it replaces the typed
-                # prompt until Ctrl+C / "exit voice mode".
-                if c.endswith("off"):
-                    _persist_voice(False)
-                    log.ok("voice is already off (typed prompt).")
-                    continue
-                cfg.voice_enabled = True
-                _persist_voice(True)     # stays on across sessions
-                try:
-                    _voice_loop(agent, cfg)
-                except KeyboardInterrupt:
-                    print()
-                cfg.voice_enabled = False
-                _persist_voice(False)    # user chose the typed prompt again
-                log.ok("voice mode off - typed prompt, replies still spoken. "
-                       "(':voice on' to resume)")
-                continue
-            if _command(task, cfg):
+                print()
                 break
-            continue
-        log.rule(task[:60], "blue")
-        started = time.time()
-        try:
-            with scheduler.desktop():      # serialize with any cron job
-                result = agent.run(task, asker=_typed_asker)
-        except KeyboardInterrupt:
-            log.warn("interrupted; back to prompt.")
-            continue
-        except Exception as exc:
-            log.error(f"unexpected error: {exc}")
-            continue
-        log.jarvis(result)
-        voice.speak(result)             # async: keep the prompt responsive
-        log.rule(f"done in {time.time() - started:.1f}s")
-    sched.stop()
-    scheduler.set_default(None)
-    from . import daemon, hud
-    hud.stop_hud()
-    daemon.stop_daemon()
-    mcp.get_manager().close_all()
-    log.jarvis("Goodbye.")
-    voice.speak("Goodbye, sir.", wait=True)   # sync: the process is exiting
+            if not task:
+                continue
+
+            # If worker is waiting for a mid-task answer, forward directly
+            if is_busy and waiting_for_user_answer[0]:
+                log.info(f"Answer for Worker: '{task}'")
+                log.jarvis(f"🎙️ [Communicating Agent]: Understood, proceeding with '{task}'...")
+                voice.speak(f"Understood, proceeding with {task}", wait=False)
+                worker_question_queue.put(task)
+                waiting_for_user_answer[0] = False
+                continue
+
+            if task.startswith("/"):
+                body = task[1:].strip()
+                head = body.split(None, 1)[0].lower() if body else ""
+                if head == "enhance":
+                    rest = body.split(None, 1)[1] if " " in body else ""
+                    task = _enhance(rest, agent)
+                    if not task:
+                        continue
+                elif head == "paste":
+                    rest = body.split(None, 1)[1] if " " in body else ""
+                    task = _paste_task(rest)
+                    if not task:
+                        continue
+                else:
+                    task = ":" + body
+
+            if task.startswith(":"):
+                c = task[1:].strip().lower()
+                if c in {"stop", "cancel"}:
+                    if _cancel_console_worker(
+                        active_worker_thread,
+                        active_worker_cancel,
+                        active_worker_done,
+                        worker_question_queue,
+                        waiting_for_user_answer,
+                        agent,
+                        tracker,
+                    ):
+                        log.warn("Cancelling active Main Worker task...")
+                        log.jarvis("🎙️ [Side Agent]: Task cancelled, sir.")
+                        voice.speak("Task cancelled, sir.", wait=False)
+                    else:
+                        log.ok("No active task running.")
+                    continue
+                if c in {"status", "progress"}:
+                    summary = tracker.get_status_summary()
+                    status_msg = (
+                        f"Main Worker: {summary['status'].upper()} (Step {summary['current_step']}/{summary['total_steps']}) | "
+                        f"Action: {summary['current_action'] or 'None'} | "
+                        f"Plan: {summary['plan']}"
+                    )
+                    log.info(status_msg)
+                    continue
+                if c == "wake":
+                    try:
+                        _wake_loop(agent, cfg)
+                    except KeyboardInterrupt:
+                        print()
+                        log.ok("hands-free mode off; back to the prompt.")
+                    continue
+                if c.startswith("voice"):
+                    if c.endswith("off"):
+                        _persist_voice(False)
+                        log.ok("voice is already off (typed prompt).")
+                        continue
+                    cfg.voice_enabled = True
+                    _persist_voice(True)
+                    try:
+                        _voice_loop(agent, cfg)
+                    except KeyboardInterrupt:
+                        print()
+                    cfg.voice_enabled = False
+                    _persist_voice(False)
+                    log.ok("voice mode off - typed prompt, replies still spoken.")
+                    continue
+                if _command(task, cfg):
+                    break
+                continue
+
+            # ------------------------------------------------------------------ #
+            # CONCURRENT SIDE AGENT CHAT (WHILE WORKER IS RUNNING)
+            # ------------------------------------------------------------------ #
+            if is_busy:
+                # User is talking/asking questions while the worker is actively running in background!
+                log.info(f"User to Side Agent: '{task}'")
+                try:
+                    side_reply = _handle_side_agent_chat(task, tracker, agent.brain, cfg)
+                except KeyboardInterrupt:
+                    _cancel_console_worker(
+                        active_worker_thread,
+                        active_worker_cancel,
+                        active_worker_done,
+                        worker_question_queue,
+                        waiting_for_user_answer,
+                        agent,
+                        tracker,
+                    )
+                    log.warn("Interrupted; active task cancellation requested.")
+                    continue
+                log.jarvis(f"🎙️ [Side Agent]: {side_reply}")
+                voice.speak(side_reply, wait=False)
+                continue
+
+            # Casual chat belongs to the Communicating Agent.  Only dispatch a
+            # task when the agent's conservative classifier says it needs the
+            # computer, so greetings never receive task fillers or completion
+            # notices.
+            try:
+                chat_reply = _handle_idle_conversation(task, agent)
+            except KeyboardInterrupt:
+                # Keep the interactive console alive when Ctrl+C interrupts a
+                # foreground chat-model request; no worker exists to cancel.
+                log.warn("Conversation interrupted; ready for your next request.")
+                continue
+            if chat_reply is not None:
+                log.jarvis(f"🎙️ [Communicating Agent]: {chat_reply}")
+                voice.speak(chat_reply, wait=False)
+                continue
+
+            # ------------------------------------------------------------------ #
+            # DISPATCH NEW TASK (ASYNC BACKGROUND WORKER)
+            # ------------------------------------------------------------------ #
+            log.rule(task[:60], "blue")
+            started = time.time()
+
+            # 1. Speculative Fast Filler (<20ms instant acknowledgment by Side Agent)
+            fast_filler = get_fast_filler(task)
+            log.jarvis(f"🎙️ [Communicating Agent]: {fast_filler}")
+            voice.speak(fast_filler, wait=False)
+
+            # 2. Reset telemetry state
+            tracker.reset_for_new_task(task, max_steps=cfg.safety.max_steps)
+            # Every task gets its own cancellation signal. A finishing older
+            # worker must never clear the cancel request for a newer task.
+            active_worker_cancel = threading.Event()
+            active_worker_done = threading.Event()
+            worker_question_queue = _queue.Queue()
+            waiting_for_user_answer[0] = False
+
+            # 3. Start Main Worker in background thread (unblocking the prompt immediately!)
+            active_worker_thread = threading.Thread(
+                target=_run_worker_job,
+                args=(task, started, active_worker_cancel, worker_question_queue,
+                      active_worker_done),
+                daemon=True,
+                name="jarvis-main-worker",
+            )
+            active_worker_thread.start()
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        _shutdown_repl(sched, cfg, active_worker_cancel, active_worker_thread)
+
     return 0
 
 
@@ -717,9 +1168,20 @@ def _voice_loop(agent: Agent, cfg: Config, announce: bool = True) -> None:
             return
         log.rule(task[:60], "blue")
         started = time.time()
+
+        # Instant Speculative Fast Filler acknowledgment
+        from .live.speculative import get_fast_filler
+        from .live.telemetry_state import TaskTelemetryTracker
+        fast_filler = get_fast_filler(task)
+        log.jarvis(f"🎙️ [Communicating Agent]: {fast_filler}")
+        voice.speak(fast_filler, wait=False)
+
+        tracker = TaskTelemetryTracker()
+        tracker.reset_for_new_task(task, max_steps=cfg.safety.max_steps)
+
         try:
             with scheduler.desktop():     # serialize with any cron job
-                result = agent.run(task, asker=_voice_asker_for(agent))
+                result = agent.run(task, asker=_voice_asker_for(agent), on_progress=tracker.update_event)
         except KeyboardInterrupt:
             raise                         # exit voice mode entirely
         except Exception as exc:
@@ -806,8 +1268,50 @@ def _command(cmd: str, cfg: Config) -> bool:
             _startup(arg == "on")
         else:
             log.warn("usage: :startup on|off")
+    elif c.startswith("shadow"):
+        parts = cmd.strip().split(maxsplit=2)
+        sub = parts[1].lower() if len(parts) > 1 else "toggle"
+        arg = parts[2].strip() if len(parts) > 2 else ""
+
+        from .desktop import get_shadow_manager
+        mgr = get_shadow_manager()
+
+        if sub in {"on", "enable", "start"}:
+            mgr.enable()
+            cfg.shadow.enabled = True
+            log.ok("🌌 Shadow Desktop & Virtual Workspace Execution ENABLED (Ghost Automation active).")
+        elif sub in {"off", "disable", "stop"}:
+            mgr.disable()
+            cfg.shadow.enabled = False
+            log.ok("Shadow Desktop DISABLED (Standard foreground automation active).")
+        elif sub in {"toggle"}:
+            new_state = mgr.toggle()
+            cfg.shadow.enabled = new_state
+            if new_state:
+                log.ok("🌌 Shadow Desktop & Virtual Workspace Execution ENABLED (Ghost Automation active).")
+            else:
+                log.ok("Shadow Desktop DISABLED (Standard foreground automation active).")
+        elif sub in {"promote", "handoff", "show"}:
+            if not arg:
+                log.warn("usage: :shadow promote <window title>")
+            else:
+                if mgr.promote_window(arg):
+                    log.ok(f"Promoted shadow window matching '{arg}' to main screen.")
+                else:
+                    log.warn(f"Could not find or promote window matching '{arg}'.")
+        else:
+            log.rule("SHADOW DESKTOP & VIRTUAL WORKSPACE (GHOST AUTOMATION)", "cyan")
+            print(f"  • Shadow Mode:      {_c('ENABLED', 'green') if mgr.is_enabled() else _c('DISABLED', 'yellow')}")
+            print(f"  • Desktop Session:  {mgr.desktop_name}")
+            windows = mgr.list_windows()
+            print(f"  • Active Windows:   {len(windows)}")
+            for w in windows:
+                print(f"    - [{w.hwnd}] {w.title} ({w.class_name})")
+            print(f"\n  {_c('Commands:', 'grey')} :shadow on | :shadow off | :shadow toggle | :shadow promote <title> | :shadow status\n")
+            log.rule()
     elif c.startswith("confirm"):
         cfg.safety.confirm_each_action = c.endswith("on")
+
         log.ok(f"confirm_each_action = {cfg.safety.confirm_each_action}")
     elif c.startswith("vision"):
         cfg.brain.use_vision = c.endswith("on")
@@ -908,6 +1412,9 @@ def _command(cmd: str, cfg: Config) -> bool:
 
     elif c == "browser" or c.startswith("browser "):
         _browser_command(cmd, cfg)
+    elif c in {"live", "voice-live"} or c.startswith(("live ", "voice-live ")):
+        from .live import run_live_mode
+        run_live_mode(cfg)
     elif c == "voice" or c.startswith("voice "):
         _voice_command(cmd, cfg)
     elif c == "macro" or c.startswith("macro "):

@@ -19,9 +19,11 @@ class HudController:
         self,
         cfg: Optional[Config] = None,
         task_runner: Optional[Callable[[str], Any]] = None,
+        agent: Optional[Any] = None,
     ):
         self.cfg = cfg or Config()
         self.task_runner = task_runner
+        self.agent = agent
         self.hud_cfg = getattr(self.cfg, "hud", None)
         self.hotkeys = get_hotkey_manager()
         self.overlay: Optional[FloatingMiniHUD] = None
@@ -32,8 +34,10 @@ class HudController:
         self._cancel_voice = threading.Event()
         self._task_generation = 0
 
-    def start(self, start_overlay: bool = True) -> None:
+    def start(self, start_overlay: bool = True, agent: Optional[Any] = None) -> None:
         """Start the Floating Mini HUD and register system-wide hotkeys."""
+        if agent is not None:
+            self.agent = agent
         if self._is_active:
             return
         self._is_active = True
@@ -88,12 +92,47 @@ class HudController:
 
     def interrupt(self) -> None:
         """Instantly silence active speech playback, cancel voice listening, and abort active tasks."""
+        # 1. Silence voice TTS
         try:
             from ..utils import voice
             voice.interrupt_speech()
         except Exception:
             pass
 
+        # 2. Cancel active agent task immediately
+        try:
+            from ..agent.loop import cancel_active_agent
+            cancel_active_agent()
+        except Exception:
+            pass
+
+        if self.agent and hasattr(self.agent, "cancel"):
+            try:
+                self.agent.cancel()
+            except Exception:
+                pass
+
+        # 3. Stop active macro recording if one is in progress
+        try:
+            from ..macro import get_macro_recorder
+            rec = get_macro_recorder()
+            if rec.is_recording:
+                rec.stop_recording(save_to_memory=False)
+                log.info("⏹ Active macro recording cancelled.")
+                if self.overlay:
+                    self.overlay.set_macro_recording(False)
+        except Exception:
+            pass
+
+        # 4. Disable camera mouse control if active
+        try:
+            from ..tools import mouse_control
+            if mouse_control.is_enabled():
+                mouse_control.set_enabled(False)
+        except Exception:
+            pass
+
+        # 5. Cancel voice listening
         if self._is_voice_listening:
             self._cancel_voice.set()
             self._is_voice_listening = False
@@ -102,22 +141,23 @@ class HudController:
 
         self._task_generation += 1
 
-        self.set_state("idle", detail="Interrupted / Silenced")
+        self.set_state("idle", detail="Stopped / Ready")
         if self.overlay:
             self.overlay.set_response(
                 "User Directive",
-                "[Response / Speech silenced by user]"
+                "[Task execution stopped by user]"
             )
 
         try:
             from ..browser_worker import emit
-            emit("activity", kind="warn", message="Interrupted by user via HUD")
+            emit("activity", kind="warn", message="Stopped by user via HUD Stop button")
             emit("state", state="listening", label="Awaiting directive")
             emit("input_request", prompt="› ", mode="command")
         except Exception:
             pass
 
-        log.info("⏹ HUD interrupt: active speech silenced and directive cancelled.")
+        log.info("⏹ HUD interrupt: task execution stopped and voice silenced.")
+
 
     # -- User Interactions ------------------------------------------------- #
     def _on_user_submit(self, command_text: str) -> None:
@@ -288,6 +328,22 @@ class HudController:
             if self.overlay:
                 self.overlay.set_macro_recording(False)
             self.set_state("error", detail=f"Macro error: {exc}")
+
+    def toggle_shadow(self) -> bool:
+        """Toggle Shadow Desktop & Virtual Workspace mode."""
+        try:
+            from ..desktop import toggle_shadow, is_shadow_enabled
+            enabled = toggle_shadow()
+            if self.cfg and hasattr(self.cfg, "shadow"):
+                self.cfg.shadow.enabled = enabled
+            status_msg = "Shadow Desktop ON" if enabled else "Shadow Desktop OFF"
+            self.set_state(self.state, detail=status_msg)
+            log.ok(f"🌌 HUD: {status_msg}")
+            return enabled
+
+        except Exception as exc:
+            log.warn(f"HUD shadow toggle failed: {exc}")
+            return False
 
     def set_state(self, state_name: str, detail: Optional[str] = None) -> None:
         self.state = state_name

@@ -1,0 +1,4 @@
+[submodule "relay_server"]
+	path = relay_server
+	url = https://github.com/Satvik374/jarvis-server.git
+	branch = main

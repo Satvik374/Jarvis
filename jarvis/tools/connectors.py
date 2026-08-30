@@ -500,9 +500,9 @@ def configured(service: str) -> bool:
     spec = _SERVICES.get(service)
     if spec is None:
         return False
-    if service == "whatsapp" and os.getenv("WHATSAPP_INBOX", "").strip():
+    if service == "whatsapp" and _env("WHATSAPP_INBOX")[0]:
         return True          # inbox-only setups can read without API creds
-    return all(os.getenv(name, "").strip() for name in spec["env"])
+    return all(bool(_env(name)[0]) for name in spec["env"])
 
 
 def fetch(service: str, op: str, query: str = "", target: str = "",
@@ -544,7 +544,7 @@ def status() -> str:
         if configured(name):
             rows.append(f"  {name:<9} ready      (ops: {spec['ops']})")
         else:
-            missing = [e for e in spec["env"] if not os.getenv(e, "").strip()]
+            missing = [e for e in spec["env"] if not _env(e)[0]]
             rows.append(f"  {name:<9} not set up (needs {', '.join(missing)} "
                         "in .env)")
     return "connectors:\n" + "\n".join(rows)

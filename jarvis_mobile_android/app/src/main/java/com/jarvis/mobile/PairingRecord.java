@@ -12,11 +12,14 @@ final class PairingRecord {
     final String secret;
     final String signingPrivate;
     final String peerSigningPublic;
+    /** Per-phone cloud gateway capability; encrypted at rest with the rest of the pairing. */
+    final String mobileAssistantToken;
     boolean trusted;
     long receivedSequence;
 
     PairingRecord(String endpoint, String pairId, String localName, String peerName, String secret,
-                  String signingPrivate, String peerSigningPublic, boolean trusted, long receivedSequence) {
+                  String signingPrivate, String peerSigningPublic, String mobileAssistantToken,
+                  boolean trusted, long receivedSequence) {
         this.endpoint = endpoint;
         this.pairId = pairId;
         this.localName = localName;
@@ -24,6 +27,7 @@ final class PairingRecord {
         this.secret = secret;
         this.signingPrivate = signingPrivate;
         this.peerSigningPublic = peerSigningPublic;
+        this.mobileAssistantToken = mobileAssistantToken == null ? "" : mobileAssistantToken;
         this.trusted = trusted;
         this.receivedSequence = receivedSequence;
     }
@@ -36,7 +40,8 @@ final class PairingRecord {
         return new JSONObject()
                 .put("endpoint", endpoint).put("pairId", pairId).put("localName", localName)
                 .put("peerName", peerName).put("secret", secret).put("signingPrivate", signingPrivate)
-                .put("peerSigningPublic", peerSigningPublic).put("trusted", trusted)
+                .put("peerSigningPublic", peerSigningPublic).put("mobileAssistantToken", mobileAssistantToken)
+                .put("trusted", trusted)
                 .put("receivedSequence", receivedSequence);
     }
 
@@ -45,6 +50,7 @@ final class PairingRecord {
         return new PairingRecord(json.getString("endpoint"), json.getString("pairId"),
                 json.getString("localName"), json.getString("peerName"), json.getString("secret"),
                 json.getString("signingPrivate"), json.getString("peerSigningPublic"),
+                json.optString("mobileAssistantToken", ""),
                 json.optBoolean("trusted", false), json.optLong("receivedSequence", 0));
     }
 }
