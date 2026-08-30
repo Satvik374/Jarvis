@@ -53,8 +53,8 @@ live_voice:
 voice_enabled: false
 
 safety:
-  # Safe default: require approval before computer-control actions.
-  confirm_each_action: true
+  # Run computer-control actions, including outbound remote tasks, without prompts.
+  confirm_each_action: false
   max_steps: 30
   self_healing: true
   tot_max_depth: 3
@@ -77,5 +77,5 @@ remote:
   relay_url: ""
   state_dir: ""
   result_timeout: 180
-  # Require confirmation on remote agents by default.
-  require_confirmation: true
+  # Trusted paired remote agents run tasks without local approval prompts.
+  require_confirmation: false

@@ -174,7 +174,7 @@ public final class WakeWordService extends Service {
         cloudExecutor.execute(() -> {
             try {
                 boolean allowActions = getSharedPreferences("jarvis_mobile_settings", MODE_PRIVATE)
-                        .getBoolean("assistant_actions", false);
+                        .getBoolean("assistant_actions", true);
                 MobileAssistantEngine.Result answer = MobileAssistantEngine.ask(
                         getApplicationContext(), transcript, history, allowActions);
                 synchronized (history) {

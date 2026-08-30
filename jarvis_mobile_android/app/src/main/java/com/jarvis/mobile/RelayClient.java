@@ -58,11 +58,31 @@ final class RelayClient {
 
     /** Calls the cloud-hosted Mobile Jarvis gateway; it never contacts the paired computer. */
     AssistantReply askMobileAssistant(PairingRecord pairing, String prompt, JSONArray history) throws Exception {
+        return askMobileAssistant(pairing, prompt, history, "");
+    }
+
+    /**
+     * Sends the current accessibility observation alongside an autonomous phone task.
+     * The relay sees only the phone-specific capability, never desktop credentials.
+     */
+    AssistantReply askMobileAssistant(PairingRecord pairing, String prompt, JSONArray history,
+                                      String deviceContext) throws Exception {
+        return askMobileAssistant(pairing, prompt, history, deviceContext, "");
+    }
+
+    AssistantReply askMobileAssistant(PairingRecord pairing, String prompt, JSONArray history,
+                                      String deviceContext, String screenImage) throws Exception {
         if (pairing.mobileAssistantToken.isBlank()) {
             throw new IllegalStateException("This pairing predates Mobile Jarvis. Pair this phone again to enable it.");
         }
         JSONObject body = new JSONObject().put("prompt", prompt);
         if (history != null) body.put("history", history);
+        if (deviceContext != null && !deviceContext.isBlank()) {
+            body.put("device_context", deviceContext);
+        }
+        if (screenImage != null && !screenImage.isBlank()) {
+            body.put("screen_image", screenImage);
+        }
         JSONObject response = request("POST", "/v1/mobile-assistant", body, 50,
                 "Bearer " + pairing.mobileAssistantToken);
         String audio = response.optString("audio", "");

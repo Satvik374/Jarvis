@@ -9,6 +9,8 @@ import java.util.Locale;
 
 /** Standalone Mobile Jarvis cloud conversation and tightly-scoped phone actions. */
 final class MobileAssistantEngine {
+    private static final int MAX_AUTOMATION_STEPS = 8;
+
     static final class Result {
         final String reply;
         final String actionResult;
@@ -30,35 +32,84 @@ final class MobileAssistantEngine {
         if (pairing == null || !pairing.trusted) {
             throw new IllegalStateException("Pair and trust this phone once before using standalone Mobile Jarvis.");
         }
-        RelayClient.AssistantReply response = new RelayClient(pairing.endpoint)
-                .askMobileAssistant(pairing, prompt, history);
+        RelayClient relay = new RelayClient(pairing.endpoint);
+        if (!allowActions) {
+            RelayClient.AssistantReply response = relay.askMobileAssistant(pairing, prompt, history);
+            String actionResult = response.command.trim().isEmpty() ? ""
+                    : "Turn on phone control to let Jarvis carry out this request.";
+            return withSpeech(response.reply, actionResult, false, response);
+        }
 
-        String actionResult = "";
+        if (isLocked(context)) {
+            RelayClient.AssistantReply response = relay.askMobileAssistant(pairing, prompt, history);
+            return withSpeech(response.reply,
+                    "Your phone is locked. Unlock it before Jarvis can control the screen.",
+                    false, response);
+        }
+
+        MobileCommandExecutor commands = new MobileCommandExecutor(context);
+        StringBuilder actionLog = new StringBuilder();
+        String previousAction = "";
         boolean actionRan = false;
-        String command = response.command.trim();
-        if (!command.isEmpty()) {
-            if (!allowActions) {
-                actionResult = "Jarvis suggested a phone action, but direct actions are turned off in this tab.";
-            } else if (isLocked(context)) {
-                // Android deliberately prevents an app from bypassing the
-                // secure lock screen. Do not attempt gestures while locked.
-                actionResult = "Your phone is locked. Unlock it before Jarvis can control the screen.";
-            } else if (!isAllowedCommand(command)) {
-                actionResult = "Jarvis proposed an unsupported mobile action, so it was not run.";
-            } else {
-                MobileCommandExecutor.Result executed = new MobileCommandExecutor(context).execute(command);
-                actionResult = executed.message;
-                actionRan = executed.ok;
+        boolean completed = false;
+        RelayClient.AssistantReply response = null;
+        for (int step = 1; step <= MAX_AUTOMATION_STEPS; step++) {
+            MobileCommandExecutor.AssistantObservation observation = commands.observeForAssistant(
+                    previousAction, step, MAX_AUTOMATION_STEPS);
+            response = relay.askMobileAssistant(pairing, prompt, history,
+                    observation.context, observation.screenImage);
+            String command = response.command.trim();
+            if (command.isEmpty()) {
+                completed = true;
+                break;
+            }
+
+            if (!isAllowedCommand(command)) {
+                appendAction(actionLog, step, command,
+                        "Jarvis proposed an unsupported phone action, so it was not run.");
+                break;
+            }
+            MobileCommandExecutor.Result executed = commands.execute(command);
+            appendAction(actionLog, step, command, executed.message);
+            previousAction = command + " → " + executed.message;
+            actionRan |= executed.ok;
+            if (!executed.ok) break;
+            try {
+                // Give Android time to publish the window resulting from a
+                // navigation or gesture before inspecting the next step.
+                Thread.sleep(450L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                break;
             }
         }
 
+        if (response == null) {
+            throw new IllegalStateException("Mobile Jarvis did not return a control plan.");
+        }
+        if (actionLog.length() == 0 && !response.command.trim().isEmpty()) {
+            actionLog.append("Jarvis stopped before a phone action could be completed.");
+        } else if (actionLog.length() > 0 && !completed) {
+            actionLog.append("\nControl stopped before the task was complete.");
+        }
+        return withSpeech(response.reply, actionLog.toString(), actionRan, response);
+    }
+
+    private static Result withSpeech(String reply, String actionResult, boolean actionRan,
+                                     RelayClient.AssistantReply response) {
         long speechDurationMs = 0L;
         if (response.pcmAudio.length > 0) {
             speechDurationMs = (response.pcmAudio.length * 1_000L)
                     / Math.max(1, response.sampleRate * 2L);
             PcmAudioPlayer.playAsync(response.pcmAudio, response.sampleRate);
         }
-        return new Result(response.reply, actionResult, actionRan, speechDurationMs);
+        return new Result(reply, actionResult, actionRan, speechDurationMs);
+    }
+
+    private static void appendAction(StringBuilder log, int step, String command, String result) {
+        if (log.length() > 0) log.append('\n');
+        log.append("Step ").append(step).append(": ").append(command)
+                .append(" — ").append(result);
     }
 
     private static boolean isLocked(Context context) {
@@ -66,16 +117,21 @@ final class MobileAssistantEngine {
         return keyguard != null && keyguard.isKeyguardLocked();
     }
 
-    /** Never allow raw coordinate gestures or arbitrary intents from an LLM. */
+    /** Only commands implemented by MobileCommandExecutor may reach Android. */
     static boolean isAllowedCommand(String command) {
         String lower = command.trim().toLowerCase(Locale.ROOT);
         return lower.startsWith("open ")
-                || lower.equals("screenshot")
-                || lower.matches("tap\\s+element\\s+\\d+")
+                || lower.startsWith("launch ")
+                || lower.equals("screenshot") || lower.equals("inspect")
+                || lower.equals("inspect screen") || lower.equals("capabilities")
+                || lower.matches("(?:tap|click)\\s+element\\s+\\d+")
                 || lower.matches("long[- ]press\\s+element\\s+\\d+")
                 || lower.matches("type\\s+element\\s+\\d+\\s+.+")
                 || lower.matches("scroll\\s+element\\s+\\d+\\s+(forward|backward)")
                 || lower.matches("swipe\\s+element\\s+\\d+\\s+(up|down|left|right)")
+                || lower.matches("(?:tap|click)\\s+-?\\d+\\s+-?\\d+")
+                || lower.matches("swipe\\s+-?\\d+\\s+-?\\d+\\s+-?\\d+\\s+-?\\d+")
+                || lower.matches("type\\s+.+")
                 || lower.equals("back")
                 || lower.equals("home");
     }

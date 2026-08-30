@@ -139,7 +139,7 @@ public final class MainActivity extends AppCompatActivity {
         stopVoiceButton = findViewById(R.id.stopVoiceButton);
         deviceName.setText(Build.MANUFACTURER + " " + Build.MODEL);
         SharedPreferences settings = getSharedPreferences(SETTINGS, MODE_PRIVATE);
-        assistantActions.setChecked(settings.getBoolean("assistant_actions", false));
+        assistantActions.setChecked(settings.getBoolean("assistant_actions", true));
     }
 
     private void setupTabs() {

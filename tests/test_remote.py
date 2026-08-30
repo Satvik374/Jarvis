@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import os
 import base64
+import json
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 from jarvis import remote
@@ -318,6 +319,33 @@ class RelayProtocolTests(unittest.TestCase):
     def tearDownClass(cls):
         cls._temp.cleanup()
 
+    def test_root_serves_live_relay_dashboard(self):
+        dashboard = self.client.get("/")
+
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn("Jarvis Remote Relay", dashboard.text)
+        self.assertIn('fetch("/health"', dashboard.text)
+        self.assertIn('href="/docs"', dashboard.text)
+        self.assertEqual(dashboard.headers["cache-control"], "no-store")
+
+    def test_mobile_gateway_accepts_owner_managed_credential_secret(self):
+        import relay_server.main as relay_main
+
+        credentials = Mock(valid=True, expired=False, token="access-token")
+        credential_json = {"type": "authorized_user", "refresh_token": "example"}
+        with patch.dict(os.environ, {
+            "JARVIS_MOBILE_VERTEX_CREDENTIALS_JSON": json.dumps(credential_json),
+            "JARVIS_MOBILE_VERTEX_PROJECT": "jarvis-test-project",
+        }, clear=False), patch("google.auth.load_credentials_from_dict",
+                               return_value=(credentials, None)) as load_credentials:
+            token, project = relay_main.MobileVertexGateway()._access_token_and_project()
+
+        self.assertEqual((token, project), ("access-token", "jarvis-test-project"))
+        load_credentials.assert_called_once_with(
+            credential_json,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+
     def test_pair_then_relay_authenticated_envelope(self):
         controller = remote.create_identity()
         agent = remote.create_identity()
@@ -379,6 +407,50 @@ class RelayProtocolTests(unittest.TestCase):
         self.assertEqual(allowed.status_code, 200)
         self.assertEqual(allowed.json()["reply"], "Good day.")
         respond.assert_called_once_with("hello", [])
+
+    def test_mobile_assistant_forwards_bounded_live_phone_context(self):
+        controller = remote.create_identity()
+        agent = remote.create_identity()
+        created = self.client.post("/v1/pairings", json={
+            "name": "Laptop", "kx_public": controller.kx_public,
+            "sign_public": controller.sign_public,
+        }).json()
+        token = self.client.post("/v1/pairings/claim", json={
+            "code": created["code"], "name": "Pixel", "kx_public": agent.kx_public,
+            "sign_public": agent.sign_public,
+        }).json()["mobile_assistant_token"]
+        context = "MOBILE UI ELEMENTS: [0] Button 'Search' center=(540, 250)"
+        with patch("relay_server.main.mobile_vertex.respond",
+                   return_value={"reply": "Searching.", "command": "tap element 0"}) as respond:
+            allowed = self.client.post("/v1/mobile-assistant", headers={
+                "Authorization": f"Bearer {token}"
+            }, json={"prompt": "Search for music", "history": [], "device_context": context})
+
+        self.assertEqual(allowed.status_code, 200)
+        respond.assert_called_once_with("Search for music", [], context)
+
+    def test_mobile_assistant_normalizes_urlsafe_screen_capture(self):
+        controller = remote.create_identity()
+        agent = remote.create_identity()
+        created = self.client.post("/v1/pairings", json={
+            "name": "Laptop", "kx_public": controller.kx_public,
+            "sign_public": controller.sign_public,
+        }).json()
+        token = self.client.post("/v1/pairings/claim", json={
+            "code": created["code"], "name": "Pixel", "kx_public": agent.kx_public,
+            "sign_public": agent.sign_public,
+        }).json()["mobile_assistant_token"]
+        image_bytes = b"\xff\xd8\xff\xe0jarvis-preview"
+        image = base64.urlsafe_b64encode(image_bytes).decode("ascii")
+        normalized = base64.b64encode(image_bytes).decode("ascii")
+        with patch("relay_server.main.mobile_vertex.respond",
+                   return_value={"reply": "I can see it.", "command": ""}) as respond:
+            allowed = self.client.post("/v1/mobile-assistant", headers={
+                "Authorization": f"Bearer {token}"
+            }, json={"prompt": "What is on screen?", "history": [], "screen_image": image})
+
+        self.assertEqual(allowed.status_code, 200)
+        respond.assert_called_once_with("What is on screen?", [], "", normalized)
 
 
 if __name__ == "__main__":

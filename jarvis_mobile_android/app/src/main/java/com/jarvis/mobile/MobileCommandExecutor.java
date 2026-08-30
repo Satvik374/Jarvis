@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.net.Uri;
+import android.util.Base64;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -16,6 +17,16 @@ import java.util.regex.Pattern;
 
 /** Executes the deliberately small command surface accepted by the phone agent. */
 final class MobileCommandExecutor {
+    static final class AssistantObservation {
+        final String context;
+        final String screenImage;
+
+        AssistantObservation(String context, String screenImage) {
+            this.context = context;
+            this.screenImage = screenImage;
+        }
+    }
+
     static final class Result {
         final boolean ok;
         final String message;
@@ -110,6 +121,36 @@ final class MobileCommandExecutor {
         return new Result(true, "Supported mobile commands: " + String.join(", ", CAPABILITIES)
                 + ". Accessibility ready: " + JarvisAccessibilityService.isAvailable()
                 + ". Screenshot ready: " + JarvisAccessibilityService.canTakeScreenshot() + ".");
+    }
+
+    /** Build a fresh, privacy-bounded observation for one autonomous control step. */
+    AssistantObservation observeForAssistant(String previousAction, int step, int maximumSteps) {
+        JarvisAccessibilityService.UiSnapshot snapshot =
+                JarvisAccessibilityService.inspectScreen(0, 0);
+        StringBuilder context = new StringBuilder();
+        context.append("Autonomous control step ").append(step).append(" of ")
+                .append(maximumSteps).append(". ");
+        if (previousAction != null && !previousAction.isBlank()) {
+            context.append("Previous phone action: ")
+                    .append(previousAction.replaceAll("[\\r\\n\\t]+", " ").trim())
+                    .append("\n");
+        }
+        if (snapshot.error != null) {
+            context.append("Accessibility observation unavailable: ").append(snapshot.error)
+                    .append(" You may still open an app or URL, but do not invent element IDs.");
+        } else {
+            context.append(snapshot.summary);
+        }
+        String screenImage = "";
+        if (JarvisAccessibilityService.canTakeScreenshot()) {
+            JarvisAccessibilityService.ScreenshotCapture capture = JarvisAccessibilityService.screenshot();
+            if (capture.error == null && capture.jpeg != null) {
+                screenImage = Base64.encodeToString(capture.jpeg, Base64.URL_SAFE | Base64.NO_WRAP);
+                context.append("\nA compact JPEG screen capture is attached at native size ")
+                        .append(capture.width).append('x').append(capture.height).append('.');
+            }
+        }
+        return new AssistantObservation(context.toString(), screenImage);
     }
 
     private Result screenshot() {

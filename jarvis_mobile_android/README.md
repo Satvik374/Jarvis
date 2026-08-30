@@ -4,8 +4,8 @@ Jarvis Mobile now has two modes:
 
 1. **Mobile Jarvis** is a standalone, cloud-backed chat and voice assistant.
    After one secure phone pairing, it continues to work when the Jarvis
-   computer is off. It can answer, speak Gemini TTS responses, and—only when
-   you enable the in-app toggle—run the narrow, auditable phone actions below.
+   computer is off. It can answer, speak Gemini TTS responses, and control an
+   unlocked phone through its explicitly enabled Accessibility service.
 2. **Phone setup** keeps the existing paired-computer remote agent.
 
 Both modes use the same `jarvis-remote-v1` protocol as `jarvis/remote.py`: X25519 key exchange,
@@ -26,22 +26,23 @@ JARVIS_MOBILE_VERTEX_TTS_MODEL=gemini-3.1-flash-tts-preview
 JARVIS_MOBILE_VERTEX_TTS_VOICE=Kore
 ```
 
-For local relay development, `gcloud auth application-default login` is enough.
-Do **not** copy an ADC access token or its refresh token from a computer into
-the APK or phone: access tokens expire, and a refresh token would permanently
-expose the Google account. The relay refreshes its own Cloud Run/service-account
-credential server-side; the phone receives only a random per-phone gateway
-capability stored in Android Keystore-backed encrypted preferences.
+For a Render deployment, put the entire owner-managed service-account JSON
+(recommended) or ADC JSON in Render's secret
+`JARVIS_MOBILE_VERTEX_CREDENTIALS_JSON`; never put it in the APK, this
+repository, or a phone. The relay refreshes that credential server-side; the
+phone receives only a random per-phone gateway capability stored in
+Keystore-backed encrypted preferences.
 
 Redeploy the relay, then pair the phone again once. The claim response supplies
 the new phone-only capability. Open **Mobile Jarvis**, type a message or tap
 **Voice**. The paired computer is not contacted for these requests.
 
-When **Allow Jarvis to run safe phone actions after I ask** is enabled, Mobile
-Jarvis may execute only `open`, `screenshot`, element-addressed tap/type/scroll/
-swipe, `back`, and `home`. Raw-coordinate gestures and arbitrary intents from a
-model are rejected. Android Accessibility must still be explicitly enabled for
-screen actions.
+Mobile Jarvis automatically takes a compact screen observation and accessibility
+element map at every control step. It can open apps or URLs; inspect the screen;
+tap/click; long-press; type; scroll; swipe; navigate back/home; and, only as a
+last fallback, use bounded raw screen coordinates. Each task is limited to eight
+observed steps, and the app displays an audit line for every action. Android
+Accessibility must still be explicitly enabled for screen actions.
 
 ## Wake word and screen-off listening
 
@@ -59,9 +60,10 @@ recognizer and is not designed as an unrestricted always-on hotword engine; the
 foreground notification provides the reliable stop control while the display is
 off. If Android kills the service, open the app and enable the listener again.
 
-Jarvis cannot bypass a PIN, pattern, password, biometric prompt, or Android's
-secure lock screen. Mobile Jarvis can still answer and speak while locked, but
-it refuses screen-control actions until the owner unlocks the device.
+Jarvis cannot bypass a PIN, pattern, password, biometric prompt, secure-screen
+capture protection, or Android's secure lock screen. Mobile Jarvis can still
+answer and speak while locked, but it refuses screen-control actions until the
+owner unlocks the device.
 
 ## Pair the phone to the computer
 

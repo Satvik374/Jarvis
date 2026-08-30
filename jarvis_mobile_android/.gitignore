@@ -5,3 +5,5 @@ app/build/
 local.properties
 build-output.log
 build-error.log
+/.jarvis-gradle-cache/
+*.apk

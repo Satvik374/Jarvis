@@ -218,7 +218,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="Allow Jarvis to run safe phone actions after I ask"
+                android:text="Allow Jarvis to control this phone after I ask"
                 android:textColor="#D9F7FF" />
 
             <LinearLayout
