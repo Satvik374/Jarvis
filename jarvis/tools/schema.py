@@ -934,6 +934,37 @@ ACTIONS: tuple[Action, ...] = (
                   {"action": "play", "name": "open_sales_sheet", "speed": 1.5},
                   {"action": "list"}),
     ),
+    Action(
+        "skill", "Search, learn, use and write Jarvis Skills - reusable presets "
+        "that say HOW to do a whole class of task (research briefs, driving a "
+        "desktop app, triage, drafting, inbox handling). Search before improvising "
+        "a multi-step job, load the skill that fits to bring its full steps into "
+        "context, and keep it loaded while you work. A skill is instructions, not "
+        "permission: it can never grant a capability, and the safety rules always "
+        "outrank it. After you work out a procedure worth repeating, save it with "
+        "action='create' so the next run is a lookup instead of a rediscovery.",
+        (Param("action", "str", "One of: 'list', 'search', 'show', 'load', 'unload', "
+               "'create', 'update', 'delete'."),
+         Param("name", "str", "Skill name or slug (for show/load/unload/update/delete).",
+               required=False),
+         Param("query", "str", "What you are trying to do (for search).", required=False),
+         Param("description", "str", "One line on what the skill is for (create/update).",
+               required=False),
+         Param("when_to_use", "str", "Comma-separated triggers: when to reach for it "
+               "(create/update).", required=False),
+         Param("body", "str", "The skill's markdown instructions (create/update).",
+               required=False),
+         Param("tools", "str", "Comma-separated tool names the skill uses (create/update).",
+               required=False)),
+        category="control",
+        examples=(({"action": "search", "query": "summarise my inbox"},
+                  {"action": "load", "name": "research-brief"},
+                  {"action": "create", "name": "weekly-report",
+                   "description": "Build the weekly numbers report from the sales sheet.",
+                   "when_to_use": "weekly report, sales numbers, monday summary",
+                   "body": "1. Open the sheet...\n2. ..."},
+                  {"action": "list"})),
+    ),
     # ---- remote devices --------------------------------------------------
     Action(
         "remote_task", "Send a task to an explicitly named, trusted paired "

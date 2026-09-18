@@ -9,6 +9,7 @@ STT  - record the microphone with sounddevice (simple energy-based
 
 from __future__ import annotations
 
+import atexit
 import copy
 from dataclasses import dataclass
 import io
@@ -18,6 +19,7 @@ import queue
 import struct
 import tempfile
 import threading
+import time
 import wave
 
 from ..config import VoiceConfig
@@ -39,11 +41,127 @@ _voice_epoch = 0
 _speech_state = threading.Condition()
 _speech_lifecycle_lock = threading.Lock()
 _speech_playback_lock = threading.Lock()
+_active_playback_lock = threading.Lock()
 _sync_speech_lock = threading.Lock()
 _sync_owner: object | None = None
 _active_playback_cancel: threading.Event | None = None
-_active_playback_lock = threading.Lock()
+from pathlib import Path
+
 _is_speaking_flag = False
+_live_mode_active = False
+
+#: Live mode is signalled *across processes* - the browser server owns the flag
+#: and the console worker reads it - through a file in the temp directory. The
+#: reader used to trust the file's mere existence, so a live session that was
+#: crashed or force-killed left the flag behind and muted every later session
+#: forever: not only live voice, but ordinary terminal speech too. The owner now
+#: heartbeats the file while live mode is on, and a flag that has gone quiet is
+#: treated as abandoned and removed.
+_LIVE_FLAG_NAME = "jarvis_live_mode.flag"
+_LIVE_FLAG_HEARTBEAT_SECONDS = 15.0
+_LIVE_FLAG_MAX_AGE_SECONDS = 90.0
+_live_flag_owner_pid: int | None = None
+_live_flag_heartbeat: threading.Thread | None = None
+_live_flag_stop = threading.Event()
+
+
+def _live_flag_path() -> Path:
+    return Path(tempfile.gettempdir()) / _LIVE_FLAG_NAME
+
+
+def _clear_live_flag(force: bool = False) -> None:
+    """Stop heartbeating and remove the flag.
+
+    ``force`` is for an explicit stop, which ends live mode for the machine
+    whoever raised the flag. Without it the removal is ownership-scoped, which
+    is what an exit path needs: a process must not delete a flag another live
+    session is still heartbeating.
+    """
+    global _live_flag_owner_pid, _live_flag_heartbeat
+    _live_flag_stop.set()
+    _live_flag_heartbeat = None
+    owned = _live_flag_owner_pid == os.getpid()
+    _live_flag_owner_pid = None
+    if not (force or owned):
+        return
+    try:
+        path = _live_flag_path()
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
+
+
+def _release_live_flag_at_exit() -> None:
+    """Never leave a live-mode flag for the next session to inherit."""
+    if _live_flag_owner_pid == os.getpid():
+        _clear_live_flag()
+
+
+atexit.register(_release_live_flag_at_exit)
+
+
+def _heartbeat_live_flag() -> None:
+    """Keep the flag fresh so other processes can keep trusting it."""
+    while not _live_flag_stop.wait(_LIVE_FLAG_HEARTBEAT_SECONDS):
+        try:
+            path = _live_flag_path()
+            if path.exists():
+                os.utime(path, None)
+            else:
+                path.write_text(str(os.getpid()), encoding="utf-8")
+        except Exception:
+            return
+
+
+def set_live_mode_active(active: bool) -> None:
+    """Set whether Live Voice Mode (e.g. gpt-realtime) is active.
+    
+    When active, the Communication Agent is silenced and must not speak.
+    """
+    global _live_mode_active, _live_flag_owner_pid, _live_flag_heartbeat
+    _live_mode_active = bool(active)
+    if not _live_mode_active:
+        _clear_live_flag(force=True)
+        return
+    _live_flag_stop.clear()
+    _live_flag_owner_pid = os.getpid()
+    try:
+        _live_flag_path().write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+    if _live_flag_heartbeat is None or not _live_flag_heartbeat.is_alive():
+        _live_flag_heartbeat = threading.Thread(
+            target=_heartbeat_live_flag,
+            name="jarvis-live-flag-heartbeat",
+            daemon=True,
+        )
+        _live_flag_heartbeat.start()
+    interrupt_speech()
+
+
+def is_live_mode_active() -> bool:
+    """Return True if Live Voice Mode is active (Communication Agent must not speak).
+
+    A flag whose owner stopped heartbeating it is abandoned: a crashed or
+    force-killed live session must not leave Jarvis permanently mute, so the
+    flag is discarded and reported as inactive.
+    """
+    if _live_mode_active or os.environ.get("JARVIS_LIVE_MODE") == "1":
+        return True
+    try:
+        age = time.time() - _live_flag_path().stat().st_mtime
+    except OSError:
+        return False
+    except Exception:
+        return False
+    if age <= _LIVE_FLAG_MAX_AGE_SECONDS:
+        return True
+    try:
+        _live_flag_path().unlink()
+    except Exception:
+        pass
+    return False
 
 
 def is_speaking() -> bool:
@@ -166,7 +284,7 @@ def _current_voice_snapshot() -> _VoiceSnapshot:
 
 def configure(brain, config: VoiceConfig) -> None:
     """Connect voice output to Jarvis's authenticated Gemini brain."""
-    global _brain, _tts_config, _voice_epoch, _sync_owner, _kokoro_broken, _gemini_broken, _edge_broken
+    global _brain, _tts_config, _voice_epoch, _sync_owner, _kokoro_broken, _gemini_broken, _edge_broken, _azure_speech_broken, _fish_audio_broken
     with _speech_lifecycle_lock:
         with _speech_state:
             _next_speech_generation_locked()
@@ -176,6 +294,8 @@ def configure(brain, config: VoiceConfig) -> None:
             _kokoro_broken = False
             _gemini_broken = False
             _edge_broken = False
+            _azure_speech_broken = False
+            _fish_audio_broken = False
             _sync_owner = None
             _SPEECH_DISPATCHER.discard_pending()
             _speech_state.notify_all()
@@ -184,7 +304,7 @@ def configure(brain, config: VoiceConfig) -> None:
 
 def reset() -> None:
     """Clear configured TTS state and stop any asynchronous playback."""
-    global _brain, _tts_config, _voice_epoch, _sync_owner, _kokoro_broken, _gemini_broken, _edge_broken
+    global _brain, _tts_config, _voice_epoch, _sync_owner, _kokoro_broken, _gemini_broken, _edge_broken, _azure_speech_broken, _fish_audio_broken
     # Invalidate synthesis immediately; never wait behind a cloud request.
     with _speech_lifecycle_lock:
         with _speech_state:
@@ -195,6 +315,8 @@ def reset() -> None:
             _kokoro_broken = False  # the loaded Kokoro model itself is kept
             _gemini_broken = False
             _edge_broken = False
+            _azure_speech_broken = False
+            _fish_audio_broken = False
             _sync_owner = None
             _SPEECH_DISPATCHER.discard_pending()
             _speech_state.notify_all()
@@ -242,7 +364,74 @@ _kokoro = None                 # loaded once, on first utterance
 _kokoro_broken = False         # failed once -> stop retrying, use Edge/Gemini
 _gemini_broken = False         # failed once -> stop retrying, use Edge
 _edge_broken = False           # failed once -> stop retrying, use SAPI
+_azure_speech_broken = False   # failed once -> stop retrying, use Kokoro/Edge/SAPI
+_fish_audio_broken = False     # failed once -> stop retrying, use Edge/Kokoro/SAPI
 _kokoro_lock = threading.Lock()
+
+
+def _clean_for_speech(text: str) -> str:
+    """Prepare assistant response for natural text-to-speech synthesis.
+
+    Strips terminal/agent prefixes, emojis, code blocks, URLs, markdown syntax,
+    and excessive length so local TTS reads cleanly and naturally.
+    """
+    if not text:
+        return ""
+
+    import re
+
+    # 1. Remove agent labels and prefixes:
+    # "🎙️ [Communicating Agent]: ...", "[Side Agent]: ...", "[Worker Question]: ...", etc.
+    cleaned = re.sub(
+        r"^(?:[\U00010000-\U0010ffff\u2600-\u27bf\ufe00-\ufe0f\s]*\[(?:Communicating Agent|Side Agent|Worker Question|scheduled|HUD)\][:\s]*)",
+        "",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+
+    # 2. Replace multi-line code blocks with brief spoken indicator
+    cleaned = re.sub(r"```[\w]*\n[\s\S]*?\n```", " [Code snippet provided] ", cleaned)
+    # Remove inline backticks: `code` -> code
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+
+    # 3. Replace Markdown links [text](url) -> text
+    cleaned = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", cleaned)
+
+    # 4. Replace raw URLs (http:// or https://) with simplified text
+    cleaned = re.sub(r"https?://(?:www\.)?(\S+)", r"the link", cleaned)
+
+    # 5. Remove markdown headers (#, ##, ###)
+    cleaned = re.sub(r"^\s*#{1,6}\s*", "", cleaned, flags=re.MULTILINE)
+
+    # 6. Remove markdown formatting markers (*, **, _, __, ~~, >, |)
+    cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"\*([^*]+)\*", r"\1", cleaned)
+    cleaned = re.sub(r"__([^_]+)__", r"\1", cleaned)
+    cleaned = re.sub(r"_([^_]+)_", r"\1", cleaned)
+    cleaned = re.sub(r"~~([^~]+)~~", r"\1", cleaned)
+    cleaned = re.sub(r"^\s*>\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*[-*+•]\s+", "", cleaned, flags=re.MULTILINE)
+
+    # 7. Strip emojis and unicode symbols that phonemizers mispronounce
+    cleaned = re.sub(r"[\U00010000-\U0010ffff\u2600-\u27bf\ufe00-\ufe0f]", "", cleaned)
+
+    # 8. Collapse whitespace and repeated punctuation
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n\s*\n+", ". ", cleaned)
+    cleaned = re.sub(r"\n", " ", cleaned)
+    cleaned = re.sub(r"\.{2,}", ".", cleaned)
+    cleaned = cleaned.strip()
+
+    # 9. Cap length for spoken audio if message is overwhelmingly long (e.g. > 900 chars)
+    # to avoid holding the audio channel for minutes when a large code/text payload is generated
+    if len(cleaned) > 900:
+        cutoff = cleaned[:850].rfind(". ")
+        if cutoff > 400:
+            cleaned = cleaned[:cutoff + 1] + " More details are shown above."
+        else:
+            cleaned = cleaned[:800].rsplit(" ", 1)[0] + "... More details are shown above."
+
+    return cleaned
 
 
 def _synthesize_kokoro(text: str, config: VoiceConfig) -> bytes:
@@ -255,10 +444,15 @@ def _synthesize_kokoro(text: str, config: VoiceConfig) -> bytes:
             from kokoro_onnx import Kokoro
             _kokoro = Kokoro(str(model_dir / "kokoro-v1.0.onnx"),
                              str(model_dir / "voices-v1.0.bin"))
+        voice_name = getattr(config, "local_voice", "bm_george") or "bm_george"
+        try:
+            speed = float(getattr(config, "local_speed", 1.0) or 1.0)
+        except (ValueError, TypeError):
+            speed = 1.0
         samples, rate = _kokoro.create(
             text,
-            voice=config.local_voice,
-            speed=config.local_speed,
+            voice=voice_name,
+            speed=speed,
         )
     import numpy as np
     pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
@@ -316,7 +510,8 @@ def _synthesize_sapi(text: str, config: VoiceConfig) -> bytes:
 
     engine = pyttsx3.init()
     try:
-        engine.setProperty("rate", int(180 * getattr(config, "local_speed", 1.0)))
+        speed = float(getattr(config, "local_speed", 1.0) or 1.0)
+        engine.setProperty("rate", int(180 * speed))
     except Exception:
         pass
 
@@ -338,6 +533,362 @@ def _synthesize_sapi(text: str, config: VoiceConfig) -> bytes:
                 pass
 
 
+def _get_azure_speech_key_dynamic(config: VoiceConfig | None = None) -> str:
+    key = (
+        (getattr(config, "azure_speech_key", None) if config else None)
+        or os.environ.get("AZURE_SPEECH_KEY")
+        or os.environ.get("SPEECH_KEY")
+        or os.environ.get("AZURE_SPEECH_API_KEY")
+        or os.environ.get("AZURE_API_KEY")
+        or ""
+    )
+    if not key:
+        try:
+            from ..config import ROOT
+            env_file = ROOT / ".env"
+            if env_file.exists():
+                for line in env_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    for prefix in ("AZURE_SPEECH_KEY=", "SPEECH_KEY=", "JARVIS_AZURE_SPEECH_KEY="):
+                        if line.startswith(prefix):
+                            val = line.split("=", 1)[1].strip().strip("'\"")
+                            if val:
+                                key = val
+                                os.environ["AZURE_SPEECH_KEY"] = val
+                                break
+                    if key:
+                        break
+        except Exception:
+            pass
+    if not key:
+        try:
+            from ..security import get_secret
+            key = get_secret("AZURE_SPEECH_KEY") or get_secret("SPEECH_KEY") or ""
+        except Exception:
+            pass
+    return key
+
+
+def _get_fish_audio_key_dynamic(config: VoiceConfig | None = None) -> str:
+    """Resolve Fish Audio API key from config, environment, .env file, or credential vault."""
+    key = (
+        (getattr(config, "fish_audio_key", None) if config else None)
+        or os.environ.get("FISH_AUDIO_API_KEY")
+        or os.environ.get("FISH_API_KEY")
+        or os.environ.get("JARVIS_FISH_AUDIO_API_KEY")
+        or ""
+    )
+    if not key:
+        try:
+            from ..config import ROOT
+            env_file = ROOT / ".env"
+            if env_file.exists():
+                for line in env_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    for prefix in ("FISH_AUDIO_API_KEY=", "FISH_API_KEY=", "JARVIS_FISH_AUDIO_API_KEY="):
+                        if line.startswith(prefix):
+                            val = line.split("=", 1)[1].strip().strip("'\"")
+                            if val:
+                                key = val
+                                os.environ["FISH_AUDIO_API_KEY"] = val
+                                break
+                    if key:
+                        break
+        except Exception:
+            pass
+    if not key:
+        try:
+            from ..security import get_secret
+            key = get_secret("FISH_AUDIO_API_KEY") or get_secret("FISH_API_KEY") or ""
+        except Exception:
+            pass
+    return key
+
+
+def _synthesize_fish_audio(text: str, config: VoiceConfig) -> bytes:
+    """WAV bytes synthesized using the Fish Audio API (https://fish.audio)."""
+    import json
+    import urllib.request
+    import urllib.error
+
+    api_key = _get_fish_audio_key_dynamic(config)
+    if not api_key:
+        raise RuntimeError(
+            "Fish Audio API key is required. Please set FISH_AUDIO_API_KEY in your .env, "
+            "config.yaml, or store it in the Windows Credential Vault."
+        )
+
+    endpoint_url = (
+        getattr(config, "fish_audio_endpoint", None)
+        or os.environ.get("FISH_AUDIO_ENDPOINT")
+        or "https://api.fish.audio/v1/tts"
+    )
+    voice_id = (
+        getattr(config, "fish_audio_voice_id", None)
+        or os.environ.get("FISH_AUDIO_VOICE_ID")
+        or getattr(config, "fish_audio_reference_id", None)
+        or os.environ.get("FISH_AUDIO_REFERENCE_ID")
+        or "28b049a7574f46bc9d7122761363bda0"
+    )
+    model = (
+        getattr(config, "fish_audio_model", None)
+        or os.environ.get("FISH_AUDIO_MODEL")
+        or "s2.1-pro"
+    )
+
+    latency = (
+        getattr(config, "fish_audio_latency", None)
+        or os.environ.get("FISH_AUDIO_LATENCY")
+        or "normal"
+    )
+
+    payload: dict = {
+        "text": text,
+        "format": "wav",
+        "latency": latency,
+    }
+    if voice_id:
+        payload["reference_id"] = voice_id
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    if model:
+        headers["model"] = model
+
+    req = urllib.request.Request(
+        endpoint_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30.0) as resp:
+            wav_bytes = resp.read()
+            if not wav_bytes:
+                raise RuntimeError(f"Fish Audio returned empty audio stream from {endpoint_url}")
+            return wav_bytes
+    except urllib.error.HTTPError as err:
+        err_body = ""
+        try:
+            err_body = err.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        if err.code == 402 and model != "s2.1-pro-free":
+            log.info("Fish Audio returned 402 (Insufficient API credit); automatically retrying with free model 's2.1-pro-free'...")
+            alt_headers = dict(headers)
+            alt_headers["model"] = "s2.1-pro-free"
+            try:
+                alt_req = urllib.request.Request(
+                    endpoint_url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=alt_headers,
+                    method="POST",
+                )
+                with urllib.request.urlopen(alt_req, timeout=30.0) as resp:
+                    wav_bytes = resp.read()
+                    if wav_bytes:
+                        return wav_bytes
+            except Exception as retry_exc:
+                log.warn(f"Fish Audio free tier retry failed: {retry_exc}")
+        raise RuntimeError(f"Fish Audio API error ({err.code}): {err_body or err.reason}") from err
+    except Exception as exc:
+        raise RuntimeError(f"Fish Audio synthesis error: {exc}") from exc
+
+
+def _synthesize_openai_speech(text: str, config: VoiceConfig) -> bytes:
+    """WAV bytes from OpenAI-compatible TTS endpoint (Microsoft Foundry Relay /v1/audio/speech)."""
+    import json
+    import urllib.request
+
+    endpoint_url = (
+        getattr(config, "tts_endpoint", None)
+        or os.environ.get("JARVIS_TTS_ENDPOINT")
+        or getattr(config, "azure_speech_endpoint", None)
+        or os.environ.get("AZURE_SPEECH_ENDPOINT")
+        or "http://localhost:8000/v1/audio/speech"
+    )
+    if not endpoint_url.endswith("/audio/speech"):
+        endpoint_url = endpoint_url.rstrip("/") + "/audio/speech"
+
+    model_name = (
+        getattr(config, "tts_model", None)
+        or os.environ.get("JARVIS_TTS_MODEL")
+        or getattr(config, "model", None)
+        or "tts-1"
+    )
+    voice_name = (
+        getattr(config, "tts_voice", None)
+        or getattr(config, "azure_speech_voice", None)
+        or os.environ.get("JARVIS_TTS_VOICE")
+        or os.environ.get("AZURE_SPEECH_VOICE")
+        or getattr(config, "voice", None)
+        or "en-US-OnyxTurboMultilingualNeural"
+    )
+    api_key = (
+        _get_azure_speech_key_dynamic(config)
+        or getattr(config, "azure_speech_key", None)
+        or os.environ.get("AZURE_SPEECH_KEY")
+        or os.environ.get("AZURE_API_KEY")
+        or os.environ.get("JARVIS_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or "SATVIKNOOB"
+    )
+
+    payload = {
+        "model": model_name,
+        "input": text,
+        "voice": voice_name,
+        "response_format": "wav",
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    req = urllib.request.Request(
+        endpoint_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30.0) as resp:
+        wav_bytes = resp.read()
+        if not wav_bytes:
+            raise RuntimeError(f"OpenAI/Foundry TTS returned empty audio stream from {endpoint_url}")
+        return wav_bytes
+
+
+def _synthesize_azure_speech(text: str, config: VoiceConfig) -> bytes:
+    """WAV bytes synthesized via Microsoft Azure Cognitive Services Speech SDK or Foundry Relay."""
+    endpoint_url = (
+        getattr(config, "azure_speech_endpoint", None)
+        or os.environ.get("AZURE_SPEECH_ENDPOINT")
+        or os.environ.get("JARVIS_AZURE_SPEECH_ENDPOINT")
+        or getattr(config, "tts_endpoint", None)
+        or os.environ.get("JARVIS_TTS_ENDPOINT")
+        or "https://satviksingh-resource.cognitiveservices.azure.com/"
+    )
+
+    # If endpoint points to local Foundry relay or OpenAI-compatible endpoint
+    if "localhost" in endpoint_url or "127.0.0.1" in endpoint_url or "audio/speech" in endpoint_url or (endpoint_url.startswith("http://") and not endpoint_url.startswith("https://")):
+        return _synthesize_openai_speech(text, config)
+
+    import azure.cognitiveservices.speech as speechsdk
+    from urllib.parse import urlparse
+
+    parsed = urlparse(endpoint_url)
+    base_endpoint = f"{parsed.scheme}://{parsed.netloc}"
+
+    speech_key = _get_azure_speech_key_dynamic(config)
+
+    voice_name = (
+        getattr(config, "azure_speech_voice", None)
+        or os.environ.get("AZURE_SPEECH_VOICE")
+        or os.environ.get("JARVIS_AZURE_SPEECH_VOICE")
+        or "en-US-OnyxTurboMultilingualNeural"
+    )
+
+    if speech_key:
+        speech_config = speechsdk.SpeechConfig(subscription=speech_key, endpoint=base_endpoint)
+    else:
+        # Attempt Entra ID / SmartAzureCredential token if key is omitted
+        try:
+            from ..auth.azure_auth import get_azure_credential
+            cred = get_azure_credential()
+            token = cred.get_token("https://cognitiveservices.azure.com/.default")
+            speech_config = speechsdk.SpeechConfig(auth_token=f"aad#{token.token}", endpoint=base_endpoint)
+        except Exception as auth_exc:
+            raise RuntimeError(
+                "Azure Speech Key is required. Please set AZURE_SPEECH_KEY in your .env file or config.yaml.\n"
+                f"Authentication attempt failed: {auth_exc}"
+            ) from auth_exc
+
+    speech_config.speech_synthesis_voice_name = voice_name
+    speech_config.set_speech_synthesis_output_format(
+        speechsdk.SpeechSynthesisOutputFormat.Riff24Khz16BitMonoPcm
+    )
+
+    # In-memory WAV synthesis (audio_config=None) allows Jarvis full-duplex interruptible playback
+    speech_synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=None)
+
+    result = speech_synthesizer.speak_text_async(text).get()
+
+    if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+        wav_bytes = result.audio_data
+        if not wav_bytes:
+            raise RuntimeError("Azure Speech synthesized empty audio stream")
+        return wav_bytes
+    elif result.reason == speechsdk.ResultReason.Canceled:
+        cancellation_details = result.cancellation_details
+        err_msg = f"Azure Speech synthesis canceled: {cancellation_details.reason}"
+        if cancellation_details.reason == speechsdk.CancellationReason.Error:
+            err_msg += f" - Error details: {cancellation_details.error_details}"
+        raise RuntimeError(err_msg)
+    else:
+        raise RuntimeError(f"Azure Speech synthesis failed with reason: {result.reason}")
+
+
+def speak_azure_speech_direct(text: str, config: VoiceConfig | None = None) -> bool:
+    """Directly speak text aloud using Azure Speech SDK or Foundry Relay."""
+    if is_live_mode_active():
+        return False
+    cfg = config or _current_voice_snapshot().config
+    endpoint_url = (
+        getattr(cfg, "azure_speech_endpoint", None)
+        or os.environ.get("AZURE_SPEECH_ENDPOINT")
+        or getattr(cfg, "tts_endpoint", None)
+        or os.environ.get("JARVIS_TTS_ENDPOINT")
+        or "https://satviksingh-resource.cognitiveservices.azure.com/"
+    )
+    if "localhost" in endpoint_url or "127.0.0.1" in endpoint_url or "audio/speech" in endpoint_url or (endpoint_url.startswith("http://") and not endpoint_url.startswith("https://")):
+        try:
+            wav_data = _synthesize_openai_speech(text, cfg)
+            _play_wav(wav_data, wait=True)
+            return True
+        except Exception as exc:
+            log.warn(f"Direct Foundry speech playback failed: {exc}")
+            return False
+
+    try:
+        import azure.cognitiveservices.speech as speechsdk
+    except ImportError:
+        return False
+
+    from urllib.parse import urlparse
+
+    parsed = urlparse(endpoint_url)
+    base_endpoint = f"{parsed.scheme}://{parsed.netloc}"
+
+    speech_key = _get_azure_speech_key_dynamic(cfg)
+    voice_name = (
+        getattr(cfg, "azure_speech_voice", None)
+        or os.environ.get("AZURE_SPEECH_VOICE")
+        or "en-US-OnyxTurboMultilingualNeural"
+    )
+
+    if not speech_key:
+        return False
+
+    speech_config = speechsdk.SpeechConfig(subscription=speech_key, endpoint=base_endpoint)
+    speech_config.speech_synthesis_voice_name = voice_name
+
+    # Use default speaker as audio output
+    speech_synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config)
+    result = speech_synthesizer.speak_text_async(text).get()
+
+    if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+        log.info(f"Azure Speech synthesized for text [{text[:40]}...]")
+        return True
+    elif result.reason == speechsdk.ResultReason.Canceled:
+        cancellation_details = result.cancellation_details
+        log.warn(f"Azure Speech synthesis canceled: {cancellation_details.reason}")
+        if cancellation_details.reason == speechsdk.CancellationReason.Error:
+            log.error(f"Azure Speech error details: {cancellation_details.error_details}")
+    return False
+
+
 class _SupersededSpeech(Exception):
     pass
 
@@ -350,15 +901,18 @@ def _synthesize_wav(
     """WAV bytes from the multi-tier fail-safe TTS engine.
 
     Cascades smoothly through:
-    1. Preferred engine (Gemini Cloud TTS, Kokoro Local, Edge-TTS, or SAPI)
-    2. Edge-TTS Neural (Free, ultra-fast, natural British/US voice)
-    3. Local Kokoro ONNX (if available)
-    4. Windows Native SAPI5 / pyttsx3 (100% offline fallback)
+    1. Preferred engine: Azure Cognitive Services Speech, Kokoro Local ONNX (offline default), Windows SAPI, Edge-TTS, or Gemini
+    2. Local Kokoro ONNX (if available offline)
+    3. Windows Native SAPI5 / pyttsx3 (100% offline fallback)
+    4. Edge-TTS Neural (Free online fallback)
+    5. Azure Cognitive Services Speech (if configured)
+    6. Gemini Cloud TTS (cloud fallback)
     """
-    global _kokoro_broken, _gemini_broken, _edge_broken
+    global _kokoro_broken, _gemini_broken, _edge_broken, _azure_speech_broken, _fish_audio_broken
     snapshot = snapshot or _current_voice_snapshot()
     config = snapshot.config
-    engine_pref = (getattr(config, "engine", "gemini") or "gemini").lower()
+    raw_engine = (getattr(config, "engine", "kokoro") or "kokoro").lower()
+    engine_pref = "kokoro" if raw_engine in ("kokoro", "local") else raw_engine
 
     with _speech_state:
         if (
@@ -370,15 +924,53 @@ def _synthesize_wav(
         ):
             raise _SupersededSpeech()
 
-    # 1. Preferred engine: Kokoro
+    # 0. Preferred engine: Foundry Relay / OpenAI TTS
+    if engine_pref in ("foundry", "openai", "openai_tts", "relay"):
+        try:
+            return _synthesize_openai_speech(text, config)
+        except Exception as exc:
+            log.warn(f"Foundry Relay / OpenAI TTS unavailable ({exc}); falling back to local Kokoro/Edge-TTS")
+
+    # 0b. Preferred engine: Azure Cognitive Services Speech SDK
+    if engine_pref in ("azure", "azure_speech", "azure-speech", "cognitiveservices"):
+        azure_key = _get_azure_speech_key_dynamic(config)
+        if _azure_speech_broken and azure_key:
+            _azure_speech_broken = False
+        if not _azure_speech_broken:
+            try:
+                return _synthesize_azure_speech(text, config)
+            except Exception as exc:
+                _azure_speech_broken = True
+                log.warn(f"Azure Cognitive Services Speech TTS unavailable ({exc}); falling back to local Kokoro/Edge-TTS")
+
+    # 0c. Preferred engine: Fish Audio API (https://fish.audio)
+    if engine_pref in ("fish", "fish_audio", "fish-audio", "fishaudio"):
+        fish_key = _get_fish_audio_key_dynamic(config)
+        if _fish_audio_broken and fish_key:
+            _fish_audio_broken = False
+        if not _fish_audio_broken:
+            try:
+                return _synthesize_fish_audio(text, config)
+            except Exception as exc:
+                _fish_audio_broken = True
+                log.warn(f"Fish Audio TTS unavailable ({exc}); falling back to local Kokoro/Edge-TTS")
+
+    # 1. Preferred engine: Kokoro (local offline default)
     if engine_pref == "kokoro" and not _kokoro_broken:
         try:
             return _synthesize_kokoro(text, config)
         except Exception as exc:
             _kokoro_broken = True
-            log.warn(f"Local Kokoro TTS unavailable ({exc}); switching to Edge-TTS neural engine")
+            log.warn(f"Local Kokoro TTS unavailable ({exc}); falling back to Windows SAPI offline engine")
 
-    # 2. Preferred engine: Gemini Cloud TTS
+    # 2. Preferred engine: SAPI (100% offline Windows native)
+    if engine_pref in ("sapi", "system"):
+        try:
+            return _synthesize_sapi(text, config)
+        except Exception as exc:
+            log.warn(f"Windows SAPI TTS failed ({exc}); trying Kokoro/Edge-TTS")
+
+    # 3. Preferred engine: Gemini Cloud TTS
     if engine_pref == "gemini" and not _gemini_broken:
         try:
             pcm = _synthesize(text, snapshot)
@@ -387,34 +979,53 @@ def _synthesize_wav(
             _gemini_broken = True
             log.warn(f"Gemini Cloud TTS unavailable ({exc}); switching to Edge-TTS neural engine")
 
-    # 3. Preferred engine: SAPI
-    if engine_pref in ("sapi", "system"):
-        try:
-            return _synthesize_sapi(text, config)
-        except Exception as exc:
-            log.warn(f"Windows SAPI TTS failed ({exc}); trying Edge-TTS")
-
-    # 4. Universal Tier-2: Edge-TTS Neural (fast, free, natural)
-    if not _edge_broken:
+    # 4. Preferred engine: Edge-TTS Neural
+    if engine_pref in ("edge", "edge_tts", "edge-tts") and not _edge_broken:
         try:
             return _synthesize_edge_tts(text, config)
         except Exception as exc:
             _edge_broken = True
             log.warn(f"Edge-TTS unavailable ({exc}); falling back to Windows SAPI offline engine")
 
-    # 5. Universal Tier-3: Local Kokoro (if not tried)
+    # 5. Local Offline Tier-2: Kokoro (if not tried yet)
     if not _kokoro_broken:
         try:
             return _synthesize_kokoro(text, config)
         except Exception:
             _kokoro_broken = True
 
-    # 6. Universal Tier-4: 100% Offline Windows Native SAPI
+    # 6. Local Offline Tier-3: 100% Offline Windows Native SAPI
     try:
         return _synthesize_sapi(text, config)
     except Exception as exc:
-        log.warn(f"All TTS synthesis engines failed: {exc}")
-        raise
+        log.warn(f"Offline SAPI fallback failed ({exc}); attempting Edge-TTS")
+
+    # 7. Universal Tier-4: Edge-TTS Neural (fast, free, natural)
+    if not _edge_broken:
+        try:
+            return _synthesize_edge_tts(text, config)
+        except Exception as exc:
+            _edge_broken = True
+            log.warn(f"Edge-TTS fallback failed ({exc})")
+
+    # 8. Cloud Tier-5: Azure Cognitive Services Speech (if configured and not broken)
+    azure_fallback_key = _get_azure_speech_key_dynamic(config)
+    if not _azure_speech_broken and azure_fallback_key:
+        try:
+            return _synthesize_azure_speech(text, config)
+        except Exception as exc:
+            _azure_speech_broken = True
+            log.warn(f"Azure Speech fallback failed ({exc})")
+
+    # 9. Cloud Tier-6: Gemini Cloud TTS (ONLY if engine was explicitly configured as gemini)
+    if engine_pref == "gemini" and not _gemini_broken and getattr(snapshot, "brain", None) is not None:
+        try:
+            pcm = _synthesize(text, snapshot)
+            return _wav_bytes(pcm)
+        except Exception:
+            _gemini_broken = True
+
+    raise RuntimeError("All TTS synthesis engines failed.")
 
 
 def _stop_async_playback() -> None:
@@ -598,6 +1209,10 @@ def _speak_sync(text: str) -> None:
             snapshot = _voice_snapshot_locked()
             _sync_owner = owner
             _speech_state.notify_all()
+        # Interrupt any active background playback so sync speech plays immediately
+        with _active_playback_lock:
+            if _active_playback_cancel and not _active_playback_cancel.is_set():
+                _active_playback_cancel.set()
         try:
             # Synthesis deliberately happens outside the playback/state locks:
             # reset and reconfiguration remain immediate even if the cloud
@@ -638,12 +1253,17 @@ def speak(text: str, wait: bool = False) -> None:
     exit. ``wait=True`` remains fully synchronous for microphone and farewell
     call sites.
     """
-    text = (text or "").strip()
-    if not text:
+    if is_live_mode_active():
+        return
+    raw_text = (text or "").strip()
+    if not raw_text:
+        return
+    clean = _clean_for_speech(raw_text) or raw_text
+    if not clean:
         return
     if wait:
         try:
-            _speak_sync(text)
+            _speak_sync(clean)
         except BaseException:
             # A Ctrl+C during a blocking farewell/microphone hand-off also
             # cancels any newer background synthesis before the caller exits.
@@ -658,15 +1278,16 @@ def speak(text: str, wait: bool = False) -> None:
     with _speech_state:
         generation = _next_speech_generation_locked()
         snapshot = _voice_snapshot_locked()
-        _SPEECH_DISPATCHER.submit(text, generation, snapshot)
+        _SPEECH_DISPATCHER.submit(clean, generation, snapshot)
 
 
 def speak_to_wav(text: str, path: str) -> bool:
     """Render speech to a WAV file (used by the self-test; no speakers needed)."""
     try:
+        clean = _clean_for_speech(text) or text
         snapshot = _current_voice_snapshot()
         with open(path, "wb") as output:
-            output.write(_synthesize_wav(text, snapshot=snapshot))
+            output.write(_synthesize_wav(clean, snapshot=snapshot))
         return True
     except Exception as exc:
         log.warn(f"TTS-to-file failed: {exc}")
@@ -1185,7 +1806,8 @@ def speak_and_listen(
 
     snapshot = _current_voice_snapshot()
     try:
-        data = _synthesize_wav(text, snapshot=snapshot)
+        clean = _clean_for_speech(text) or text
+        data = _synthesize_wav(clean, snapshot=snapshot)
     except Exception as exc:
         log.warn(f"TTS synthesis failed: {exc}")
         data = b""

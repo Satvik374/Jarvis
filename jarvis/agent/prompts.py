@@ -230,19 +230,26 @@ Example reply:
 def parse_decision(text: str) -> Decision:
     """Extract a :class:`Decision` from a raw model reply, tolerantly."""
     obj = _extract_json(text)
-    if obj is None:
-        # Model produced prose instead of JSON. Mark as fallback so the loop
-        # can push back ("reply with one JSON action") instead of treating the
-        # prose as a successful finish.
-        return Decision(thought="", action="finish",
-                        args={"summary": text.strip()[:400]}, raw=text,
-                        fallback=True)
+    thought = ""
+    action = ""
+    args: dict[str, Any] = {}
 
-    action = str(obj.get("action", "")).strip()
-    args = obj.get("args", {})
-    if not isinstance(args, dict):
-        args = {}
-    thought = str(obj.get("thought", "")).strip()
+    if obj is not None:
+        action = str(obj.get("action", "")).strip()
+        args = obj.get("args", {})
+        if not isinstance(args, dict):
+            args = {}
+        thought = str(obj.get("thought", "")).strip()
+    else:
+        # Check XML tool calls (<tool_call>...</tool_call>, <invoke>...</invoke>, etc.)
+        xml_res = _extract_decision_from_xml(text)
+        if xml_res is not None:
+            thought, action, args = xml_res
+        else:
+            # Model produced prose instead of JSON or XML tool call.
+            return Decision(thought="", action="finish",
+                            args={"summary": text.strip()[:400]}, raw=text,
+                            fallback=True)
 
     # Some models nest coordinates or use synonyms; normalise a few.
     action, args = _normalise(action, args)
@@ -253,6 +260,58 @@ def parse_decision(text: str) -> Decision:
                         args={"summary": thought or text.strip()[:400]}, raw=text,
                         fallback=True)
     return Decision(thought=thought, action=action, args=args, raw=text)
+
+
+def _extract_decision_from_xml(text: str) -> tuple[str, str, dict[str, Any]] | None:
+    """Extract (thought, action, args) from <tool_call> or <invoke> XML blocks."""
+    # Match <tool_call>...</tool_call> or truncated <tool_call>...
+    m = re.search(r"<tool_call>(.*?)(?:</tool_call>|$)", text, re.DOTALL)
+    if not m:
+        # Check <invoke name='...'>
+        m_inv = re.search(r"<invoke\s+name=[\"'](.*?)[\"']>(.*?)(?:</invoke>|$)", text, re.DOTALL)
+        if m_inv:
+            thought = text[:m_inv.start()].strip()
+            action = m_inv.group(1).strip()
+            args: dict[str, Any] = {}
+            for p in re.finditer(r"<parameter\s+name=[\"'](.*?)[\"']>(.*?)(?:</parameter>|$)", m_inv.group(2), re.DOTALL):
+                args[p.group(1).strip()] = p.group(2).strip()
+            return thought, action, args
+        return None
+
+    thought = text[:m.start()].strip()
+    body = m.group(1).strip()
+
+    # Sub-case A: JSON inside <tool_call>
+    start_brace = body.find("{")
+    if start_brace != -1:
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(body, start_brace)
+            if isinstance(obj, dict):
+                act = str(obj.get("action") or obj.get("name") or "").strip()
+                args = obj.get("args") or obj.get("arguments") or {}
+                if not isinstance(args, dict):
+                    args = {}
+                return thought, act, args
+        except Exception:
+            pass
+
+    # Sub-case B: <arg_key>k</arg_key><arg_value>v</arg_value>
+    lines = body.split("\n", 1)
+    first_token = lines[0].strip().split("<", 1)[0].strip()
+    action = first_token
+    args: dict[str, Any] = {}
+    pattern = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)(?:</arg_value>|(?=<arg_key>)|$)", re.DOTALL)
+    for km in pattern.finditer(body):
+        k = km.group(1).strip()
+        v = km.group(2).strip()
+        args[k] = v
+
+    if action:
+        if not args and (action.startswith("powershell") or action.startswith("cmd") or action.startswith("python")):
+            return thought, "run_command", {"command": action}
+        return thought, action, args
+
+    return None
 
 
 def _extract_json(text: str) -> dict | None:
@@ -288,6 +347,7 @@ _SYNONYMS = {
     "launch": "open_app", "open": "open_app",
     "goto": "open_url", "navigate": "open_url",
     "shell": "run_command", "cmd": "run_command", "exec": "run_command",
+    "powershell": "run_command", "bash": "run_command", "terminal": "run_command",
     "done": "finish", "complete": "finish", "stop": "finish",
     "question": "ask",
 }
@@ -295,6 +355,11 @@ _SYNONYMS = {
 
 def _normalise(action: str, args: dict) -> tuple[str, dict]:
     a = action.strip().lower()
+    if a.startswith("powershell") or a.startswith("cmd"):
+        cmd_text = action.strip()
+        a = "run_command"
+        if "command" not in args:
+            args["command"] = cmd_text
     a = _SYNONYMS.get(a, a)
 
     # coordinate objects like {"coordinate": [x, y]} or {"position": {...}}
@@ -313,4 +378,27 @@ def _normalise(action: str, args: dict) -> tuple[str, dict]:
     # a press whose keys is actually a list -> key_sequence
     if a == "press" and isinstance(args.get("keys"), list):
         a = "key_sequence"
+
+    # Command normalization
+    if a == "run_command":
+        if "command" not in args:
+            for k in ("cmd", "script", "code"):
+                if k in args:
+                    args["command"] = args.pop(k)
+                    break
+
+    # Path normalization for file actions
+    if "path" in args and isinstance(args["path"], str):
+        p_str = args["path"].strip()
+        from pathlib import Path
+        import os
+        home = Path.home()
+        p_norm = p_str.replace("\\", "/")
+        if re.match(r"^[A-Za-z]:/Users/jarvis\b", p_norm, re.IGNORECASE):
+            rel = re.sub(r"^[A-Za-z]:/Users/jarvis[/]?", "", p_norm, flags=re.IGNORECASE)
+            args["path"] = str(home / rel.replace("/", os.sep))
+        elif p_norm.startswith("/home/jarvis"):
+            rel = p_norm[len("/home/jarvis"):].lstrip("/")
+            args["path"] = str(home / rel.replace("/", os.sep))
+
     return a, args

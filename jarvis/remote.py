@@ -218,7 +218,7 @@ class Pairing:
             "secret": self.secret, "sign_private": self.sign_private,
             "peer_sign_public": self.peer_sign_public, "trusted": self.trusted,
             "received_sequence": self.received_sequence, "inbox": self.inbox[-50:],
-            "processed_message_ids": self.processed_message_ids[-200:],
+            "processed_message_ids": self.processed_message_ids,
             "peer_kind": self.peer_kind,
             "peer_capabilities": self.peer_capabilities,
             "peer_status": self.peer_status,
@@ -243,7 +243,7 @@ class Pairing:
             received_sequence=max(0, int(data.get("received_sequence", 0) or 0)),
             inbox=inbox if isinstance(inbox, list) else [],
             processed_message_ids=[str(x) for x in data.get("processed_message_ids", [])
-                                   if isinstance(x, str)][-200:],
+                                   if isinstance(x, str)],
             peer_kind=str(data.get("peer_kind", ""))[:40],
             peer_capabilities=[str(x)[:80] for x in data.get("peer_capabilities", [])
                                if isinstance(x, str)][:100],
@@ -659,8 +659,8 @@ def _already_processed(pairing: Pairing, message: dict[str, Any]) -> bool:
     marker = "task:" + message_id
     if marker in pairing.processed_message_ids:
         return True
+    # No signed expiry exists: retain IDs for the lifetime of this pairing.
     pairing.processed_message_ids.append(marker)
-    pairing.processed_message_ids = pairing.processed_message_ids[-200:]
     return False
 
 

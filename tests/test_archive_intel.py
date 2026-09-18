@@ -120,6 +120,16 @@ def test_zip_slip_security_prevention(tmp_path):
     assert not (tmp_path / "evil.txt").exists()
 
 
+def test_zip_slip_rejects_sibling_with_shared_prefix(tmp_path):
+    destination = tmp_path / "output"
+    assert archive_intel._is_zip_slip_safe(destination, "nested/file.txt")
+    assert not archive_intel._is_zip_slip_safe(destination, "../output-other/file.txt")
+    bad_zip = tmp_path / "sibling.zip"
+    with zipfile.ZipFile(bad_zip, "w") as archive:
+        archive.writestr("../output-other/file.txt", "test payload")
+    assert "security violation" in archive_intel.extract_archive(bad_zip, destination)
+
+
 def test_registry_execution(sample_folder_tree):
     """Test executing archive_intel through registry dispatcher."""
     zip_out = sample_folder_tree.parent / "registry_bundle.zip"

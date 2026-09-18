@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from jarvis.config import Config
 from jarvis.perception.elements import Observation
@@ -25,19 +29,31 @@ from jarvis.tools.registry import execute
 class TestCredentialsVault(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
         self.vault_file = Path(self.temp_dir.name) / "test_vault.enc"
         self.vault = CredentialVault(vault_file=self.vault_file)
         self.test_key = "JARVIS_TEST_API_KEY"
         self.test_val = "sk-test-1234567890abcdef"
-
-    def tearDown(self):
-        # Clean up any test keys left behind
-        try:
-            self.vault.delete_credman(self.test_key)
-            self.vault.delete_dpapi(self.test_key)
-        except Exception:
-            pass
-        self.temp_dir.cleanup()
+        self.credentials = {}
+        credman = SimpleNamespace(
+            CRED_TYPE_GENERIC=1,
+            CRED_PERSIST_LOCAL_MACHINE=2,
+            CredWrite=lambda cred, flags: self.credentials.update({cred["TargetName"]: dict(cred)}),
+            CredRead=lambda target, *args: self.credentials[target],
+            CredDelete=lambda target, *args: self.credentials.pop(target),
+            CredEnumerate=lambda *args: list(self.credentials.values()),
+        )
+        self.crypto = SimpleNamespace(
+            CryptProtectData=Mock(side_effect=lambda data, *args: b"test-encrypted:" + data),
+            CryptUnprotectData=Mock(side_effect=lambda data, *args: ("", data.removeprefix(b"test-encrypted:"))),
+        )
+        for mocked in (
+            patch.dict(sys.modules, {"win32cred": credman, "win32crypt": self.crypto}),
+            patch.dict(os.environ, {}, clear=True),
+            patch("jarvis.security.vault._GLOBAL_VAULT", self.vault),
+        ):
+            mocked.start()
+            self.addCleanup(mocked.stop)
 
     def test_credman_crud(self):
         """Test Windows Credential Manager write, read, list, and delete."""
@@ -111,6 +127,47 @@ class TestCredentialsVault(unittest.TestCase):
         self.vault.delete_credman(k)
         self.vault.delete_dpapi(k)
         os.environ.pop(k, None)
+
+    def test_encryption_failure_does_not_store_encoded_plaintext(self):
+        self.crypto.CryptProtectData.side_effect = RuntimeError("encryption unavailable")
+        self.assertFalse(self.vault.write_dpapi("TOKEN", "private-value"))
+        self.assertFalse(self.vault_file.exists())
+        self.assertIsNone(self.vault.read_dpapi("TOKEN"))
+        self.crypto.CryptProtectData.side_effect = lambda data, *args: b"test-encrypted:" + data
+        self.assertTrue(self.vault.write_dpapi("TOKEN", "original"))
+        before = self.vault_file.read_bytes()
+        self.crypto.CryptProtectData.side_effect = RuntimeError("encryption unavailable")
+        self.assertFalse(self.vault.write_dpapi("TOKEN", "replacement"))
+        self.assertEqual(self.vault_file.read_bytes(), before)
+        self.assertEqual(self.vault.read_dpapi("TOKEN"), "original")
+
+    def test_corrupt_vault_is_not_overwritten(self):
+        for payload in (b"invalid data", b"test-encrypted:[]", b"test-encrypted:",
+                        b'test-encrypted:{"TOKEN": 123}'):
+            with self.subTest(payload=payload):
+                self.vault_file.write_bytes(payload)
+                vault = CredentialVault(self.vault_file)
+                self.assertIsNone(vault.read_dpapi("TOKEN"))
+                self.assertFalse(vault.write_dpapi("TOKEN", "new-value"))
+                self.assertEqual(self.vault_file.read_bytes(), payload)
+
+    def test_legacy_encoded_vault_is_readable_and_reencrypted(self):
+        self.vault_file.write_bytes(base64.b64encode(b'{"TOKEN": "legacy"}'))
+        self.crypto.CryptUnprotectData.side_effect = RuntimeError("legacy encoding")
+        self.assertEqual(self.vault.read_dpapi("TOKEN"), "legacy")
+        self.assertTrue(self.vault.write_dpapi("TOKEN", "updated"))
+        self.assertTrue(self.vault_file.read_bytes().startswith(b"test-encrypted:"))
+
+    def test_failed_save_preserves_file_and_cached_values(self):
+        self.assertTrue(self.vault.write_dpapi("TOKEN", "original"))
+        before = self.vault_file.read_bytes()
+        with patch("os.replace", side_effect=OSError("replacement failed")):
+            self.assertFalse(self.vault.write_dpapi("TOKEN", "replacement"))
+            self.assertEqual(self.vault.read_dpapi("TOKEN"), "original")
+            self.assertFalse(self.vault.delete_dpapi("TOKEN"))
+        self.assertEqual(self.vault.read_dpapi("TOKEN"), "original")
+        self.assertEqual(self.vault_file.read_bytes(), before)
+        self.assertEqual(list(self.vault_file.parent.iterdir()), [self.vault_file])
 
     def test_mask_secret(self):
         """Test secret masking for safe logs/display."""

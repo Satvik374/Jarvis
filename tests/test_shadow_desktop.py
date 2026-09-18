@@ -116,9 +116,10 @@ class ShadowDesktopTests(unittest.TestCase):
         engine = ShadowCaptureEngine(default_resolution=(1280, 720))
 
         # Test background canvas capture when no windows exist
-        img = engine.capture_shadow_desktop()
-        self.assertIsInstance(img, Image.Image)
-        self.assertEqual(img.size, (1280, 720))
+        with patch.object(get_shadow_manager(), "list_windows", return_value=[]):
+            img = engine.capture_shadow_desktop()
+            self.assertIsInstance(img, Image.Image)
+            self.assertEqual(img.size, (1280, 720))
 
         # Test window capture fallback
         with patch.object(engine, "_is_windows", False):

@@ -76,6 +76,38 @@ class RemoteCryptoTests(unittest.TestCase):
         self.assertTrue(remote._already_processed(pair, message))
 
 
+    def test_signed_replay_stays_blocked_after_200_tasks_and_restart(self):
+        controller = remote.create_identity()
+        pair = remote.Pairing(
+            label="Replay test", endpoint="https://relay.example", pair_id="replay-test",
+            role="agent", peer_name="Controller", local_name="Agent",
+            secret=remote._b64(b"s" * 32), sign_private="unused",
+            peer_sign_public=controller.sign_public, trusted=True,
+        )
+        envelope = remote.encrypt_payload(
+            pair.secret_bytes, controller.sign_private, pair.pair_id, "controller", "agent",
+            {"type": "task", "id": "original", "task": "test only"},
+        )
+        client = remote.RelayClient(pair.endpoint)
+        with tempfile.TemporaryDirectory() as temp:
+            store = remote.PairingStore(temp)
+            for restart in (False, True):
+                with self.subTest(restart=restart):
+                    pair.processed_message_ids = []
+                    self.assertFalse(remote._already_processed(pair, {"id": "original"}))
+                    for i in range(201):
+                        self.assertFalse(remote._already_processed(pair, {"id": f"later-{i}"}))
+                    if restart:
+                        store.save(pair)
+                        pair = store.get(pair.label)
+                    replay = dict(envelope, sequence=pair.received_sequence + 1,
+                                  sender="controller", recipient="agent")
+                    with patch.object(client, "_request", return_value={"messages": [replay]}):
+                        messages = client.receive(pair, timeout=0)
+                    self.assertEqual(len(messages), 1)
+                    self.assertTrue(remote._already_processed(pair, messages[0]))
+
+
 class LocalPairingStateTests(unittest.TestCase):
     def test_store_round_trips_private_pairing_material(self):
         with tempfile.TemporaryDirectory() as temp:

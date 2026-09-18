@@ -427,13 +427,10 @@ def _h_run_command(args, obs, cfg):
     if cwd:
         from .files import _expand
         cwd = str(_expand(cwd))
-    return ActionResult(
-        True,
-        system.run_command(str(args.get("command", "")),
-                           blocked=cfg.safety.blocked_command_patterns,
-                           timeout=timeout, cwd=cwd),
-        needs_observe=False,
-    )
+    result = system.run_command(str(args.get("command", "")),
+                                blocked=cfg.safety.blocked_command_patterns,
+                                timeout=timeout, cwd=cwd)
+    return ActionResult(result.ok, str(result), needs_observe=False)
 
 
 def _h_python(args, obs, cfg):
@@ -444,8 +441,8 @@ def _h_python(args, obs, cfg):
     if cwd:
         from .files import _expand
         cwd = str(_expand(cwd))
-    return ActionResult(True, system.run_python(code, args.get("timeout", 60), cwd),
-                        needs_observe=False)
+    result = system.run_python(code, args.get("timeout", 60), cwd)
+    return ActionResult(result.ok, str(result), needs_observe=False)
 
 
 def _h_session_exec(args, obs, cfg):
@@ -471,8 +468,7 @@ def _h_session_exec(args, obs, cfg):
         blocked=cfg.safety.blocked_command_patterns,
         allow=cfg.safety.allow_paths,
     )
-    ok = not (msg.startswith("refused:") or msg.startswith("unknown session_exec op") or msg.startswith("failed to write"))
-    return ActionResult(ok, msg, needs_observe=False)
+    return ActionResult(msg.ok, str(msg), needs_observe=False)
 
 
 def _h_http_request(args, obs, cfg):
@@ -1349,6 +1345,183 @@ def _h_macro(args, obs, cfg):
 
 
 
+def _h_skill(args, obs, cfg):
+    """Search, load and write Jarvis Skills.
+
+    Skills are instructions the model reads, so they are loaded in two stages:
+    the prompt carries a one-line index and the body arrives only when the agent
+    asks for a specific skill. Everything here is advisory - a skill can never
+    grant a capability, and nothing in a body is executed.
+    """
+    action = str(args.get("action", "list")).strip().lower() or "list"
+    name = str(args.get("name", "")).strip()
+    query = str(args.get("query", "")).strip()
+
+    from ..skills import Skill, get_skill_manager
+    from ..skills.manager import MAX_BODY_CHARS, SkillError
+
+    mgr = get_skill_manager()
+
+    if action == "list":
+        skills = mgr.list_skills()
+        if not skills:
+            return ActionResult(
+                True,
+                "No skills yet. Save one with skill(action='create', name=..., "
+                "description=..., body=...) so the procedure survives the session.",
+                needs_observe=False,
+            )
+        lines = [f"{len(skills)} skill(s) available:"]
+        lines += [f"  • {skill.row()}" for skill in skills]
+        lines.append("Load one with skill(action='load', name='...').")
+        return ActionResult(True, "\n".join(lines), needs_observe=False)
+
+    if action == "search":
+        if not query:
+            return ActionResult(False, "skill 'search' requires a 'query' parameter",
+                                needs_observe=False)
+        hits = mgr.search(query, limit=5)
+        if not hits:
+            return ActionResult(
+                True,
+                f"No skill matches {query!r}. Do the task with your own tools, then "
+                f"save what worked: skill(action='create', ...).",
+                needs_observe=False,
+            )
+        lines = [f"{len(hits)} skill(s) match {query!r}:"]
+        lines += [f"  • {skill.row()} (match {score:.2f})" for score, skill in hits]
+        lines.append("Load the best fit with skill(action='load', name='...').")
+        return ActionResult(True, "\n".join(lines), needs_observe=False)
+
+    if action in {"show", "load"}:
+        if not name:
+            return ActionResult(False, f"skill '{action}' requires a 'name' parameter",
+                                needs_observe=False)
+        skill = mgr.get(name)
+        if skill is None:
+            return ActionResult(
+                False,
+                f"No skill named {name!r}. Find one with "
+                f"skill(action='search', query=...) or skill(action='list').",
+                needs_observe=False,
+            )
+        shown = skill.render()
+        if skill.rejected_tools:
+            shown += (
+                "\n\n(These tools named by the skill do not exist and were "
+                f"ignored: {', '.join(skill.rejected_tools)})"
+            )
+        if action == "show":
+            return ActionResult(True, shown, needs_observe=False)
+        mgr.set_active(skill.name)
+        return ActionResult(
+            True,
+            f"Skill '{skill.name}' is now active and its steps stay in context "
+            f"while you work. Unload it with skill(action='unload') when the task "
+            f"is done.\n\n{shown}",
+            needs_observe=False,
+        )
+
+    if action == "unload":
+        was = mgr.active()
+        mgr.unload()
+        return ActionResult(
+            True,
+            f"Skill '{was.name}' unloaded." if was else "No skill was loaded.",
+            needs_observe=False,
+        )
+
+    if action in {"create", "update"}:
+        if not name:
+            return ActionResult(False, f"skill '{action}' requires a 'name' parameter",
+                                needs_observe=False)
+        body = str(args.get("body", "") or "")
+        existing = mgr.get(name)
+        if action == "create" and existing is not None:
+            return ActionResult(
+                False,
+                f"A skill named '{existing.name}' already exists. Use "
+                f"skill(action='update', name='{existing.name}', ...) to change it, "
+                f"or pick a different name.",
+                needs_observe=False,
+            )
+        if action == "update" and existing is None:
+            return ActionResult(
+                False,
+                f"No skill named {name!r} to update. Use skill(action='create', ...).",
+                needs_observe=False,
+            )
+        if not body.strip() and existing is None:
+            return ActionResult(
+                False,
+                "a new skill needs a 'body' - the steps someone should follow. "
+                "Write them as numbered markdown.",
+                needs_observe=False,
+            )
+        if len(body) > MAX_BODY_CHARS:
+            return ActionResult(
+                False,
+                f"that body is {len(body)} chars; the limit is {MAX_BODY_CHARS}. "
+                f"Split it into two skills.",
+                needs_observe=False,
+            )
+
+        declared = args.get("tools") or ""
+        if isinstance(declared, (list, tuple)):
+            tools = [str(t).strip() for t in declared]
+        else:
+            tools = [t.strip() for t in str(declared).split(",")]
+        tools = [t for t in tools if t]
+
+        skill = Skill(
+            name=(existing.name if existing is not None else name),
+            description=str(args.get("description", "") or "").strip()
+            or (existing.description if existing is not None else ""),
+            when_to_use=str(args.get("when_to_use", "") or "").strip()
+            or (existing.when_to_use if existing is not None else ""),
+            tools=tools or (existing.tools if existing is not None else []),
+            body=body or (existing.body if existing is not None else ""),
+            created=(existing.created if existing is not None else ""),
+        )
+        try:
+            path = mgr.save(skill)
+        except (SkillError, OSError) as exc:
+            return ActionResult(False, f"could not save the skill: {exc}",
+                                needs_observe=False)
+        extra = ""
+        if skill.rejected_tools:
+            extra = (
+                "\nIgnored these tool names because no such action exists: "
+                f"{', '.join(skill.rejected_tools)}."
+            )
+        verb = "Updated" if action == "update" else "Saved"
+        return ActionResult(
+            True,
+            f"{verb} skill '{skill.name}' ({path.name}). It is in the prompt index "
+            f"from now on and loads with skill(action='load', name='{skill.name}')."
+            f"{extra}",
+            needs_observe=False,
+        )
+
+    if action == "delete":
+        if not name:
+            return ActionResult(False, "skill 'delete' requires a 'name' parameter",
+                                needs_observe=False)
+        ok = mgr.delete(name)
+        return ActionResult(
+            ok,
+            f"Skill '{name}' deleted." if ok else f"No skill named {name!r} to delete.",
+            needs_observe=False,
+        )
+
+    return ActionResult(
+        False,
+        f"unknown skill action '{action}'. Use one of: list, search, show, load, "
+        f"unload, create, update, delete.",
+        needs_observe=False,
+    )
+
+
 def _h_browser_action(args, obs, cfg):
     action = str(args.get("action", "snapshot")).strip().lower()
     from ..browser_engine import get_browser_driver
@@ -1828,6 +2001,7 @@ _HANDLERS = {
     "graph_query": _h_graph_query,
     "voice_control": _h_voice_control,
     "macro": _h_macro,
+    "skill": _h_skill,
     "secret": _h_secret,
     "see": _h_see,
     "remote_task": _h_remote_task,

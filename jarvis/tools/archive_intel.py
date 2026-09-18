@@ -23,7 +23,7 @@ def _is_zip_slip_safe(target_dir: Path, path_to_extract: str) -> bool:
     try:
         resolved_dst = (target_dir / path_to_extract).resolve()
         resolved_target = target_dir.resolve()
-        return str(resolved_dst).startswith(str(resolved_target))
+        return resolved_dst.is_relative_to(resolved_target)
     except Exception:
         return False
 

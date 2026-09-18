@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import base64
 import io
+import ipaddress
 import json
 import os
+from pathlib import Path
 import threading
 import time
 import urllib.parse
@@ -167,16 +169,25 @@ def _coalesce_roles(messages: list[dict]) -> list[dict]:
 
 def make_brain(cfg: BrainConfig) -> Brain:
     backend = cfg.backend.lower()
+    if backend in {"foundry", "azure", "azure-foundry", "azure_foundry", "foundry-agent", "gpt-6"}:
+        return AzureFoundryBrain(cfg)
     if backend in {"gemini", "vertex"}:
         return GeminiVertexBrain(cfg)
     if backend == "ollama":
         return OllamaBrain(cfg)
     if backend in {"hf", "transformers", "local"}:
         return HFLocalBrain(cfg)
-    if backend in {"llamacpp", "openai", "lmstudio", "vllm"}:
+    if backend in {"llamacpp", "openai", "lmstudio", "vllm", "openrouter"}:
+        if backend == "openrouter" or (cfg.api_key and cfg.api_key.startswith("sk-or-")):
+            if not cfg.base_url:
+                cfg.base_url = "https://openrouter.ai/api/v1"
+            if not cfg.api_key_env or cfg.api_key_env == "OPENAI_API_KEY":
+                cfg.api_key_env = "OPENROUTER_API_KEY"
         return OpenAICompatBrain(cfg)
     if backend == "anthropic":
         return AnthropicBrain(cfg)
+    if backend in {"codex", "openai-codex", "chatgpt"}:
+        return OpenAICodexBrain(cfg)
     raise BrainError(f"unknown brain backend: {cfg.backend}")
 
 
@@ -335,16 +346,29 @@ class OpenAICompatBrain(Brain):
             ]
 
         headers = {"Content-Type": "application/json"}
-        key = getattr(self.cfg, "api_key", "") or os.environ.get(self.cfg.api_key_env, "")
+        key = getattr(self.cfg, "api_key", "") or os.environ.get(self.cfg.api_key_env, "") or os.environ.get("OPENROUTER_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+        if not key:
+            try:
+                from ..security import get_secret
+                key = get_secret("OPENROUTER_API_KEY") or get_secret("OPENAI_API_KEY") or get_secret("JARVIS_API_KEY") or ""
+            except Exception:
+                pass
         if key:
             headers["Authorization"] = f"Bearer {key}"
+        if "openrouter.ai" in (self.cfg.base_url or "") or getattr(self.cfg, "backend", "").lower() == "openrouter" or (key and key.startswith("sk-or-")):
+            headers["HTTP-Referer"] = "https://github.com/jarvis-agent"
+            headers["X-Title"] = "Jarvis Desktop Assistant"
+
         payload = {
             "model": self.cfg.model,
             "messages": msgs,
             "temperature": self.cfg.temperature,
             "max_tokens": self.cfg.max_tokens,
         }
-        base = self.cfg.base_url.rstrip("/")
+        base = self.cfg.base_url.rstrip("/") if self.cfg.base_url else (
+            "https://openrouter.ai/api/v1" if (getattr(self.cfg, "backend", "").lower() == "openrouter" or (key and key.startswith("sk-or-")))
+            else "https://api.openai.com/v1"
+        )
         url = base + ("/chat/completions" if base.endswith("/v1")
                       else "/v1/chat/completions")
         try:
@@ -356,9 +380,562 @@ class OpenAICompatBrain(Brain):
             )
         except Exception as exc:
             raise BrainError(f"cannot reach endpoint {url}: {exc}") from exc
+
+        # Graceful fallback if model does not support images (e.g. OpenRouter text-only models)
+        if not r.ok and imgs and self.cfg.use_vision:
+            err_text = r.text
+            if "image" in err_text.lower() or "Filter by Image Support" in err_text:
+                self.cfg.use_vision = False
+                for m in msgs:
+                    if isinstance(m.get("content"), list):
+                        texts = [item.get("text", "") for item in m["content"] if item.get("type") == "text"]
+                        m["content"] = "\n".join(texts)
+                payload["messages"] = msgs
+                try:
+                    r = self._http_post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        timeout=self.cfg.request_timeout,
+                    )
+                except Exception as exc:
+                    raise BrainError(f"cannot reach endpoint {url}: {exc}") from exc
+
         r.raise_for_status()
         data = r.json()
-        return data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        content = choice["message"].get("content")
+        if content is None:
+            content = choice["message"].get("reasoning", "") or ""
+        return content
+
+
+# --------------------------------------------------------------------------- #
+# OpenAI Codex CLI ("Sign in with ChatGPT" OAuth)
+# --------------------------------------------------------------------------- #
+
+class OpenAICodexBrain(Brain):
+    """Brain backed by OpenAI Codex CLI "Sign in with ChatGPT" OAuth session.
+
+    Connects to https://chatgpt.com/backend-api/codex with Authorization Bearer
+    and ChatGPT-Account-ID headers, parsing Server-Sent Events (SSE) responses.
+    """
+
+    def __init__(self, cfg: BrainConfig):
+        super().__init__(cfg)
+        from ..auth import codex_oauth
+        self.auth = codex_oauth
+        if not self.cfg.base_url:
+            self.cfg.base_url = "https://chatgpt.com/backend-api/codex"
+        if not self.cfg.model:
+            self.cfg.model = "gpt-5.3-codex"
+
+    def complete(self, system: str, messages: list[dict], image=None) -> str:
+        from ..utils import logging as log
+
+        access_token, account_id = self.auth.get_valid_token()
+
+        url = self.cfg.base_url.rstrip("/")
+        if not url.endswith("/responses"):
+            url = f"{url}/responses"
+
+        input_items: list[dict] = []
+        for m in _coalesce_roles(messages):
+            role = m["role"]
+            content = m.get("content", "")
+            part_type = "output_text" if role == "assistant" else "input_text"
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") in ("text", "input_text", "output_text"):
+                        parts.append({"type": part_type, "text": item.get("text", "")})
+                    elif isinstance(item, str):
+                        parts.append({"type": part_type, "text": item})
+                input_items.append({"role": role, "content": parts or [{"type": part_type, "text": ""}]})
+            else:
+                input_items.append({"role": role, "content": [{"type": part_type, "text": str(content)}]})
+
+        imgs = self._as_images(image)
+        has_images = False
+        if imgs and self.cfg.use_vision and input_items:
+            last = input_items[-1]
+            last_content = last.setdefault("content", [])
+            for img in imgs:
+                try:
+                    b64, mime = self._prepare_vision_b64(img)
+                    last_content.append({
+                        "type": "input_image",
+                        "image_url": f"data:{mime};base64,{b64}",
+                    })
+                    has_images = True
+                except Exception as exc:
+                    log.warning(f"Could not encode screenshot for vision: {exc}")
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "ChatGPT-Account-ID": account_id,
+            "Content-Type": "application/json",
+            "originator": "codex_cli_rs",
+            "User-Agent": "OpenAI-Codex-CLI/0.153.4",
+            "Accept": "text/event-stream",
+        }
+
+        # Candidate models: try configured model first; if rejected by tier, fallback
+        available_models: list[str] = []
+        cache_file = Path.home() / ".codex" / "models_cache.json"
+        if cache_file.exists():
+            try:
+                cache_data = json.loads(cache_file.read_text(encoding="utf-8"))
+                for m_info in cache_data.get("models", []):
+                    slug = m_info.get("slug")
+                    if slug and slug not in available_models and slug != "codex-auto-review":
+                        available_models.append(slug)
+            except Exception:
+                pass
+
+        if not available_models:
+            available_models = ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-reserve", "gpt-5.4-mini"]
+
+        models_to_try = [self.cfg.model]
+        for m in available_models:
+            if m not in models_to_try:
+                models_to_try.append(m)
+
+        last_error = None
+        for model_idx, model_name in enumerate(models_to_try):
+            payload = {
+                "model": model_name,
+                "instructions": system,
+                "input": input_items,
+                "stream": True,
+                "store": False,
+            }
+
+            try:
+                r = self._http_post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    stream=True,
+                    timeout=self.cfg.request_timeout or 60,
+                )
+            except Exception as exc:
+                raise BrainError(f"Cannot reach Codex backend at {url}: {exc}") from exc
+
+            # Proactive token refresh on 401
+            if r.status_code == 401:
+                log.warn("Codex backend returned 401. Refreshing token...")
+                access_token, account_id = self.auth.get_valid_token(force_refresh=True)
+                headers["Authorization"] = f"Bearer {access_token}"
+                headers["ChatGPT-Account-ID"] = account_id
+                r = self._http_post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    stream=True,
+                    timeout=self.cfg.request_timeout or 60,
+                )
+
+            # Vision fallback if backend rejected images
+            if not r.ok and has_images:
+                err_text = r.text
+                if "image" in err_text.lower() or "not support" in err_text.lower():
+                    has_images = False
+                    for item in input_items:
+                        item["content"] = [c for c in item.get("content", []) if c.get("type") == "input_text"]
+                    payload["input"] = input_items
+                    r = self._http_post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        stream=True,
+                        timeout=self.cfg.request_timeout or 60,
+                    )
+
+            if r.status_code == 400:
+                err_body = r.text
+                if "not supported when using Codex with a ChatGPT account" in err_body or "does not exist or you do not have access" in err_body:
+                    if model_idx == 0 and len(models_to_try) > 1:
+                        next_model = models_to_try[1]
+                        log.warn(f"Model '{model_name}' is not currently active on this ChatGPT account tier. Falling back to active tier model '{next_model}'.")
+                    last_error = err_body
+                    continue
+
+            if not r.ok:
+                raise BrainError(f"Codex backend error ({r.status_code}): {r.text}")
+
+            output_pieces: list[str] = []
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                line_str = line.decode("utf-8", errors="replace")
+                if line_str.startswith("data: "):
+                    data_str = line_str[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                    except Exception:
+                        continue
+
+                    chunk_type = chunk.get("type")
+                    if chunk_type in ("response.output_text.delta", "response.text.delta"):
+                        output_pieces.append(chunk.get("delta", ""))
+                    elif chunk_type == "response.completed" and not output_pieces:
+                        resp_obj = chunk.get("response", {})
+                        for out in resp_obj.get("output", []):
+                            for c in out.get("content", []):
+                                if c.get("type") in ("output_text", "text") and c.get("text"):
+                                    output_pieces.append(c["text"])
+                    elif "choices" in chunk:
+                        for ch in chunk.get("choices", []):
+                            delta_content = ch.get("delta", {}).get("content")
+                            if delta_content:
+                                output_pieces.append(delta_content)
+
+            result_text = "".join(output_pieces).strip()
+            if result_text:
+                return result_text
+
+            if not output_pieces:
+                try:
+                    data = r.json()
+                    resp_obj = data.get("response", {})
+                    for out in resp_obj.get("output", []):
+                        for c in out.get("content", []):
+                            if c.get("text"):
+                                output_pieces.append(c["text"])
+                    if not output_pieces and "choices" in data:
+                        output_pieces.append(data["choices"][0].get("message", {}).get("content", ""))
+                    if output_pieces:
+                        return "".join(output_pieces).strip()
+                except Exception:
+                    pass
+
+        raise BrainError(f"Codex backend call failed for all models: {last_error}")
+
+
+# --------------------------------------------------------------------------- #
+# Microsoft Azure AI Foundry Agent (GPT-6 Astra)
+# --------------------------------------------------------------------------- #
+
+class AzureFoundryBrain(Brain):
+    """Brain backed by Microsoft Azure AI Foundry Agent Code Template with GPT-6.
+
+    Uses AIProjectClient and openai_client.responses.create with extra_body:
+    {"agent_reference": {"name": my_agent, "version": my_version, "type": "agent_reference"}}
+    """
+
+    def __init__(self, cfg: BrainConfig):
+        super().__init__(cfg)
+        self.endpoint = (
+            getattr(cfg, "foundry_endpoint", None)
+            or cfg.base_url
+            or os.environ.get("AZURE_FOUNDRY_ENDPOINT")
+            or os.environ.get("JARVIS_FOUNDRY_ENDPOINT")
+            or os.environ.get("AZURE_AI_ENDPOINT")
+            or "https://satviksingh-resource.services.ai.azure.com/api/projects/satviksingh"
+        )
+        self.agent_name = (
+            getattr(cfg, "foundry_agent_name", None)
+            or cfg.model
+            or os.environ.get("AZURE_AGENT_NAME")
+            or os.environ.get("JARVIS_AGENT_NAME")
+            or "gpt-6"
+        )
+        self.agent_version = (
+            getattr(cfg, "foundry_agent_version", None)
+            or os.environ.get("AZURE_AGENT_VERSION")
+            or os.environ.get("JARVIS_AGENT_VERSION")
+            or "1"
+        )
+        self.tenant_id = (
+            getattr(cfg, "azure_tenant_id", None)
+            or os.environ.get("AZURE_TENANT_ID")
+            or None
+        )
+        self._project_client = None
+        self._openai_client = None
+        self._is_local_relay = False
+        self._init_lock = threading.Lock()
+
+    def _get_client(self):
+        if self._openai_client is not None:
+            return self._openai_client
+        with self._init_lock:
+            if self._openai_client is not None:
+                return self._openai_client
+
+            endpoint = (self.endpoint or "").strip()
+            try:
+                # Validate before selecting or acquiring credentials; urlsplit alone
+                # accepts userinfo and silently removes some control characters.
+                if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in endpoint) or "\\" in endpoint:
+                    raise ValueError
+                parsed = urllib.parse.urlsplit(endpoint)
+                if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                        or parsed.username is not None or parsed.password is not None
+                        or parsed.query or parsed.fragment):
+                    raise ValueError
+                parsed.port  # Reject malformed or out-of-range ports.
+            except ValueError:
+                raise BrainError("Invalid Foundry endpoint: expected an HTTP(S) URL without userinfo, query, or fragment") from None
+
+            host = parsed.hostname.lower().rstrip(".")
+            try:
+                is_loopback = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                is_loopback = host == "localhost"
+            # Preserve explicitly configured remote HTTP relays as well as loopback.
+            if is_loopback or parsed.scheme == "http":
+                from openai import OpenAI
+                api_key = (
+                    os.environ.get("AZURE_API_KEY")
+                    or os.environ.get("FOUNDRY_API_KEY")
+                    or os.environ.get("JARVIS_API_KEY")
+                    or os.environ.get("OPENAI_API_KEY")
+                    or self.cfg.api_key
+                    or "SATVIKNOOB"
+                )
+                self._openai_client = OpenAI(
+                    base_url=endpoint.rstrip("/"),
+                    api_key=api_key,
+                )
+                self._is_local_relay = True
+                return self._openai_client
+
+            try:
+                from azure.ai.projects import AIProjectClient
+                from ..auth.azure_auth import get_azure_credential
+            except ImportError as exc:
+                raise BrainError(
+                    "Azure AI Projects SDK is required for the foundry backend.\n"
+                    "Please run: pip install azure-ai-projects>=2.1.0 azure-identity>=1.16.0"
+                ) from exc
+
+            credential = get_azure_credential(tenant_id=self.tenant_id)
+            self._project_client = AIProjectClient(
+                endpoint=endpoint,
+                credential=credential,
+            )
+
+            client_kwargs = {}
+            # Only use api_key if it is an explicit Azure key (ignore OpenRouter sk-or-, Gemini AIza, OpenAI sk-proj-)
+            azure_key = (
+                os.environ.get("AZURE_API_KEY")
+                or os.environ.get("AZURE_AI_KEY")
+                or os.environ.get("FOUNDRY_API_KEY")
+            )
+            if not azure_key and self.cfg.api_key:
+                k = self.cfg.api_key.strip()
+                if not (k.startswith("sk-or-") or k.startswith("AIza") or k.startswith("sk-proj-")):
+                    azure_key = k
+
+            if azure_key:
+                client_kwargs["api_key"] = azure_key
+
+            self._openai_client = self._project_client.get_openai_client(**client_kwargs)
+            return self._openai_client
+
+    def warmup(self) -> None:
+        try:
+            self._get_client()
+        except Exception:
+            pass
+
+    def complete(self, system: str, messages: list[dict], image=None) -> str:
+        from ..utils import logging as log
+
+        client = self._get_client()
+
+        # Build input messages
+        # Azure Foundry Agent Responses API accepts strings or content part lists.
+        # For plain text turns: pass content as plain str (compatible with both user and assistant).
+        # When structured parts are needed (e.g. for vision):
+        # - user parts use {"type": "input_text", "text": ...} / {"type": "input_image", ...}
+        # - assistant parts use {"type": "output_text", "text": ...} or plain str
+        input_items: list[dict] = []
+        for m in _coalesce_roles(messages):
+            role = m["role"]
+            content = m.get("content", "")
+            if isinstance(content, list):
+                parts_text = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get("text"):
+                            parts_text.append(str(item["text"]))
+                    elif isinstance(item, str):
+                        parts_text.append(item)
+                input_items.append({"role": role, "content": "".join(parts_text)})
+            else:
+                input_items.append({"role": role, "content": str(content)})
+
+        # Inject system prompt into input context if provided.
+        # Note: Azure Foundry rejects top-level 'instructions' and 'temperature'
+        # when an agent_reference is specified because instructions and parameters
+        # are governed by the agent definition in Azure AI Foundry. Providing system
+        # instructions as initial context ensures Jarvis system instructions and action
+        # schemas are delivered without violating the Azure API schema.
+        if system:
+            first_user = None
+            for item in input_items:
+                if item.get("role") == "user":
+                    first_user = item
+                    break
+            if first_user is not None:
+                first_content = first_user.get("content", "")
+                if isinstance(first_content, str):
+                    first_user["content"] = (
+                        f"[System Context & Instructions]\n{system}\n\n[User Request]\n{first_content}"
+                    )
+                elif isinstance(first_content, list):
+                    first_content.insert(
+                        0,
+                        {"type": "input_text", "text": f"[System Context & Instructions]\n{system}\n\n"},
+                    )
+            else:
+                input_items.insert(
+                    0,
+                    {
+                        "role": "user",
+                        "content": f"[System Context & Instructions]\n{system}",
+                    },
+                )
+
+        # Append screenshot for vision if requested
+        imgs = self._as_images(image)
+        has_images = False
+        if imgs and self.cfg.use_vision and input_items:
+            target_user = None
+            for item in reversed(input_items):
+                if item.get("role") == "user":
+                    target_user = item
+                    break
+            if target_user is not None:
+                cur_content = target_user.get("content", "")
+                if isinstance(cur_content, str):
+                    content_parts = [{"type": "input_text", "text": cur_content}]
+                elif isinstance(cur_content, list):
+                    content_parts = list(cur_content)
+                else:
+                    content_parts = [{"type": "input_text", "text": ""}]
+
+                for img in imgs:
+                    try:
+                        b64, mime = self._prepare_vision_b64(img)
+                        content_parts.append({
+                            "type": "input_image",
+                            "image_url": f"data:{mime};base64,{b64}",
+                            "detail": "auto",
+                        })
+                        has_images = True
+                    except Exception as exc:
+                        log.warning(f"Could not encode screenshot for vision: {exc}")
+                target_user["content"] = content_parts
+
+        def _call_create(items: list[dict]):
+            if getattr(self, "_is_local_relay", False):
+                try:
+                    return client.responses.create(input=items)
+                except Exception as resp_err:
+                    log.debug(f"responses.create on local relay failed ({resp_err}); trying chat.completions fallback")
+                    chat_msgs = []
+                    for item in items:
+                        content = item.get("content", "")
+                        if isinstance(content, list):
+                            parts_text = [str(c.get("text", "")) for c in content if isinstance(c, dict) and c.get("text")]
+                            content = "".join(parts_text)
+                        chat_msgs.append({"role": item.get("role", "user"), "content": content})
+                    resp = client.chat.completions.create(
+                        model=self.agent_name or "gpt-6",
+                        messages=chat_msgs,
+                        temperature=self.cfg.temperature,
+                        max_tokens=self.cfg.max_tokens,
+                    )
+                    choice = resp.choices[0]
+                    content = choice.message.content or ""
+                    class _SimpleResp:
+                        def __init__(self, text):
+                            self.output_text = text
+                    return _SimpleResp(content)
+
+            extra_body = {
+                "agent_reference": {
+                    "name": self.agent_name,
+                    "version": self.agent_version,
+                    "type": "agent_reference",
+                }
+            }
+            # Azure Foundry Agent API requires strict payload matching the template:
+            # - No top-level 'instructions' (disallowed when agent is specified)
+            # - No top-level 'temperature' (disallowed when agent is specified)
+            kwargs = {
+                "input": items,
+                "extra_body": extra_body,
+            }
+            return client.responses.create(**kwargs)
+
+        try:
+            response = _call_create(input_items)
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            # If backend rejected images, fall back to text-only
+            if has_images and any(k in err_msg for k in ("image", "unsupported", "detail", "multimodal")):
+                log.warn(f"Agent rejected vision payload ({exc}). Falling back to text-only mode.")
+                self.cfg.use_vision = False
+                for item in input_items:
+                    if isinstance(item.get("content"), list):
+                        text_only = "".join(
+                            c.get("text", "")
+                            for c in item["content"]
+                            if isinstance(c, dict) and c.get("type") == "input_text"
+                        )
+                        item["content"] = text_only
+                response = _call_create(input_items)
+            else:
+                raise BrainError(f"Azure Foundry Agent call failed: {exc}") from exc
+
+        # Extract output text
+        output_text = getattr(response, "output_text", None)
+        if output_text and output_text.strip():
+            return output_text.strip()
+
+        # Deep extraction from response.output items
+        output_pieces: list[str] = []
+        if hasattr(response, "output") and response.output:
+            for item in response.output:
+                if hasattr(item, "content") and item.content:
+                    for part in item.content:
+                        if hasattr(part, "text") and part.text:
+                            output_pieces.append(part.text)
+                        elif isinstance(part, dict) and part.get("text"):
+                            output_pieces.append(part["text"])
+
+        result_text = "".join(output_pieces).strip()
+        if result_text:
+            return result_text
+
+        raise BrainError("Azure Foundry Agent returned empty content")
+
+    def synthesize_speech(
+        self,
+        text: str,
+        *,
+        model: str | None = None,
+        voice_name: str = "en-US-OnyxTurboMultilingualNeural",
+        language_code: str = "en-US",
+    ) -> bytes:
+        """Synthesize speech using Microsoft Azure Cognitive Services or Foundry Relay Speech SDK."""
+        from ..config import VoiceConfig
+        from ..utils.voice import _synthesize_azure_speech
+
+        is_local = getattr(self, "_is_local_relay", False)
+        vcfg = VoiceConfig(
+            engine="foundry" if is_local else "azure",
+            azure_speech_voice=voice_name or "en-US-OnyxTurboMultilingualNeural",
+            tts_voice=voice_name or "en-US-OnyxTurboMultilingualNeural",
+        )
+        return _synthesize_azure_speech(text, vcfg)
 
 
 # --------------------------------------------------------------------------- #
@@ -414,7 +991,7 @@ class AnthropicBrain(Brain):
 # --------------------------------------------------------------------------- #
 
 class GeminiVertexBrain(Brain):
-    """Google Cloud Vertex AI backend using Application Default Credentials (ADC)."""
+    """Google Gemini backend supporting Google AI Studio (API key) and Vertex AI (ADC)."""
 
     def __init__(self, cfg: BrainConfig):
         super().__init__(cfg)
@@ -422,6 +999,29 @@ class GeminiVertexBrain(Brain):
         self._cached_token = None
         self._token_expiry = 0
         self._auth_lock = threading.Lock()
+
+    def _get_api_key(self) -> str:
+        # Explicit Google API key takes precedence
+        explicit_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if explicit_key and explicit_key.strip():
+            return explicit_key.strip()
+
+        # Check config/generic key, but ensure it is not an OpenAI/OpenRouter/Groq key or dummy placeholder
+        key = (getattr(self.cfg, "api_key", None) or os.environ.get("JARVIS_API_KEY") or "").strip()
+        if key and (key.startswith("AIza") or (not key.startswith("sk-") and not key.startswith("gsk_") and key != "SATVIKNOOB" and len(key) >= 30)):
+            return key
+
+        try:
+            from ..security import get_secret
+            vault_key = (
+                get_secret("GEMINI_API_KEY")
+                or get_secret("GOOGLE_API_KEY")
+            )
+            if vault_key:
+                return vault_key.strip()
+        except Exception:
+            pass
+        return ""
 
     def _get_access_token_and_project(self) -> tuple[str, str]:
         if (
@@ -522,7 +1122,9 @@ class GeminiVertexBrain(Brain):
         )
 
     def complete(self, system: str, messages: list[dict], image=None) -> str:
-        access_token, project_id = self._get_access_token_and_project()
+        api_key = self._get_api_key()
+        if not api_key:
+            access_token, project_id = self._get_access_token_and_project()
 
         contents = []
         for m in _coalesce_roles(messages):
@@ -583,13 +1185,17 @@ class GeminiVertexBrain(Brain):
                 "parts": [{"text": system}]
             }
 
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json"
-        }
-
-        loc = getattr(self.cfg, "location", "global")
-        url = f"https://aiplatform.googleapis.com/v1/projects/{project_id}/locations/{loc}/publishers/google/models/{self.cfg.model}:generateContent"
+        if api_key:
+            clean_model = self.cfg.model.removeprefix("models/")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
+            headers = {"Content-Type": "application/json"}
+        else:
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            }
+            loc = getattr(self.cfg, "location", "global")
+            url = f"https://aiplatform.googleapis.com/v1/projects/{project_id}/locations/{loc}/publishers/google/models/{self.cfg.model}:generateContent"
 
         # Gemini sometimes returns an EMPTY candidate with finishReason
         # RECITATION (its copyright filter matching benign output), OTHER, or
@@ -660,15 +1266,17 @@ class GeminiVertexBrain(Brain):
                     timeout=self.cfg.request_timeout,
                 )
             except Exception as exc:
+                endpoint_name = "Gemini" if api_key else "Vertex AI Gemini"
                 raise BrainError(
-                    f"Vertex AI Gemini API request failed: {exc}") from exc
+                    f"{endpoint_name} API request failed: {exc}") from exc
             if not r.ok:
                 try:
                     err_details = f" - Details: {r.text[:500]}"
                 except Exception:
                     err_details = ""
+                endpoint_name = "Gemini" if api_key else "Vertex AI Gemini"
                 raise BrainError(
-                    f"Vertex AI Gemini API returned HTTP {r.status_code}{err_details}")
+                    f"{endpoint_name} API returned HTTP {r.status_code}{err_details}")
             data = r.json()
 
             candidates = data.get("candidates", [])
@@ -712,10 +1320,11 @@ class GeminiVertexBrain(Brain):
                          model: str | None = None) -> str:
         """Speech-to-text: Gemini accepts audio natively, so voice input needs
         no local speech model on this machine."""
-        access_token, project_id = self._get_access_token_and_project()
+        api_key = self._get_api_key()
         transcription_model = model or self.cfg.model
+        clean_model = transcription_model.removeprefix("models/")
         b64 = base64.b64encode(wav_bytes).decode("ascii")
-        if transcription_model.startswith("gemini-2.5"):
+        if clean_model.startswith("gemini-2.5"):
             thinking_config = {"thinkingBudget": 0}
         else:
             thinking_config = {"thinkingLevel": "minimal"}
@@ -733,12 +1342,17 @@ class GeminiVertexBrain(Brain):
                 "thinkingConfig": thinking_config,
             },
         }
-        headers = {"Authorization": f"Bearer {access_token}",
-                   "Content-Type": "application/json"}
-        loc = getattr(self.cfg, "location", "global")
-        url = (f"https://aiplatform.googleapis.com/v1/projects/{project_id}"
-               f"/locations/{loc}/publishers/google/models/"
-               f"{transcription_model}:generateContent")
+        if api_key:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
+            headers = {"Content-Type": "application/json"}
+        else:
+            access_token, project_id = self._get_access_token_and_project()
+            headers = {"Authorization": f"Bearer {access_token}",
+                       "Content-Type": "application/json"}
+            loc = getattr(self.cfg, "location", "global")
+            url = (f"https://aiplatform.googleapis.com/v1/projects/{project_id}"
+                   f"/locations/{loc}/publishers/google/models/"
+                   f"{transcription_model}:generateContent")
         r = self._http_post(
             url,
             json=payload,
@@ -780,7 +1394,8 @@ class GeminiVertexBrain(Brain):
         ``model`` is supplied explicitly so speech generation can never
         accidentally replace or mutate ``self.cfg.model``, the thinking model.
         """
-        api_key = getattr(self.cfg, "api_key", None) or os.environ.get("GEMINI_API_KEY")
+        api_key = self._get_api_key()
+        clean_model = model.removeprefix("models/")
         speech_config: dict[str, Any] = {
             "voiceConfig": {
                 "prebuiltVoiceConfig": {"voiceName": voice_name}
@@ -806,7 +1421,7 @@ class GeminiVertexBrain(Brain):
 
         # Try Google AI Studio if API key is present
         if api_key:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
             headers = {"Content-Type": "application/json"}
             try:
                 response = self._http_post(
@@ -817,8 +1432,13 @@ class GeminiVertexBrain(Brain):
                 )
                 if response.ok:
                     return self._parse_tts_response(response)
-            except Exception:
-                pass
+                raise BrainError(
+                    f"Gemini TTS returned HTTP {response.status_code}: {response.text[:500]}"
+                )
+            except Exception as exc:
+                if isinstance(exc, BrainError):
+                    raise
+                raise BrainError(f"Gemini TTS request failed: {exc}") from exc
 
         # Try Vertex AI via Application Default Credentials
         access_token, project_id = self._get_access_token_and_project()

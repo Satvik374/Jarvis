@@ -107,10 +107,32 @@ the Windows `py` launcher and falls back to `python`.
 Browser mode is local and dependency-free: it binds only to `127.0.0.1`, opens
 an authenticated page in your default browser, and keeps the regular Jarvis
 terminal REPL underneath. Keep the launching terminal open; closing it ends the
-browser session. The browser supports the same tasks, slash commands,
+browser session, and the runtime checks every couple of seconds that the console
+that opened it is still there, so it cannot outlive it even if the terminal is
+killed rather than closed. Set `JARVIS_BROWSER_DETACHED=1` to keep the runtime
+running deliberately. The browser supports the same tasks, slash commands,
 mid-task questions, confirmations, and image prompts as the console. While
 Jarvis speaks, the center core renders a live spectrum from the synthesized
 voice amplitude.
+
+The centre of the stage is the **liquid energy blob** (`jarvis/browser_ui/blob.js`),
+a fullscreen signed-distance-field shader that is the default visual. It is not
+decorative: its wobble, colour, interior churn and membrane all follow what
+Jarvis is doing.
+
+| Input | What moves |
+|-------|------------|
+| Agent state (`thinking`, `acting`, `success`, `error`, …) | Wobble amplitude, surface tension, spin, palette |
+| Speaking | The membrane is pushed outward and the voice spectrum raises a crown of spikes around it |
+| Every action (`act`, `ok`, `warn`, `error` activity) | A thrust flash plus expanding shockwave rings |
+| Pointer | A slight parallax lean |
+
+The mode buttons in the top-right of the stage switch between `BLOB`,
+`HOLOGRAM`, `ORBIT`, `WIREFRAME` and `QUANTUM` (`H` cycles them, `R` resets,
+`P` emits a pulse). The blob sizes itself from its container, so it keeps its
+proportions from a phone to an ultrawide window, lowers its noise detail and
+render scale when frames get expensive, pauses with the tab when hidden, and
+under `prefers-reduced-motion` renders a still pose instead of animating.
 
 ### Control a paired device remotely
 
@@ -178,24 +200,21 @@ you > :voice on            # Gemini speech input + Gemini TTS output
 you > :help
 ```
 
-### Gemini voice mode
+### Local Voice & Text-to-Speech (TTS) Mode
 
-Voice output uses the dedicated `gemini-3.1-flash-tts-preview` model through
-Vertex AI. It is configured separately from the thinking model, so
-`brain.model: gemini-3.7-flash` remains unchanged.
-Voice transcription uses the lower-latency `gemini-2.5-flash-lite` model with
-thinking disabled and a shorter end-of-speech delay.
+Jarvis uses local, offline Text-to-Speech powered by **Kokoro-82M ONNX** (`models/tts/kokoro-v1.0.onnx`) by default, with a local Windows SAPI fallback. Every response from Jarvis is spoken out loud automatically.
 
-Authenticate with Application Default Credentials before using voice mode:
+The default voice is `bm_george` (classic British JARVIS persona). You can configure the engine, voice, and speed in `config.yaml` or via environment variables:
+- `engine: kokoro` (local offline ONNX, default), `sapi` (Windows offline native), `gemini` (Vertex AI cloud), or `edge` (Edge-TTS neural).
+- `local_voice: bm_george` (or `bm_lewis`, `af_heart`, `am_adam`, etc.).
+- `local_speed: 1.0` (speed multiplier).
 
-```bash
-gcloud auth application-default login
-```
+Environment overrides:
+- `JARVIS_TTS_ENGINE=kokoro`
+- `JARVIS_LOCAL_VOICE=bm_george`
+- `JARVIS_LOCAL_SPEED=1.0`
 
-The TTS model, prebuilt voice, and language can be changed under `voice:` in
-`config.yaml`, or with `JARVIS_TTS_MODEL`, `JARVIS_TTS_VOICE`, and
-`JARVIS_TTS_LANGUAGE`. The transcription model can be overridden with
-`JARVIS_STT_MODEL`. Launch with `python run.py --voice` or use `:voice on`.
+Voice transcription uses `gemini-2.5-flash-lite`. Launch with `python run.py --voice` or use `:voice on` to enable microphone input.
 
 ### Hands-free wake word ("Hey Jarvis")
 
@@ -229,6 +248,269 @@ transcription/TTS.
 > approve each action while you learn how the model behaves. Shell commands
 > matching a denylist (format, del /, shutdown, …) are refused; file writes are
 > sandboxed to your home directory.
+
+### Fish Audio Agents (hosted voice agent)
+
+[Fish Agents](https://docs.fish.audio/agents) is a hosted real-time voice
+agent: Fish runs the speech recognition, turn-taking and synthesis, and your
+page runs the tools. Jarvis exposes the tools as **client tools**
+(`jarvis/live/fish_agents.py`), so tool calls are executed locally and no
+public URL, webhook or relay is involved:
+
+```
+Fish agent ──client tool call──▶ browser page (app.js)
+                                   ├─▶ POST /api/tool/execute  (direct actions)
+                                   ├─▶ POST /api/live/execute  (execute_task)
+                                   ├─▶ POST /api/interrupt     (cancel_task)
+                                   └─▶ GET  /api/state         (get_task_status)
+```
+
+#### Direct actions: the voice agent has its own hands
+
+The main agent reaches actions through the perceive/think/act loop - screenshot,
+read a numbered element list, pick one action, repeat. That is what makes GUI
+work possible, and it is also why "open notepad" costs seconds and several model
+round trips.
+
+The voice agent does not need any of that. `jarvis/live/direct_tools.py` exposes
+every action that does *not* need to see the screen, and the voice agent calls
+them itself:
+
+```
+voice agent ──client tool call──▶ POST /api/tool/execute
+                                        │
+                                        ▼
+                          terminal runtime (jarvis/browser_worker.py)
+                                        │
+                                        ▼
+                    jarvis.tools.registry.execute(name, args)
+```
+
+Nothing new is being invented: each tool is an existing entry in
+`jarvis/tools/schema.py`, run by the same registry the main agent uses, and the
+tool declarations are **generated from that schema** so the arguments the model
+sees are exactly the arguments the registry reads. Launchers, files, shell,
+Python, web reads and search, clipboard, memory, scheduling, browser automation
+and the intel tools all answer in one hop.
+
+Excluded, for reasons that are about the caller rather than safety theatre
+(`direct_tools.EXCLUDED`):
+
+| Reason | Examples | Why |
+|--------|----------|-----|
+| `screen` | `click`, `type`, `press`, `drag`, `observe` | Cannot be aimed without the live element list - the model would be guessing pixels. Delegate to `execute_task`, which can see. |
+| `self` | `self_upgrade`, `synthesize_tool` | Rewrite Jarvis's own source or permanently register new code. |
+| `secret` | `secret` | Reads and writes the credential vault. |
+| `session` | `mcp`, `macro`, `hud_control`, `voice_control`, `daemon_rule` | Long-lived state owned by another subsystem. |
+| `slow` | `code_task`, `agent`, `agent_swarm` | Outrun the client-tool deadline. Delegate these. |
+
+A direct call is only dispatched while the runtime is **idle at a prompt**, so it
+can never race the agentic loop over the same desktop; a request that arrives
+mid-task is refused with "Jarvis is busy" rather than queued. Model-chosen
+timeouts are clamped to 90s (`direct_tools.clamp_args`) because a tool that
+outlives the client deadline does not merely fail - the model is told it failed
+while the command keeps running.
+
+Declare every tool, sync the system prompt, **and publish** (idempotent, safe to
+re-run):
+
+```bash
+python -m jarvis.live.fish_agents                # create -> attach -> publish
+python -m jarvis.live.fish_agents --list         # show agents and workspace tools
+python -m jarvis.live.fish_agents --no-publish   # attach to the draft only
+python -m jarvis.live.fish_agents --keep-prompt  # leave the agent's prompt alone
+```
+
+The system prompt is pushed along with the tools because the tools and the
+instructions for *when* to call them live in different places - the declarations
+locally, the prompt on Fish's servers. `--keep-prompt` leaves it alone.
+
+Without an id, the agent id comes from `live_voice.fish_agent_id`. To do it by
+hand instead, paste the payload of `f.client_tool_declarations()` into
+Builder -> Tools and publish.
+
+> **Publishing is not optional.** Sessions always run the *published* version,
+> so an agent whose tools were only attached to the draft behaves exactly like a
+> tool-less agent: it talks about doing the task and never calls `execute_task`.
+> `setup_agent()` always publishes for this reason.
+
+Then point Jarvis at the agent and open browser voice mode:
+
+```bash
+# config.yaml:  live_voice.fish_agent_id: <agent id>
+# or: JARVIS_FISH_AGENT_ID=<agent id>   (plus FISH_AUDIO_API_KEY in .env)
+python run.py --browser
+```
+
+Once `fish_agent_id` is set, **live voice mode uses Fish**: `LiveVoiceController`
+mints a session through `POST /api/voice/session` (which calls Fish's
+`POST /v1/agent/sessions` **server-side**, so the API key never reaches the
+browser) and starts `@fishaudio/agent-client` with the three client-tool
+handlers. Transcripts, agent mode, tool activity and barge-in are mirrored into
+the normal console UI; `stop()` ends the session. If the agent is unset, the SDK
+is missing, or session creation fails, live mode falls back to the
+`live_voice.ws_url` OpenAI-Realtime path instead of failing.
+
+Tool calls land in the event feed ("Voice AI Agent called execute_task") and, if
+nothing happens, `GET /v1/agent/sessions/{id}` replays the session's
+`tool_call` / `tool_result` timeline - a `tool_call` with no matching
+`tool_result` means the call never resolved.
+
+The SDK is vendored as one built ES module
+(`jarvis/browser_ui/vendor/fish-agent-client.esm.js`, see that folder's README)
+and served from the loopback server like `three.min.js` - no CDN, no import map,
+no `node_modules` in the project. The voice-agent system prompt and the
+OpenAI-Realtime spelling of the same tools are served by `GET /api/live/config`,
+or printed with `python -m jarvis.live.prompts`.
+
+> **Note:** Fish Agents is in private beta - `/v1/agent/*` returns `403` until
+> access is granted on the account (https://fish.audio/app/agents). Sessions
+> bill against the account's API credit, and running out returns
+> `402 Out of API credit` when a session is created.
+
+#### When the agent talks instead of acting
+
+The failure mode to watch for: the agent says "I am opening Spotify right now"
+and no tool call happens, so nothing changes on screen. The transcripts make it
+obvious - `GET /v1/agent/sessions/{id}` replays `tool_call` / `tool_result`
+items, and a session with an action request but no `tool_call` means the model
+never called anything.
+
+That is a *model reliability* problem, not a Jarvis bug. The hosted agent's own
+LLM decides whether to call a tool, and the `*-lite` variants often narrate the
+action instead. Measure it rather than guessing - `_voice_probe.py` drives a real
+session headlessly (real token, real model) with stub handlers, so it isolates
+tool selection from everything else:
+
+```bash
+python _voice_probe.py <agent id> --repeat 8      # tool-call rate
+python _voice_probe.py <agent id> --voice         # real audio in, via fake mic
+python _voice_probe.py <agent id> "open notepad"  # your own phrasing
+```
+
+Which model to run is configured, not buried in the console:
+
+```yaml
+live_voice:
+  fish_llm_model: google/gemini-3.6-flash    # blank = leave the agent as-is
+```
+
+`python -m jarvis.live.fish_agents --llm <model>` overrides it for one run.
+
+#### The voice agent can drive the screen itself
+
+The voice path does not have to *delegate* a click to the main agent and wait.
+It gets five resolving actions of its own, declared alongside the direct tools
+so every transport (Fish `tools`, the OpenAI-Realtime spelling, `/api/tool/execute`)
+sees the same set:
+
+| Action | What it does |
+| --- | --- |
+| `look_at_screen` | Reads the foreground window's UI Automation tree and returns real control labels, roles and ids |
+| `click_target` | Clicks a control **by name** - the name is resolved against a live observation, never an invented coordinate |
+| `type_into` | Focuses a named control, then types |
+| `press_keys` | Sends a chord to the focused window |
+| `scroll_window` | Scrolls by direction and amount |
+
+Accuracy comes from resolving *element ids* against that live tree, which is
+why there are no raw pointer primitives (`click_at`, `mouse_move`) on the voice
+path: a plausible-looking pixel is a coin flip, a resolved control is not. A
+match below `MIN_CONFIDENCE` (0.45) is **refused with the ranked candidates**, so
+the model re-reads instead of clicking something adjacent.
+
+Two things to know when writing the agent's instructions:
+
+* The tree is the **foreground window only**. Correct for precision, but the
+  target must be focused first - `focus_window` (a direct tool) then
+  `look_at_screen` is the reliable two-step.
+* Interactive controls outrank static labels at equal text, so a `Save` button
+  beats the `Save` text sitting next to it.
+
+Every direct call is announced on the console stream, so a voice action is
+visible while it happens instead of being inferred from the cursor moving:
+
+```text
+✓ click_target(target='Seven') -> clicked 'Seven' at (1692, 611)
+⚠ click_target(target='Save as') refused: 0.43 - best candidate 'Save' (button)
+```
+
+Refusals also raise an alert, and the centre core pulses on both. A requested
+action with **no line here at all** means the model never called a tool - that is
+the tool-selection problem above, not a screen-control failure.
+
+---
+
+## The browser interface
+
+`--browser` serves a small HUD from the loopback server: a centre core that
+animates in time with Jarvis's state and voice, a directive channel with the
+transcript, and a side panel of five tabs. It is plain HTML/CSS/JS
+(`jarvis/browser_ui/`) with no build step and no CDN.
+
+| Tab | What it shows |
+| --- | --- |
+| `STREAM` | Every activity line, warnings inline |
+| `VITALS` | Uptime, event rate, sparkline, activity by kind, time in state, telemetry |
+| `CMDS` | The real slash commands, filterable (becomes `LINKS` in remote-agent mode) |
+| `SKILLS` | The skill library, filterable, with a `USE` button per skill |
+| `LOGS` | Warnings and faults, with a badge that blinks until read |
+
+**The panel is a column when it fits and a drawer when it does not.** Above
+1250px it sits in the grid; below that the topbar's panel button opens it over
+the stage, with a backdrop, `Esc`, and focus returned to the button on close. It
+used to simply disappear below 1250px, which took the activity stream, vitals,
+command index and alerts with it.
+
+**The header fits the window it is given.** Below 720px the brand and the eight
+action controls no longer share a line, so the header wraps to two rows; below
+1100px the decorative `NEURAL LINK` readout steps aside rather than competing
+with the controls for room. The height itself lives in one custom property,
+`--header-h`, which every drawer anchors to, and `app.js` republishes the
+*measured* height — so when the action row wraps and the header grows, the
+drawers still land beneath it rather than across it. Measured in Chromium at
+320, 360, 414, 480, 560, 591, 640, 700, 721, 860, 901, 920, 940, 960, 1000,
+1050, 1100, 1150, 1280 and 1600px wide — including the worst case, with the
+`RECONNECT` control showing: nothing overflows the viewport, horizontally or
+vertically, at any of them.
+
+**`SKILLS` reads the real library.** `GET /api/skills` returns the parsed
+skills, and `USE` *stages* a directive in the composer (`Use the research-brief
+skill to …`) rather than running anything — you finish the sentence and send it,
+so nothing is executed that you did not read first. Remote-agent mode hides the
+tab, and it comes back when the interface returns to console.
+
+**Keyboard.** Press `?` for the full list, or read it here:
+
+| Key | Action |
+| --- | --- |
+| `Ctrl`+`K` | Command palette — commands, actions, sessions and skills |
+| `/` | Jump to the composer |
+| `Enter` / `Shift`+`Enter` | Send / new line |
+| `Ctrl`+`V` | Attach a clipboard image (a text paste is left alone) |
+| `?` | The shortcuts panel |
+| `Esc` | Close the palette, a drawer, or the shortcuts panel |
+
+**A dead link says why.** The connection pill reports one of `LINKED`,
+`OFFLINE`, `RELINKING`, `NO RUNTIME`, `TOKEN REJECTED` or `SERVER DOWN`, and a
+permanent cause (a stale token, a crashed runtime, a server that is not running)
+stops the `EventSource` retry loop and shows a `RECONNECT` button instead of
+retrying forever behind an unchanging `RELINKING`. The stage line carries a
+short form, the full sentence goes to the pill's tooltip and a toast.
+
+The UI is covered by `tests/test_browser_ui.mjs`, which boots the real
+`index.html` and `app.js` in jsdom and drives them with the same event shapes
+`jarvis/browser.py` publishes:
+
+```bash
+npm i jsdom --prefix /tmp/jarvis-ui-test
+NODE_PATH=/tmp/jarvis-ui-test/node_modules node tests/test_browser_ui.mjs
+```
+
+jsdom is deliberately not a project dependency, so the harness exits 0 with a
+`SKIP` when it is missing. jsdom has no layout engine, so the shell's own
+invariants — the track that cannot be widened, the header variable, and the
+source order that decides whether a media-query override actually wins — are
+pinned as stylesheet text in `tests/test_browser_layout.py`.
 
 ---
 
@@ -271,6 +553,65 @@ cached for 60s (`JARVIS_CONNECTOR_TTL`) so repeats cost nothing.
 
 ---
 
+## Skills (reusable procedures)
+
+A skill is a written procedure for a whole class of task — a research brief, how
+to drive a desktop app safely, machine triage, inbox handling, long-form
+drafting — stored as one markdown file per skill in `dataset/data/skills/`.
+Five presets ship with the app and are seeded on first use; they are ordinary
+files, so editing one keeps your version.
+
+Jarvis gets at them in **two stages**, which is the whole point:
+
+1. the system prompt carries a one-line **index** (name, what it is, when to
+   reach for it);
+2. the full body is loaded only when a skill is actually chosen.
+
+A library of thirty skills therefore costs about thirty lines of context, and
+the expensive instructions are paid for only when they are about to be used.
+
+```text
+skill action=search query="summarise my inbox"   # find the right one
+skill action=load   name=inbox-triage           # bring its steps into context
+skill action=unload                             # done with it
+skill action=create name=weekly-report body="1. ..."  # write a new one
+```
+
+`create` is how Jarvis learns: after working out a procedure worth repeating, it
+saves it, and the next run is a lookup instead of a rediscovery. Subagents get
+the same library, so a delegated task does not re-derive a skill its parent
+already wrote. The browser interface also has a `SKILLS` tab that lists the
+library and stages a directive for the one you pick — see *The browser
+interface* below.
+
+A skill file is markdown with a small YAML frontmatter block:
+
+```markdown
+---
+name: weekly-report
+description: Build the Monday numbers report from the sales sheet.
+when_to_use: weekly report, monday numbers, sales summary
+tools: read_file, write_file
+---
+
+1. Open the sales sheet. 2. Sum the week. 3. Write the report.
+```
+
+### Two properties that are enforced, not promised
+
+* **A skill cannot grant a capability.** `tools` is advisory and is filtered
+  against the real action set when the file is read, so a skill may suggest
+  `click` but can never invent `shell_root`. Nothing in a body is executed — it
+  is text the model reads, and the prompt says plainly that the safety rules
+  outrank it. A skill that claims to authorise something the rules forbid simply
+  has no effect.
+* **A loaded skill is scoped to its task.** Loading one records the task in
+  flight; when a different task starts, the skill is dropped. Yesterday's
+  procedure cannot silently steer today's work. (A skill loaded with no task
+  running — from the voice path, say — adopts the next task instead.)
+
+---
+
 ## How the app is organised
 
 | Path | What it does |
@@ -282,6 +623,7 @@ cached for 60s (`JARVIS_CONNECTOR_TTL`) so repeats cost nothing.
 | `jarvis/agent/loop.py` | The perceive→think→act loop. |
 | `jarvis/agent/trajectory.py` | Logs every real run as training data (`dataset/data/trajectories/`). |
 | `jarvis/tools/registry.py` | Resolves element→coordinate and executes actions. |
+| `jarvis/skills/` | Skill library — searchable procedures in `dataset/data/skills/`, plus the presets the app ships with. |
 | `jarvis/utils/voice.py` | Gemini TTS playback plus microphone recording for Gemini transcription. |
 | `jarvis/console.py`, `run.py` | Console REPL and CLI launcher. |
 

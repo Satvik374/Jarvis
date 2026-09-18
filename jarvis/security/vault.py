@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -23,6 +24,7 @@ CREDMAN_PREFIX = "JARVIS:"
 
 # Known API keys and service tokens to scan for migration
 KNOWN_SECRET_KEYS = [
+    "OPENROUTER_API_KEY",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "GEMINI_API_KEY",
@@ -46,6 +48,9 @@ KNOWN_SECRET_KEYS = [
     "PERPLEXITY_API_KEY",
     "DEEPSEEK_API_KEY",
     "MISTRAL_API_KEY",
+    "FISH_AUDIO_API_KEY",
+    "FISH_API_KEY",
+    "FISH_AUDIO_VOICE_ID",
 ]
 
 
@@ -175,8 +180,7 @@ class CredentialVault:
             # CryptProtectData(DataIn, Description, OptionalEntropy, Reserved, PromptStruct, Flags)
             return win32crypt.CryptProtectData(raw_bytes, "Jarvis DPAPI Secret", entropy, None, None, 0)
         except Exception as exc:
-            log.warn(f"DPAPI encryption failed ({exc}); falling back to base64 encoding.")
-            return base64.b64encode(raw_bytes)
+            raise RuntimeError("DPAPI encryption failed; refusing to store unencrypted secrets") from exc
 
     def dpapi_decrypt(self, blob: bytes, entropy: Optional[bytes] = None) -> str:
         """Decrypt data using Windows DPAPI (CryptUnprotectData)."""
@@ -202,28 +206,48 @@ class CredentialVault:
             with open(self.vault_file, "rb") as f:
                 encrypted_blob = f.read()
             decrypted_json = self.dpapi_decrypt(encrypted_blob)
-            self._dpapi_cache = json.loads(decrypted_json) if decrypted_json else {}
+            vault = json.loads(decrypted_json)
+            if not isinstance(vault, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in vault.items()
+            ):
+                raise ValueError("DPAPI vault must contain a mapping of secret names to strings")
+            self._dpapi_cache = vault
         except Exception as exc:
             log.warn(f"Error loading DPAPI vault from {self.vault_file}: {exc}")
-            self._dpapi_cache = {}
+            # Keep the cache unset so failed reads cannot authorize an overwrite.
+            return {}
         return self._dpapi_cache
 
     def _save_dpapi_vault(self) -> bool:
         if self._dpapi_cache is None:
-            return True
+            return False
+        temporary = None
         try:
             raw_json = json.dumps(self._dpapi_cache, indent=2)
             encrypted = self.dpapi_encrypt(raw_json)
-            with open(self.vault_file, "wb") as f:
+            with tempfile.NamedTemporaryFile(dir=self.vault_file.parent, delete=False) as f:
+                temporary = Path(f.name)
                 f.write(encrypted)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, self.vault_file)
             return True
         except Exception as exc:
+            self._dpapi_cache = None
             log.error(f"Error writing DPAPI vault: {exc}")
             return False
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError as exc:
+                    log.warn(f"Could not remove temporary vault file: {exc}")
 
     def write_dpapi(self, key: str, secret: str) -> bool:
         """Store a secret in the DPAPI-encrypted vault file."""
         vault = self._load_dpapi_vault()
+        if self._dpapi_cache is None:
+            return False
         vault[key.strip().upper()] = secret
         return self._save_dpapi_vault()
 

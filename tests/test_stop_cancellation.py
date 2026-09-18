@@ -115,6 +115,42 @@ class StopCancellationTests(unittest.TestCase):
         finish_event.set()
         controller.stop()
 
+    def test_05_ctrl_c_in_char_input_raises_keyboard_interrupt(self):
+        """Test that Ctrl+C character (\x03) raises KeyboardInterrupt in _char_input."""
+        from jarvis.console import _char_input
+        chars = ["\x03"]
+        with self.assertRaises(KeyboardInterrupt):
+            _char_input("> ", kbhit=lambda: bool(chars),
+                        getwch=lambda: chars.pop(0),
+                        grace=0.0, echo=lambda s: None,
+                        menu=lambda *a: None)
+
+    def test_06_cancel_console_worker_unblocks_waiting_states(self):
+        """Test _cancel_console_worker cleanly signals cancel and unblocks worker."""
+        from jarvis.console import _cancel_console_worker
+        import queue
+
+        worker = Mock(spec=threading.Thread)
+        worker.is_alive.return_value = True
+        cancel_event = threading.Event()
+        done_event = threading.Event()
+        answer_queue = queue.Queue()
+        waiting_for_answer = [True]
+        agent = Mock()
+        tracker = Mock()
+
+        cancelled = _cancel_console_worker(
+            worker, cancel_event, done_event, answer_queue,
+            waiting_for_answer, agent, tracker
+        )
+
+        self.assertTrue(cancelled)
+        self.assertTrue(cancel_event.is_set())
+        agent.cancel.assert_called_once()
+        self.assertFalse(waiting_for_answer[0])
+        self.assertEqual(answer_queue.get_nowait(), "")
+
 
 if __name__ == "__main__":
     unittest.main()
+

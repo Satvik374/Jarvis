@@ -345,6 +345,15 @@ class MacroManager:
         if not task_clean:
             return None, {}, 0.0
 
+        # Greetings, conversational small talk, and questions should never trigger automated macros
+        chat_words = {
+            "hi", "hello", "hey", "heyy", "yo", "sup", "greetings", "good morning",
+            "good afternoon", "good evening", "how are you", "who are you",
+            "what can you do", "help", "bye", "goodbye", "thanks", "thank you", "ok", "okay",
+        }
+        if task_clean in chat_words:
+            return None, {}, 0.0
+
         macros = self.list_macros()
         if not macros:
             return None, {}, 0.0
@@ -375,9 +384,18 @@ class MacroManager:
                         params = self.extract_parameters(m, task)
                         return m, params, 0.95
                 else:
-                    if desc_lower in task_clean or task_clean in desc_lower:
+                    # Exact description match
+                    if desc_lower == task_clean:
+                        params = self.extract_parameters(m, task)
+                        return m, params, 1.0
+                    # Task contains full macro description (e.g. "jarvis open spotify and play peace")
+                    if len(desc_lower) >= 6 and re.search(rf"\b{re.escape(desc_lower)}\b", task_clean):
                         params = self.extract_parameters(m, task)
                         return m, params, 0.95
+                    # Macro contains full task phrase (only for substantive commands >= 10 chars)
+                    if len(task_clean) >= 10 and re.search(rf"\b{re.escape(task_clean)}\b", desc_lower):
+                        params = self.extract_parameters(m, task)
+                        return m, params, 0.88
 
             # If task without quotes matches macro slug
             m_slug = re.sub(r"[^\w\-]+", "_", m.name.lower()).strip("_")

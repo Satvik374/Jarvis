@@ -13,6 +13,7 @@ import codecs
 from collections import deque
 import hmac
 from http import HTTPStatus
+import itertools
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import mimetypes
@@ -38,7 +39,20 @@ from .config import ROOT
 HOST = "127.0.0.1"
 STATIC_DIR = Path(__file__).resolve().parent / "browser_ui"
 INPUT_PREFIX = "__JARVIS_BROWSER_INPUT64__:"
+TOOL_PREFIX = "__JARVIS_BROWSER_TOOL__:"
+#: How much of a direct action's output is handed back to the caller. Fish caps
+#: a client-tool result around 60 KB once JSON-encoded, and the model reads the
+#: whole thing every turn, so a big result is trimmed with a marker.
+_MAX_TOOL_RESULT = 24000
+
+#: Upstream statuses that mean something specific to the caller rather than
+#: "the gateway failed". Anything else becomes a 502.
+_PASSTHROUGH_STATUS = {401, 402, 403, 404, 409, 429}
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+#: A stderr line that looks like a failure worth showing the user later.
+_ERROR_MARK_RE = re.compile(
+    r"(?i)\b(error|traceback|exception|failed|refused|denied|no such|cannot)\b"
+)
 _MAX_INPUT_BYTES = 256 * 1024
 _MAX_INPUT_BODY = _MAX_INPUT_BYTES * 2 + 16 * 1024
 _MAX_ATTACHMENT_BODY = 20 * 1024 * 1024
@@ -98,6 +112,7 @@ class TerminalBridge:
         initial_task: str | None = None,
         token: str | None = None,
         interface_mode: str = "console",
+        live_voice: bool = False,
     ):
         self.child_args = list(child_args or [])
         self.initial_task = initial_task
@@ -105,11 +120,19 @@ class TerminalBridge:
         self.interface_mode = (
             "remote-agent" if interface_mode == "remote-agent" else "console"
         )
+        self.live_voice = bool(live_voice)
+        self.live_voice_active = bool(live_voice)
         self.launch_cwd = Path.cwd()
         self.broker = EventBroker()
         self.process: subprocess.Popen[bytes] | None = None
         self.stopped = threading.Event()
         self.accepting_input = False
+        #: Enough about the child to explain *why* the link is down. Without
+        #: this the page can only say "OFFLINE", which is the difference
+        #: between a user who knows what to do and one who sees a dead UI.
+        self.started_at: float | None = None
+        self.exit_code: int | None = None
+        self.last_error = ""
         self.input_mode = "command"
         self.input_prompt = ""
         self.state = "booting"
@@ -121,24 +144,72 @@ class TerminalBridge:
         self.speech_band_count = 0
         self.speech_band_fps = 0
         self.speech_started_at = 0.0
+        self.speech_audio = ""
+        self.speech_wav_bytes = b""
         self._initial_sent = False
         self._shutdown_pending = False
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._process_exited = threading.Event()
         self._attachments: list[Path] = []
+        # Direct action execution: the HTTP thread parks on an Event while the
+        # stderr reader resolves it from the child's "tool_result" event.
+        self._tool_lock = threading.Lock()
+        self._tool_waiters: dict[str, threading.Event] = {}
+        self._tool_results: dict[str, dict[str, Any]] = {}
+        self._tool_counter = itertools.count(1)
+
+    def set_live_voice_active(self, active: bool) -> None:
+        """Update live voice mode state to mute/unmute the Communication Agent."""
+        self.live_voice_active = bool(active)
+        try:
+            from .utils import voice
+            voice.set_live_mode_active(bool(active))
+        except Exception:
+            pass
 
     @property
     def alive(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
+    def worker_snapshot(self) -> dict[str, Any]:
+        """What the UI needs to explain a missing or dead terminal runtime.
+
+        The page shows a diagnosis instead of a bare "OFFLINE": an exit code, how
+        long the runtime ran, and the last error line it printed.
+        """
+        process = self.process
+        code = self.exit_code
+        if process is not None:
+            polled = process.poll()
+            if polled is not None:
+                code = polled
+        started = self.started_at
+        return {
+            "alive": self.alive,
+            "pid": getattr(process, "pid", None),
+            "exit_code": code,
+            "started_at": started,
+            "uptime_seconds": round(time.time() - started, 1) if started else None,
+            "last_error": self.last_error,
+            "interface_mode": self.interface_mode,
+            "stopping": self.stopped.is_set(),
+        }
+
     def start(self) -> None:
         if self.process is not None:
             raise RuntimeError("terminal bridge already started")
+        self.started_at = time.time()
+        self.exit_code = None
+        self.last_error = ""
 
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         env.setdefault("PYTHONUTF8", "1")
+        # The shared live flag tracks later browser toggles; a startup-only
+        # environment override would keep the child muted after Live exits.
+        env.pop("JARVIS_LIVE_MODE", None)
+        self.set_live_voice_active(self.live_voice_active)
         existing_pythonpath = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = (
             str(ROOT)
@@ -230,6 +301,10 @@ class TerminalBridge:
                         continue
                     self._handle_structured(payload)
                 elif line:
+                    if _ERROR_MARK_RE.search(line):
+                        # Keep the last failure-looking line: it is the best
+                        # available answer to "why did my runtime die?".
+                        self.last_error = _ANSI_RE.sub("", line).strip()[:300]
                     self.broker.publish("terminal", text=line + "\n")
         except (OSError, ValueError) as exc:
             if self.alive:
@@ -241,15 +316,28 @@ class TerminalBridge:
 
     def _handle_structured(self, payload: dict[str, Any]) -> None:
         event = str(payload.pop("event", "activity"))
-        if event == "state":
+        if event == "tool_result":
+            # Resolves a parked execute_tool() call. Never published as a plain
+            # event: the HTTP response is the consumer.
+            self._resolve_tool_result(payload)
+            return
+        if event in {"state", "input_request"}:
             with self._state_lock:
-                self.state = str(payload.get("state", self.state))
-        elif event == "input_request":
-            with self._state_lock:
-                self.accepting_input = True
-                self.input_mode = str(payload.get("mode", "command"))
-                self.input_prompt = str(payload.get("prompt", ""))
+                if self._process_exited.is_set():
+                    return
+                if event == "state":
+                    self.state = str(payload.get("state", self.state))
+                else:
+                    self.accepting_input = True
+                    self.input_mode = str(payload.get("mode", "command"))
+                    self.input_prompt = str(payload.get("prompt", ""))
+                # Publish before the exit watcher can announce offline.
+                self.broker.publish(event, **payload)
         elif event == "speech":
+            if getattr(self, "live_voice_active", False):
+                # When Live Voice Mode is active, all speech is handled exclusively by gpt-realtime.
+                # The Communication Agent is silenced and must not speak.
+                return
             try:
                 utterance_id = max(0, int(payload.get("utterance_id", 0)))
             except (TypeError, ValueError):
@@ -281,6 +369,14 @@ class TerminalBridge:
             bands = raw_bands if isinstance(raw_bands, str) else ""
             if len(bands) > 262144:
                 bands, band_count, band_fps = "", 0, 0
+            raw_audio = payload.get("audio", "")
+            audio = raw_audio if isinstance(raw_audio, str) else ""
+            wav_bytes = b""
+            if audio.startswith("data:audio/wav;base64,"):
+                try:
+                    wav_bytes = base64.b64decode(audio.split(",", 1)[1])
+                except Exception:
+                    wav_bytes = b""
             with self._state_lock:
                 # The stderr reader can still receive buffered records after
                 # the child exits.  Never let one of those records revive a
@@ -297,6 +393,8 @@ class TerminalBridge:
                     self.speech_band_count = band_count
                     self.speech_band_fps = band_fps
                     self.speech_started_at = time.time()
+                    self.speech_audio = audio
+                    self.speech_wav_bytes = wav_bytes
                     accepted = True
                 elif (
                     not active
@@ -304,13 +402,15 @@ class TerminalBridge:
                     and utterance_id == self.speech_utterance_id
                 ):
                     self.speech_active = False
+                    self.speech_audio = ""
                     accepted = True
                 if accepted:
                     # Keep state mutation and publication ordered relative to
                     # the process-exit stop event.
                     self.broker.publish(event, **payload)
             return
-        self.broker.publish(event, **payload)
+        else:
+            self.broker.publish(event, **payload)
 
         if event == "input_request":
             with self._state_lock:
@@ -332,6 +432,99 @@ class TerminalBridge:
             # Let the first page paint its listening state before the queued
             # positional task begins.
             threading.Timer(0.15, lambda: self.submit(task)).start()
+
+    def execute_tool(
+        self,
+        name: str,
+        args: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Run one action directly in the terminal runtime and return its result.
+
+        Used by the voice agent's direct tools, which skip the perceive/think/act
+        loop entirely. Only ever dispatched while the runtime is idle at a
+        prompt, so a direct call cannot race the agentic loop over the desktop.
+        """
+        from .live import direct_tools
+
+        if not isinstance(name, str) or not name:
+            return {"ok": False, "error": "tool name is required"}
+        if args is not None and not isinstance(args, dict):
+            return {"ok": False, "error": "args must be an object"}
+        if not direct_tools.is_direct(name):
+            return {
+                "ok": False,
+                "error": f"'{name}' is not an available direct tool",
+            }
+        if timeout is None:
+            timeout = float(direct_tools.TOOL_TIMEOUT_SECONDS)
+
+        with self._state_lock:
+            if not self.alive:
+                return {"ok": False, "error": "terminal runtime is not running"}
+            if not self.accepting_input:
+                return {
+                    "ok": False,
+                    "error": (
+                        "Jarvis is busy executing a task; direct actions are "
+                        "only available while it is idle"
+                    ),
+                }
+
+        call_id = f"direct-{next(self._tool_counter)}"
+        waiter = threading.Event()
+        with self._tool_lock:
+            self._tool_waiters[call_id] = waiter
+
+        wire = TOOL_PREFIX + json.dumps(
+            {"call_id": call_id, "tool": name, "args": args or {}}
+        )
+        try:
+            with self._write_lock:
+                if not self.alive or self.process is None or self.process.stdin is None:
+                    raise BrokenPipeError("terminal runtime unavailable")
+                self.process.stdin.write((wire + "\n").encode("ascii"))
+                self.process.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            with self._tool_lock:
+                self._tool_waiters.pop(call_id, None)
+            return {"ok": False, "error": "terminal runtime disconnected"}
+
+        delivered = waiter.wait(max(1.0, float(timeout)))
+        with self._tool_lock:
+            self._tool_waiters.pop(call_id, None)
+            result = self._tool_results.pop(call_id, None)
+        if not delivered or result is None:
+            return {
+                "ok": False,
+                "error": f"{name} did not finish within {float(timeout):.0f}s",
+            }
+        return result
+
+    def _resolve_tool_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Hand a child ``tool_result`` event to the waiting HTTP thread."""
+        call_id = str(payload.get("call_id", ""))
+        text = str(payload.get("result", ""))
+        if len(text) > _MAX_TOOL_RESULT:
+            text = (
+                text[:_MAX_TOOL_RESULT]
+                + f"\n[output truncated at {_MAX_TOOL_RESULT} characters]"
+            )
+        result = {
+            "ok": bool(payload.get("ok")),
+            "result": text,
+            "error": str(payload.get("error", "")),
+        }
+        with self._tool_lock:
+            waiter = self._tool_waiters.get(call_id)
+        if waiter is None:
+            # No waiter: either a late answer to a timed-out call or a request
+            # from an older page. Publish it so it is still visible in the log.
+            self.broker.publish("tool", tool=str(payload.get("tool", "")), **result)
+            return result
+        self._tool_results[call_id] = result
+        waiter.set()
+        return result
 
     def submit(
         self,
@@ -446,6 +639,7 @@ class TerminalBridge:
                 "band_count": self.speech_band_count,
                 "band_fps": self.speech_band_fps,
                 "started_at": self.speech_started_at,
+                "audio": self.speech_audio,
             }
 
     def request_shutdown(self) -> tuple[bool, str]:
@@ -528,10 +722,12 @@ class TerminalBridge:
             except subprocess.TimeoutExpired:
                 process.kill()
         self._cleanup_attachments()
+        self.set_live_voice_active(False)
 
     def _watch_process(self) -> None:
         assert self.process is not None
         code = self.process.wait()
+        self.exit_code = code
         self._process_exited.set()
         with self._state_lock:
             was_speaking = self.speech_active
@@ -647,9 +843,14 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         "/styles.css": ("styles.css", "text/css; charset=utf-8"),
         "/app.js": ("app.js", "text/javascript; charset=utf-8"),
         "/aurora.js": ("aurora.js", "text/javascript; charset=utf-8"),
+        "/blob.js": ("blob.js", "text/javascript; charset=utf-8"),
         "/grainient.js": ("grainient.js", "text/javascript; charset=utf-8"),
         "/hologram.js": ("hologram.js", "text/javascript; charset=utf-8"),
         "/vendor/three.min.js": ("vendor/three.min.js", "text/javascript; charset=utf-8"),
+        "/vendor/fish-agent-client.esm.js": (
+            "vendor/fish-agent-client.esm.js",
+            "text/javascript; charset=utf-8",
+        ),
     }
 
     def log_message(self, _format: str, *args: Any) -> None:
@@ -660,7 +861,11 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             "Content-Security-Policy",
             "default-src 'self'; "
             "script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: blob:; "
-            "connect-src 'self' ws: wss:; font-src 'self' https: data:; object-src 'none'; "
+            "media-src 'self' data: blob:; "
+            # https://api.fish.audio is needed only for Fish Agents public-agent
+            # sessions (no key in the browser); the SDK talks to it directly.
+            "connect-src 'self' ws: wss: https://api.fish.audio; "
+            "font-src 'self' https: data:; object-src 'none'; "
             "base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
         )
         self.send_header("Referrer-Policy", "no-referrer")
@@ -668,7 +873,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header(
             "Permissions-Policy",
-            "camera=(), microphone=(), geolocation=(), payment=()",
+            "camera=(self), microphone=(self), geolocation=(), payment=()",
         )
         self.send_header("Cache-Control", "no-store")
 
@@ -790,6 +995,10 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                 else {"mode": getattr(bridge, "interface_mode", "console"),
                       "pairings": [], "unattended": False}
             )
+            #: Why the runtime died, for a page that would otherwise only know it did.
+            worker = (
+                bridge.worker_snapshot() if hasattr(bridge, "worker_snapshot") else {}
+            )
             self._json(
                 HTTPStatus.OK,
                 {
@@ -801,6 +1010,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                     "input_prompt": bridge.input_prompt,
                     "speech": bridge.speech_snapshot(),
                     "interface": interface,
+                    "worker": worker,
                 },
             )
             return
@@ -809,6 +1019,25 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             if not self._require_api_access():
                 return
             self._stream_events()
+            return
+
+        if path == "/api/live/config":
+            self._handle_live_config()
+            return
+
+        if path == "/api/speech/audio.wav":
+            if not self._require_api_access():
+                return
+            lock = getattr(self.server.bridge, "_state_lock", None)
+            if lock is not None:
+                with lock:
+                    wav_bytes = getattr(self.server.bridge, "speech_wav_bytes", b"")
+            else:
+                wav_bytes = getattr(self.server.bridge, "speech_wav_bytes", b"")
+            if not wav_bytes:
+                self._send_bytes(HTTPStatus.NO_CONTENT, b"", "audio/wav")
+                return
+            self._send_bytes(HTTPStatus.OK, wav_bytes, "audio/wav")
             return
 
         if path == "/api/vision/frame":
@@ -851,6 +1080,42 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                     "active_id": sm.active_session_id,
                 },
             )
+            return
+
+        if path == "/api/skills":
+            if not self._require_api_access():
+                return
+            # The library is a handful of small markdown files, so listing it
+            # whole is cheaper than making the page ask skill-by-skill. The UI
+            # filters locally; the agent's `skill` action does the scoring.
+            try:
+                from .skills import get_skill_manager
+                manager = get_skill_manager()
+                active = manager.active()
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "active": active.slug if active else "",
+                        "skills": [
+                            {
+                                "name": skill.name,
+                                "slug": skill.slug,
+                                "description": skill.description,
+                                "when_to_use": skill.when_to_use,
+                                "tools": list(skill.tools),
+                                "builtin": bool(skill.builtin),
+                                "updated": skill.updated,
+                            }
+                            for skill in manager.list_skills()
+                        ],
+                    },
+                )
+            except Exception as exc:  # a broken skill library must not 500 the page
+                self._json(
+                    HTTPStatus.OK,
+                    {"ok": False, "error": str(exc), "skills": [], "active": ""},
+                )
             return
 
         if path == "/api/sessions/load":
@@ -916,6 +1181,197 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(wire)
         self.wfile.flush()
 
+    def _handle_live_config(self) -> None:
+        if not self._require_api_access():
+            return
+        from .config import load_config
+        from .live import direct_tools
+        from .live.prompts import build_live_voice_system_prompt, get_live_voice_tools
+        cfg = load_config()
+        ws_url = (
+            getattr(cfg.live_voice, "ws_url", "")
+            or os.environ.get("JARVIS_LIVE_WS_URL")
+            or os.environ.get("JARVIS_REALTIME_URL")
+            # Deliberately no built-in fallback URL. A placeholder that no one
+            # is listening on is worse than an empty string: the page opened a
+            # socket to it, retried forever, and looked like a live session.
+            or ""
+        )
+        model_name = getattr(cfg.live_voice, "model", "") or "gpt-realtime"
+        voice_name = getattr(cfg.live_voice, "voice_name", "") or "en-US-Ava:DragonHDLatestNeural"
+        fish_agent_id = str(
+            getattr(cfg.live_voice, "fish_agent_id", "")
+            or os.environ.get("JARVIS_FISH_AGENT_ID")
+            or os.environ.get("FISH_AGENT_ID")
+            or ""
+        ).strip()
+        self._json(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "model": model_name,
+                "ws_url": ws_url,
+                "voice": voice_name,
+                "sample_rate": 24000,
+                "system_prompt": build_live_voice_system_prompt(),
+                "tools": get_live_voice_tools(),
+                "fish_agent_id": fish_agent_id,
+                # The voice agent's direct tools: names only. The page registers
+                # a handler for each that posts to /api/tool/execute.
+                "direct_tools": [tool["name"] for tool in direct_tools.declarations()],
+            },
+        )
+
+    def _handle_interrupt(self) -> None:
+        """Stop the active directive, or say there was nothing to stop.
+
+        Asking an idle Jarvis to stop is a no-op, not a conflict: answering 409
+        put a red error in the browser console every time the user pressed
+        INTERRUPT while nothing was running.
+        """
+        bridge = self.server.bridge
+        idle = bool(getattr(bridge, "accepting_input", False))
+        ok, message = bridge.request_interrupt()
+        if not ok and idle:
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "interrupted": False,
+                    "message": "nothing to interrupt",
+                    "error": None,
+                },
+            )
+            return
+        self._json(
+            HTTPStatus.OK if ok else HTTPStatus.CONFLICT,
+            {
+                "ok": ok,
+                "interrupted": ok,
+                "message": message,
+                "error": None if ok else message,
+            },
+        )
+
+    def _handle_tool_execute(self, payload: dict[str, Any]) -> None:
+        """Run one Jarvis action directly, for the voice agent's tools.
+
+        The main agent reaches actions through the perceive/think/act loop. The
+        voice agent has no use for that loop on deterministic requests, so it
+        names the action itself and gets the answer in one hop. Always answers
+        200 with an ``ok`` flag, because a failed action is still a valid result
+        the voice agent has to report out loud.
+        """
+        if not self._require_api_access():
+            return
+        from .live import direct_tools
+
+        name = str(payload.get("tool") or payload.get("name") or "").strip()
+        args = payload.get("args")
+        if not name:
+            self._json(
+                HTTPStatus.BAD_REQUEST, {"ok": False, "error": "tool is required"}
+            )
+            return
+        if args is not None and not isinstance(args, dict):
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "error": "args must be an object"},
+            )
+            return
+        if not direct_tools.is_direct(name):
+            self._json(
+                HTTPStatus.FORBIDDEN,
+                {
+                    "ok": False,
+                    "error": (
+                        f"'{name}' is not an available direct tool; use "
+                        f"execute_task to delegate it"
+                    ),
+                },
+            )
+            return
+
+        result = self.server.bridge.execute_tool(
+            name,
+            args,
+            timeout=float(direct_tools.TOOL_TIMEOUT_SECONDS),
+        )
+        self._json(
+            HTTPStatus.OK,
+            {
+                "ok": bool(result.get("ok")),
+                "tool": name,
+                "result": str(result.get("result", "")),
+                "error": str(result.get("error", "")),
+            },
+        )
+
+    def _handle_voice_session(self, payload: dict[str, Any]) -> None:
+        """Mint a Fish Agents session token for the browser voice session.
+
+        Keeps the Fish Audio API key server-side: the browser receives the
+        session response unchanged and passes it to `@fishaudio/agent-client`
+        as ``sessionToken``.
+        """
+        if not self._require_api_access():
+            return
+        from .config import load_config
+        from .live import fish_agents
+
+        cfg = load_config()
+        agent_id = str(
+            payload.get("agent_id")
+            or getattr(cfg.live_voice, "fish_agent_id", "")
+            or os.environ.get("JARVIS_FISH_AGENT_ID")
+            or os.environ.get("FISH_AGENT_ID")
+            or ""
+        ).strip()
+        if not agent_id:
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "ok": False,
+                    "error": (
+                        "no Fish agent configured: set live_voice.fish_agent_id "
+                        "or JARVIS_FISH_AGENT_ID"
+                    ),
+                },
+            )
+            return
+        try:
+            api_key = fish_agents.resolve_api_key(cfg.voice)
+            session = fish_agents.create_session(
+                api_key,
+                agent_id,
+                base_url=getattr(cfg.live_voice, "fish_api_base", "") or None,
+            )
+        except fish_agents.FishAPIError as exc:
+            # Pass the upstream status through instead of flattening everything
+            # into a 502: "out of credit" and "service is unreachable" need
+            # different words, and the page acts on the difference.
+            self._json(
+                HTTPStatus(exc.status) if exc.status in _PASSTHROUGH_STATUS
+                else HTTPStatus.BAD_GATEWAY,
+                {
+                    "ok": False,
+                    "code": exc.code,
+                    "error": str(exc),
+                    "hint": exc.hint,
+                },
+            )
+            return
+        except Exception as exc:
+            self._json(
+                HTTPStatus.BAD_GATEWAY,
+                {"ok": False, "code": "upstream", "error": str(exc)},
+            )
+            return
+        self._json(
+            HTTPStatus.OK,
+            {"ok": True, "agent_id": agent_id, "session": session},
+        )
+
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
@@ -926,6 +1382,11 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             "/api/shutdown",
             "/api/sessions/new",
             "/api/sessions/delete",
+            "/api/live/state",
+            "/api/live/execute",
+            "/api/live/config",
+            "/api/voice/session",
+            "/api/tool/execute",
         }:
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
             return
@@ -1026,12 +1487,50 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        if path == "/api/interrupt":
-            ok, message = self.server.bridge.request_interrupt()
+        if path == "/api/live/config":
+            self._handle_live_config()
+            return
+
+        if path == "/api/live/state":
+            if not self._require_api_access():
+                return
+            active = bool(payload.get("active", False))
+            self.server.bridge.set_live_voice_active(active)
+            self._json(HTTPStatus.OK, {"ok": True, "active": active})
+            return
+
+        if path == "/api/live/execute":
+            if not self._require_api_access():
+                return
+            task = str(payload.get("task", "")).strip()
+            if not task:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "task is required"})
+                return
+            ok, message = self.server.bridge.submit(
+                task,
+                display_text=f"🎙️ [Voice Directive]: {task}",
+            )
             self._json(
                 HTTPStatus.OK if ok else HTTPStatus.CONFLICT,
-                {"ok": ok, "message": message, "error": None if ok else message},
+                {
+                    "ok": ok,
+                    "task": task,
+                    "message": message,
+                    "state": self.server.bridge.state,
+                },
             )
+            return
+
+        if path == "/api/tool/execute":
+            self._handle_tool_execute(payload)
+            return
+
+        if path == "/api/voice/session":
+            self._handle_voice_session(payload)
+            return
+
+        if path == "/api/interrupt":
+            self._handle_interrupt()
             return
 
         ok, message = self.server.bridge.request_shutdown()
@@ -1041,10 +1540,28 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         )
 
 
+def _port_serves_our_token(host: str, port: int, token: str, timeout: float = 2.5) -> bool:
+    """True only when this loopback port answers with *our* session token.
+
+    Used once at startup to refuse a port another Jarvis instance already owns.
+    A 401 means someone else is answering.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = f"http://{host}:{port}/api/state?token={quote(token)}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return 200 <= response.status < 300
+    except Exception:
+        return False
+
+
 def run_browser(
     child_args: list[str] | None = None,
     initial_task: str | None = None,
     remote_agent: bool = False,
+    live_voice: bool = False,
 ) -> int:
     """Start the loopback UI and its console or remote-agent worker."""
     if not all((STATIC_DIR / name).is_file()
@@ -1058,6 +1575,7 @@ def run_browser(
         initial_task=initial_task,
         token=token,
         interface_mode="remote-agent" if remote_agent else "console",
+        live_voice=live_voice,
     )
     try:
         configured_port = int(os.getenv("JARVIS_BROWSER_PORT", "0") or 0)
@@ -1078,6 +1596,26 @@ def run_browser(
     )
     server_thread.start()
 
+    port = int(server.server_address[1])
+    if not _port_serves_our_token(HOST, port, token):
+        # Windows lets a second process bind a port that is already in use
+        # (allow_reuse_address), so a successful bind does NOT mean the page
+        # will reach this server: an older Jarvis instance keeps answering with
+        # its own token, and the page sits at "RELINKING" forever with no clue
+        # why. Ask the port to authorise our own token before spawning a runtime
+        # that nothing could talk to.
+        server.shutdown()
+        server.server_close()
+        print(
+            f"  Port {port} is already served by another Jarvis instance.\n"
+            f"  That instance would answer this page with its own token, so this\n"
+            f"  one has stopped instead of fighting it over the port.\n"
+            f"  Close the other Jarvis, or start this one with a different\n"
+            f"  JARVIS_BROWSER_PORT.",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         bridge.start()
     except Exception as exc:
@@ -1086,9 +1624,9 @@ def run_browser(
         print(f"Could not start Jarvis terminal runtime: {exc}", file=sys.stderr)
         return 1
 
-    port = int(server.server_address[1])
     base_url = f"http://{HOST}:{port}/"
-    browser_url = f"{base_url}#token={quote(token)}"
+    frag = f"#live=true&token={quote(token)}" if live_voice else f"#token={quote(token)}"
+    browser_url = f"{base_url}{frag}"
     print()
     label = "remote agent dashboard" if remote_agent else "browser interface"
     print(f"  JARVIS {label} online")

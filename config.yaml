@@ -3,12 +3,14 @@
 
 brain:
   backend: gemini
-  model: gemini-3.7-flash
+  model: gemini-2.5-flash
+  location: global
   adapter_path: ""
   base_url: ""
+  api_key: ""
   temperature: 0.2
   # Keep the output budget reasonable; backends can override this when needed.
-  max_tokens: 4096
+  max_tokens: 16384
   use_vision: true
   request_timeout: 120
   conversational: true
@@ -20,31 +22,54 @@ perception:
   save_screenshots: true
 
 voice:
-  engine: gemini
+  # fish | kokoro (local offline) | sapi | edge | gemini | azure | foundry
+  engine: fish
+  azure_speech_endpoint: ""
+  azure_speech_voice: "en-GB-RyanNeural"
+  azure_speech_key: ""
+  tts_endpoint: ""
+  tts_model: ""
+  tts_voice: "en-GB-RyanNeural"
   local_voice: bm_george
   local_speed: 1.0
   model: gemini-3.1-flash-tts-preview
-  voice: Kore
+  voice: en-GB-RyanNeural
   language_code: en-US
   transcription_model: gemini-2.5-flash-lite
   silence_after: 0.6
+  # Fish Audio TTS (https://fish.audio)
+  # Keep the API key in .env, FISH_AUDIO_API_KEY, or the Credential Vault -
+  # never in this shared project file.
+  fish_audio_key: ""
+  fish_audio_voice_id: ""             # Optional reference voice ID (leave empty for default)
+  fish_audio_model: "s2.1-pro-free"
+  fish_audio_latency: "normal"        # normal | balanced
 
 # Voice is opt-in. Use --voice, JARVIS_VOICE=1, or :voice on.
 
 # Real-Time Gemini Flash Live Voice Model (full-duplex bidirectional streaming
 # via Gemini API key / Google Generative Language Live WebSocket).
-# The live voice model converses with the user, prompts the text-based Jarvis AI
-# to do work, and monitors mid-task progress to narrate what has been done and
-# what will be done next.
 live_voice:
   enabled: false
-  model: models/gemini-2.5-flash-native-audio-latest   # models/gemini-2.5-flash-native-audio-latest
+  model: gemini-2.0-flash-exp
+  ws_url: ""                             # Optional OpenAI-compatible /v1/realtime relay
   voice_name: Aoede                      # Aoede, Puck, Charon, Kore, Fenrir
   location: us-central1
-  backend: api_key                       # api_key | gcloud
+  backend: gcloud                        # api_key | gcloud
   # Read from JARVIS_LIVE_API_KEY, GEMINI_API_KEY, or Windows Credential Vault.
   # Keep credentials out of this shared project file.
   api_key: ""
+  # Fish Audio Agents voice agent (https://fish.audio/app/agents). When set,
+  # live voice mode runs this hosted agent and its client tools drive the local
+  # main worker agent. Auth uses FISH_AUDIO_API_KEY. Set JARVIS_FISH_AGENT_ID to
+  # override without editing this file.
+  fish_agent_id: "2548d6d42e55487c95d13d432d195d97"
+  # The hosted agent's own LLM. It runs the conversation and decides when to
+  # call a tool, so this decides whether "open Spotify" actually happens or is
+  # merely narrated. Blank = leave the agent's own setting alone. Other options:
+  # google/gemini-3.6-flash, google/gemini-2.5-flash,
+  # anthropic/claude-haiku-4.5, openai/gpt-4.1.
+  fish_llm_model: google/gemini-3.5-flash-lite
   narrate_steps: true                    # proactive mid-task voice narration
   narration_verbosity: normal            # brief | normal | detailed
 

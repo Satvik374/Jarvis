@@ -28,11 +28,11 @@ class BrainConfig:
     #   hf     - load a HuggingFace model + your trained LoRA adapter directly,
     #            no server needed. Best way to run your fine-tune immediately.
     backend: str = "gemini"
-    # Model name/tag. For gemini this is e.g. "gemini-3.7-flash".
+    # Model name/tag. For gemini this is e.g. "gemini-3.8-flash".
     # For ollama this is the pulled model, e.g. "ornith:9b".
     # For hf this is the base model id, e.g. "Qwen/Qwen2.5-0.5B-Instruct".
     # Once you fine-tune, point this at "jarvis" (see training/export_ollama.py).
-    model: str = "gemini-3.7-flash"
+    model: str = "gemini-3.8-flash"
     # Google Cloud Vertex AI region/location (used by "gemini" backend).
     location: str = "global"
     # Path to a trained LoRA adapter (used by the "hf" backend). Empty = base only.
@@ -50,6 +50,11 @@ class BrainConfig:
     # questions) directly, with no tools/perception. Set false to force every
     # input through the computer-control loop.
     conversational: bool = True
+    # Microsoft Azure AI Foundry Agent settings (GPT-6 Astra)
+    foundry_endpoint: str = "https://satviksingh-resource.services.ai.azure.com/api/projects/satviksingh"
+    foundry_agent_name: str = "gpt-6"
+    foundry_agent_version: str = "1"
+    azure_tenant_id: str = ""
 
 
 @dataclass
@@ -107,10 +112,22 @@ class DataConfig:
 
 @dataclass
 class VoiceConfig:
-    # TTS engine: "gemini" = Gemini TTS on Vertex AI (cloud, default);
-    # "kokoro" = local Kokoro-82M ONNX in models/tts/ (offline, falls back
-    # to Gemini if its model files are missing).
-    engine: str = "gemini"
+    # TTS engine: "kokoro" = local Kokoro-82M ONNX in models/tts/ (offline default);
+    # "sapi" = Windows native SAPI5 (offline fallback);
+    # "edge" = Microsoft Edge Neural TTS (online free);
+    # "gemini" = Gemini TTS on Vertex AI (cloud);
+    # "azure" = Microsoft Azure Cognitive Services Speech SDK;
+    # "fish" = Fish Audio API (https://fish.audio);
+    # "foundry" = OpenAI-compatible /v1/audio/speech relay.
+    engine: str = "kokoro"
+    # Azure Cognitive Services Speech SDK configuration
+    azure_speech_endpoint: str = "https://satviksingh-resource.cognitiveservices.azure.com/"
+    azure_speech_key: str = ""
+    azure_speech_voice: str = "en-US-OnyxTurboMultilingualNeural"
+    # OpenAI / Foundry Relay TTS configuration
+    tts_endpoint: str = "http://localhost:8000/v1/audio/speech"
+    tts_model: str = "tts-1"
+    tts_voice: str = "en-US-OnyxTurboMultilingualNeural"
     # Kokoro voice id: bm_george/bm_lewis = British male (movie-JARVIS feel),
     # af_heart = highest-quality American female. Speed 1.0 = natural pace.
     local_voice: str = "bm_george"
@@ -128,6 +145,11 @@ class VoiceConfig:
     full_duplex: bool = True
     # Barge-in sensitivity: 0.1 (strict, needs louder voice) to 1.0 (sensitive).
     barge_in_sensitivity: float = 0.5
+    # Fish Audio TTS settings (https://fish.audio)
+    fish_audio_key: str = ""
+    fish_audio_voice_id: str = ""  # custom reference_id/voice model ID
+    fish_audio_model: str = "s2.1-pro"
+    fish_audio_latency: str = "normal"  # "normal" | "balanced"
     # Frames (~0.1s each) of sustained speech required to trigger barge-in cutoff.
     barge_in_hold: int = 2
 
@@ -142,6 +164,18 @@ class LiveVoiceConfig:
     location: str = "us-central1"
     backend: str = "api_key"  # api_key | gcloud
     api_key: str = ""
+    ws_url: str = ""  # e.g. ws://localhost:8000/v1/realtime?api_key=SATVIKNOOB
+    # Fish Audio Agents (hosted realtime voice agent, https://fish.audio/app/agents).
+    # When set, the browser voice mode can open a Fish session and let the hosted
+    # agent drive the local main worker agent through client tools. Auth uses the
+    # Fish Audio API key (FISH_AUDIO_API_KEY / credential vault).
+    fish_agent_id: str = ""
+    fish_api_base: str = ""
+    # Hosted agent's own LLM. It runs the conversation AND decides when to call
+    # a tool, so it is the single biggest lever on whether "open Spotify"
+    # actually happens. Applied by `python -m jarvis.live.fish_agents`; blank
+    # leaves the agent's own setting alone.
+    fish_llm_model: str = "google/gemini-3.5-flash-lite"
     # Proactive mid-task in-progress narration: voice model monitors what the
     # text-based model is doing and informs the user what has been done and what
     # will be done next in mid task.
@@ -321,10 +355,50 @@ def load_config(path: Path | str | None = None) -> Config:
         cfg.brain.backend = v
     if v := env.get("JARVIS_MODEL") or env.get("MODEL_ID") or env.get("MODEL"):
         cfg.brain.model = v
+    elif cfg.brain.backend in {"foundry", "azure", "azure-foundry", "azure_foundry", "foundry-agent"}:
+        cfg.brain.model = "gpt-6"
+    if v := env.get("JARVIS_FOUNDRY_ENDPOINT") or env.get("AZURE_FOUNDRY_ENDPOINT") or env.get("AZURE_AI_ENDPOINT"):
+        cfg.brain.foundry_endpoint = v
+    if v := env.get("JARVIS_AGENT_NAME") or env.get("AZURE_AGENT_NAME"):
+        cfg.brain.foundry_agent_name = v
+    if v := env.get("JARVIS_AGENT_VERSION") or env.get("AZURE_AGENT_VERSION"):
+        cfg.brain.foundry_agent_version = v
+    if v := env.get("AZURE_TENANT_ID"):
+        cfg.brain.azure_tenant_id = v
+    if v := env.get("AZURE_API_KEY") or env.get("AZURE_AI_KEY"):
+        if not cfg.brain.api_key:
+            cfg.brain.api_key = v
     if v := env.get("JARVIS_BASE_URL") or env.get("BASE_URL"):
         cfg.brain.base_url = v
     if v := env.get("JARVIS_LOCATION") or env.get("LOCATION"):
         cfg.brain.location = v
+    if v := env.get("JARVIS_TTS_ENGINE"):
+        cfg.voice.engine = "kokoro" if v.lower() == "local" else v
+    if getattr(cfg.voice, "engine", "").lower() == "local":
+        cfg.voice.engine = "kokoro"
+    if v := env.get("JARVIS_TTS_ENDPOINT") or env.get("TTS_ENDPOINT"):
+        cfg.voice.tts_endpoint = v
+    if v := env.get("JARVIS_AZURE_SPEECH_ENDPOINT") or env.get("AZURE_SPEECH_ENDPOINT"):
+        cfg.voice.azure_speech_endpoint = v
+        if not env.get("JARVIS_TTS_ENDPOINT") and not env.get("TTS_ENDPOINT"):
+            cfg.voice.tts_endpoint = v
+    if v := env.get("JARVIS_AZURE_SPEECH_KEY") or env.get("AZURE_SPEECH_KEY") or env.get("SPEECH_KEY"):
+        cfg.voice.azure_speech_key = v
+    if v := env.get("JARVIS_AZURE_SPEECH_VOICE") or env.get("AZURE_SPEECH_VOICE") or env.get("SPEECH_VOICE"):
+        cfg.voice.azure_speech_voice = v
+    if v := env.get("JARVIS_TTS_MODEL") or env.get("TTS_MODEL"):
+        cfg.voice.tts_model = v
+        cfg.voice.model = v
+    if v := env.get("JARVIS_TTS_VOICE") or env.get("TTS_VOICE"):
+        cfg.voice.tts_voice = v
+        cfg.voice.voice = v
+    if v := env.get("JARVIS_LOCAL_VOICE"):
+        cfg.voice.local_voice = v
+    if v := env.get("JARVIS_LOCAL_SPEED"):
+        try:
+            cfg.voice.local_speed = float(v)
+        except ValueError:
+            pass
     if v := env.get("JARVIS_TTS_MODEL"):
         cfg.voice.model = v
     if v := env.get("JARVIS_TTS_VOICE"):
@@ -340,6 +414,20 @@ def load_config(path: Path | str | None = None) -> Config:
             cfg.voice.barge_in_sensitivity = float(v)
         except ValueError:
             pass
+    if v := env.get("JARVIS_FISH_AUDIO_API_KEY") or env.get("FISH_AUDIO_API_KEY") or env.get("FISH_API_KEY"):
+        cfg.voice.fish_audio_key = v
+    if v := env.get("JARVIS_FISH_AUDIO_VOICE_ID") or env.get("FISH_AUDIO_VOICE_ID") or env.get("FISH_AUDIO_REFERENCE_ID"):
+        cfg.voice.fish_audio_voice_id = v
+    if v := env.get("JARVIS_FISH_AUDIO_MODEL") or env.get("FISH_AUDIO_MODEL"):
+        cfg.voice.fish_audio_model = v
+    if v := env.get("JARVIS_FISH_AUDIO_LATENCY") or env.get("FISH_AUDIO_LATENCY"):
+        cfg.voice.fish_audio_latency = v
+    if v := env.get("JARVIS_LIVE_WS_URL") or env.get("JARVIS_REALTIME_URL") or env.get("REALTIME_URL") or env.get("LIVE_WS_URL"):
+        cfg.live_voice.ws_url = v
+    if v := env.get("JARVIS_FISH_AGENT_ID") or env.get("FISH_AGENT_ID"):
+        cfg.live_voice.fish_agent_id = v
+    if v := env.get("JARVIS_FISH_API_BASE") or env.get("FISH_AUDIO_API_BASE"):
+        cfg.live_voice.fish_api_base = v
     if v := env.get("JARVIS_LIVE_MODEL"):
         cfg.live_voice.model = v
     if v := env.get("JARVIS_LIVE_VOICE"):
@@ -350,34 +438,79 @@ def load_config(path: Path | str | None = None) -> Config:
         cfg.live_voice.narrate_steps = v.lower() in {"1", "true", "yes"}
     if v := env.get("JARVIS_LIVE_VERBOSITY"):
         cfg.live_voice.narration_verbosity = v
-    if v := env.get("JARVIS_LIVE_API_KEY") or env.get("GEMINI_LIVE_API_KEY"):
+    if v := env.get("JARVIS_LIVE_BACKEND"):
+        cfg.live_voice.backend = v
+    if v := env.get("JARVIS_LIVE_API_KEY") or env.get("GEMINI_LIVE_API_KEY") or env.get("GEMINI_API_KEY"):
         cfg.live_voice.api_key = v
         cfg.live_voice.backend = "api_key"
     if v := env.get("JARVIS_REMOTE_URL"):
         cfg.remote.relay_url = v
     if v := env.get("JARVIS_REMOTE_STATE_DIR"):
         cfg.remote.state_dir = v
-    if v := env.get("JARVIS_API_KEY") or env.get("API_KEY") or env.get("OPENAI_API_KEY"):
+    if v := env.get("JARVIS_API_KEY") or env.get("API_KEY") or env.get("FOUNDRY_API_KEY") or env.get("OPENROUTER_API_KEY") or env.get("OPENAI_API_KEY") or env.get("GEMINI_API_KEY"):
         cfg.brain.api_key = v
-        os.environ["OPENAI_API_KEY"] = v
+        if env.get("OPENROUTER_API_KEY"):
+            os.environ["OPENROUTER_API_KEY"] = env.get("OPENROUTER_API_KEY")
+        if env.get("OPENAI_API_KEY"):
+            os.environ["OPENAI_API_KEY"] = env.get("OPENAI_API_KEY")
+        if env.get("GEMINI_API_KEY"):
+            os.environ["GEMINI_API_KEY"] = env.get("GEMINI_API_KEY")
+        elif v.startswith("AIzaSy"):
+            os.environ["GEMINI_API_KEY"] = v
+        elif v.startswith("sk-or-"):
+            os.environ["OPENROUTER_API_KEY"] = v
+            os.environ["OPENAI_API_KEY"] = v
+        else:
+            os.environ.setdefault("OPENAI_API_KEY", v)
     else:
         try:
             from .security import get_secret
-            if vault_key := (get_secret("JARVIS_API_KEY") or get_secret("OPENAI_API_KEY") or get_secret("ANTHROPIC_API_KEY")):
+            if vault_key := (get_secret("OPENROUTER_API_KEY") or get_secret("JARVIS_API_KEY") or get_secret("GEMINI_API_KEY") or get_secret("OPENAI_API_KEY") or get_secret("ANTHROPIC_API_KEY")):
                 cfg.brain.api_key = vault_key
-                os.environ["OPENAI_API_KEY"] = vault_key
+                if vault_key.startswith("sk-or-") or get_secret("OPENROUTER_API_KEY"):
+                    os.environ["OPENROUTER_API_KEY"] = get_secret("OPENROUTER_API_KEY") or vault_key
+                    os.environ["OPENAI_API_KEY"] = get_secret("OPENROUTER_API_KEY") or vault_key
+                elif vault_key.startswith("AIzaSy") or get_secret("GEMINI_API_KEY"):
+                    os.environ["GEMINI_API_KEY"] = get_secret("GEMINI_API_KEY") or vault_key
+                else:
+                    os.environ["OPENAI_API_KEY"] = vault_key
         except Exception:
             pass
 
-    # Automatic fallback to openai backend if custom URL or API key is set
+    if cfg.live_voice.backend != "gcloud" and not cfg.live_voice.api_key:
+        try:
+            from .security import get_secret
+            if live_key := (get_secret("JARVIS_LIVE_API_KEY") or get_secret("GEMINI_API_KEY") or get_secret("GOOGLE_API_KEY")):
+                cfg.live_voice.api_key = live_key
+                cfg.live_voice.backend = "api_key"
+        except Exception:
+            pass
+
+    # OpenRouter defaults
+    if cfg.brain.backend.lower() == "openrouter":
+        if not cfg.brain.base_url:
+            cfg.brain.base_url = "https://openrouter.ai/api/v1"
+        cfg.brain.api_key_env = "OPENROUTER_API_KEY"
+
+    # Automatic fallback to openai/openrouter backend if custom URL or API key is set
     # but backend is still the default ollama
     if cfg.brain.backend == "ollama":
         has_custom_key = bool(cfg.brain.api_key)
         has_custom_url = cfg.brain.base_url and "11434" not in cfg.brain.base_url
         if has_custom_key or has_custom_url:
-            cfg.brain.backend = "openai"
+            if env.get("OPENROUTER_API_KEY") or (cfg.brain.api_key and cfg.brain.api_key.startswith("sk-or-")):
+                cfg.brain.backend = "openrouter"
+                if not cfg.brain.base_url:
+                    cfg.brain.base_url = "https://openrouter.ai/api/v1"
+                cfg.brain.api_key_env = "OPENROUTER_API_KEY"
+            elif env.get("GEMINI_API_KEY") or (cfg.brain.api_key and cfg.brain.api_key.startswith("AIzaSy")):
+                cfg.brain.backend = "gemini"
+            else:
+                cfg.brain.backend = "openai"
 
-    if env.get("JARVIS_VISION") in {"1", "true", "True"}:
+    if env.get("JARVIS_VISION") in {"0", "false", "False"}:
+        cfg.brain.use_vision = False
+    elif env.get("JARVIS_VISION") in {"1", "true", "True"}:
         cfg.brain.use_vision = True
     if env.get("JARVIS_VOICE") in {"1", "true", "True"}:
         cfg.voice_enabled = True

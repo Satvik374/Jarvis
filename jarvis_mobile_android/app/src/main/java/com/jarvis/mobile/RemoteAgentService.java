@@ -69,6 +69,7 @@ public final class RemoteAgentService extends Service {
                         String taskId = message.optString("id");
                         String task = message.optString("task").trim();
                         if (taskId.isBlank() || task.isBlank()) continue;
+                        if (store.alreadyProcessed(pairing.pairId, taskId)) continue;
                         relay.send(pairing, withDeviceInfo(new JSONObject()
                                 .put("type", "task_started").put("task_id", taskId)));
                         MobileCommandExecutor.Result result = commands.execute(task);

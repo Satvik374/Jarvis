@@ -17,6 +17,14 @@
   --display: "Orbitron", "Outfit", "Segoe UI Variable Display", sans-serif;
   --body: "Outfit", "Segoe UI Variable Text", "Segoe UI", sans-serif;
   --panel-radius: 8px;
+  /*
+   * Height of the header row, and the single source of truth for every drawer
+   * that has to sit below it. The media queries below lower or raise it per
+   * breakpoint; app.js republishes the measured height, which matters because
+   * the header can wrap to a second action row on a narrow window and font
+   * metrics are not something a fixed px value can be trusted with.
+   */
+  --header-h: 72px;
 }
 
 /* ── Per-state accent tokens — kept in sync with grainient.js PALETTES.c1 ── */
@@ -200,7 +208,14 @@ label[for]:has(+ input:focus-visible),
 .app-shell {
   position: relative;
   display: grid;
-  grid-template-rows: 72px minmax(0, 1fr) 27px;
+  /* `minmax(0, 1fr)` rather than the implicit `auto` track: a header or stage
+     whose min-content is wider than the viewport must be clipped *inside* its
+     track, never allowed to widen the track and push the rest of the shell
+     past the page edge (body has overflow: hidden, so it is unreachable). */
+  grid-template-columns: minmax(0, 1fr);
+  /* `minmax(min, auto)`: never shorter than --header-h, free to grow when the
+     action row wraps instead of spilling over the stage below it. */
+  grid-template-rows: minmax(var(--header-h), auto) minmax(0, 1fr) 27px;
   width: 100%;
   height: 100%;
   padding: 0 24px;
@@ -396,6 +411,55 @@ label[for]:has(+ input:focus-visible),
   background: var(--accent);
   box-shadow: 0 0 9px rgba(var(--accent-rgb), 0.82);
   animation: connection-pulse 2.2s ease-in-out infinite;
+}
+
+/*
+ * A link that is down for a reason should not look like one that is merely
+ * catching up: the pulsing dot reads as "activity", which is the wrong story
+ * when the cause is a rejected token or a crashed runtime.
+ */
+.connection-pill[data-detail="true"] {
+  color: var(--danger);
+  border-color: rgba(255, 78, 69, 0.45);
+  background: rgba(255, 78, 69, 0.07);
+  cursor: help;
+}
+
+.connection-pill[data-detail="true"] .connection-dot {
+  background: var(--danger);
+  box-shadow: 0 0 9px rgba(255, 78, 69, 0.75);
+  animation: none;
+}
+
+/*
+ * Shown only when the link failed for a reason retrying cannot fix. It is the
+ * one control that turns "RELINKING forever" into something the user can act on.
+ */
+.reconnect-button {
+  height: 32px;
+  padding: 0 11px;
+  cursor: pointer;
+  color: var(--danger);
+  border: 1px solid rgba(255, 78, 69, 0.45);
+  border-radius: 2px;
+  background: rgba(255, 78, 69, 0.07);
+  font: 600 8px/1 var(--mono);
+  letter-spacing: 0.17em;
+  transition: background 180ms ease, border-color 180ms ease;
+}
+
+.reconnect-button:hover {
+  border-color: var(--danger);
+  background: rgba(255, 78, 69, 0.16);
+}
+
+.reconnect-button:focus-visible {
+  outline: 1px solid var(--danger);
+  outline-offset: 2px;
+}
+
+.reconnect-button[hidden] {
+  display: none;
 }
 
 html[data-connected="false"] .connection-dot {
@@ -869,7 +933,10 @@ html[data-state="verifying"] .radar-sweep {
 
 .hologram-modes {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 5px;
+  max-width: 100%;
   background: rgba(3, 10, 20, 0.78);
   border: 1px solid rgba(var(--accent-rgb), 0.3);
   border-radius: 24px;
@@ -944,15 +1011,50 @@ html[data-state="verifying"] .radar-sweep {
   .hologram-toolbar {
     top: 8px;
     right: 8px;
-    scale: 0.88;
+    left: 8px;
+    scale: 0.9;
     transform-origin: top right;
+  }
+
+  .hologram-modes {
+    gap: 3px;
+    padding: 3px 4px;
+    border-radius: 20px;
+  }
+
+  .holo-btn {
+    padding: 5px 8px;
+    font-size: 8px;
+    border-radius: 14px;
+  }
+
+  .holo-action-btn {
+    padding: 4px 8px;
   }
 }
 
+@media (max-width: 420px) {
+  .hologram-modes {
+    border-radius: 16px;
+  }
+
+  .holo-btn {
+    padding: 4px 6px;
+    font-size: 7.5px;
+    letter-spacing: 0.06em;
+  }
+}
+
+/*
+ * Liquid energy core. Sits above the base canvas but below the HUD labels,
+ * which are later siblings in the same stacking level (`z-index: 0` keeps it
+ * level with them so DOM order wins). The canvas itself is injected by blob.js.
+ */
 #fluidBlob {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: 0;
+  overflow: hidden;
   pointer-events: none;
 }
 
@@ -960,6 +1062,11 @@ html[data-state="verifying"] .radar-sweep {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+/* While the blob owns the stage, the WebGL hologram canvas is not composited. */
+.core-frame[data-core-mode="blob"] #coreCanvas {
+  display: none;
 }
 
 .core-center-label {
@@ -975,6 +1082,14 @@ html[data-state="verifying"] .radar-sweep {
   border: 1px solid rgba(var(--accent-rgb), 0.46);
   border-radius: 50%;
   opacity: 0.72;
+  /* Faint lens: the centre readout sits over the luminous blob, so it needs a
+     light dimming to stay legible without punching a black hole in the liquid. */
+  background: radial-gradient(
+    circle at 50% 50%,
+    rgba(1, 7, 18, 0.26),
+    rgba(1, 7, 18, 0.11) 62%,
+    transparent 80%
+  );
   box-shadow:
     inset 0 0 24px rgba(var(--accent-rgb), 0.25),
     0 0 28px rgba(var(--accent-rgb), 0.22);
@@ -995,7 +1110,7 @@ html[data-state="verifying"] .radar-sweep {
 
 .core-center-label::after {
   inset: 12px;
-  background: rgba(2, 11, 28, 0.18);
+  background: rgba(2, 11, 28, 0.16);
   box-shadow: inset 0 0 13px rgba(var(--accent-rgb), 0.24);
 }
 
@@ -1004,7 +1119,10 @@ html[data-state="verifying"] .radar-sweep {
   z-index: 2;
   color: var(--accent-bright);
   font: 700 14px/1 var(--display);
-  text-shadow: 0 0 10px rgba(var(--accent-rgb), 0.9);
+  /* Stronger halo now that the backing is lighter, to keep the glyph legible. */
+  text-shadow:
+    0 0 3px rgba(2, 11, 28, 0.85),
+    0 0 10px rgba(var(--accent-rgb), 0.95);
 }
 
 .core-caption {
@@ -1015,7 +1133,9 @@ html[data-state="verifying"] .radar-sweep {
   color: var(--accent-bright);
   font: 600 5px/1 var(--mono);
   letter-spacing: 0.18em;
-  text-shadow: 0 0 9px rgba(var(--accent-rgb), 0.7);
+  text-shadow:
+    0 0 3px rgba(2, 11, 28, 0.9),
+    0 0 9px rgba(var(--accent-rgb), 0.75);
   transform: translateX(-50%);
   white-space: nowrap;
 }
@@ -1694,8 +1814,8 @@ html[data-state="planning"] .composer-line::after {
   display: flex;
   flex-direction: column;
   width: min(930px, calc(100vw - 38px));
-  height: min(430px, calc(100vh - 90px));
-  height: min(430px, calc(100dvh - 90px));
+  height: min(430px, calc(100vh - var(--header-h) - 18px));
+  height: min(430px, calc(100dvh - var(--header-h) - 18px));
   overflow: hidden;
   transform: translate(-50%, calc(100% + 45px));
   border: 1px solid var(--line-strong);
@@ -1862,8 +1982,12 @@ html[data-state="planning"] .composer-line::after {
 }
 
 @media (max-width: 900px) {
+  :root {
+    --header-h: 62px;
+  }
+
   .app-shell {
-    grid-template-rows: 62px minmax(0, 1fr) 22px;
+    grid-template-rows: minmax(var(--header-h), auto) minmax(0, 1fr) 22px;
     padding: 0 14px;
   }
 
@@ -2120,8 +2244,6 @@ html[data-state="planning"] .composer-line::after {
     bottom: 8px;
     bottom: max(8px, env(safe-area-inset-bottom));
     width: calc(100vw - 16px);
-    height: calc(100vh - 80px);
-    height: calc(100dvh - 80px);
   }
 
   .toast-region {
@@ -2131,8 +2253,12 @@ html[data-state="planning"] .composer-line::after {
 }
 
 @media (max-height: 690px) and (min-width: 901px) {
+  :root {
+    --header-h: 58px;
+  }
+
   .app-shell {
-    grid-template-rows: 58px minmax(0, 1fr) 20px;
+    grid-template-rows: minmax(var(--header-h), auto) minmax(0, 1fr) 20px;
   }
 
   .workspace {
@@ -2349,12 +2475,12 @@ html[data-interface="remote-agent"] .welcome-symbol {
 /* -------------------------------------------------------------------------- */
 .sessions-drawer {
   position: fixed;
-  top: 60px;
+  top: calc(var(--header-h) - 12px);
   left: 12px;
   width: 340px;
   max-width: calc(100vw - 24px);
-  height: calc(100vh - 84px);
-  height: calc(100dvh - 84px);
+  height: calc(100vh - var(--header-h) + 12px - 24px);
+  height: calc(100dvh - var(--header-h) + 12px - 24px);
   z-index: 90;
   display: flex;
   flex-direction: column;
@@ -2371,6 +2497,8 @@ html[data-interface="remote-agent"] .welcome-symbol {
   transform: translateX(0);
   visibility: visible;
 }
+
+
 
 .sessions-header {
   display: flex;
@@ -2599,7 +2727,8 @@ html[data-interface="remote-agent"] .welcome-symbol {
   position: absolute;
   bottom: -1px;
   left: 0;
-  width: 25%;
+  /* One fifth: STREAM / VITALS / CMDS / SKILLS / LOGS. */
+  width: 20%;
   height: 1px;
   background: var(--accent);
   box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.7);
@@ -3184,7 +3313,15 @@ html[data-interface="remote-agent"] .welcome-symbol {
   align-items: center;
 }
 
+/*
+ * One row, not two. `.icon-button` is a grid, so the glyph and the `CTRL K`
+ * hint stacked into two rows 43px tall inside a 32px button and the hint hung
+ * 12px below the button box at every width - over the header's own border, and
+ * past the header entirely once the short-viewport rule drops it to 58px.
+ */
 .palette-button {
+  grid-auto-flow: column;
+  align-items: center;
   gap: 6px;
   width: auto;
   padding: 0 9px;
@@ -3292,5 +3429,690 @@ html[data-interface="remote-agent"] .welcome-symbol {
 
   .panel-tab[data-tab="logs"] .tab-count[data-alert="true"] {
     animation: none;
+  }
+}
+
+/* ============================================================
+   ChatGPT Voice & Gemini Live Mode Styling
+   ============================================================ */
+
+/* Topbar Live Voice Button */
+.live-voice-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 32px;
+  background: rgba(0, 240, 255, 0.08);
+  border: 1px solid rgba(0, 240, 255, 0.35);
+  border-radius: 16px;
+  color: var(--text);
+  font-family: var(--display);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 0 10px rgba(0, 240, 255, 0.12);
+}
+
+.live-voice-toggle:hover {
+  background: rgba(0, 240, 255, 0.18);
+  border-color: var(--accent);
+  box-shadow: 0 0 18px rgba(0, 240, 255, 0.35);
+  transform: translateY(-1px);
+}
+
+.live-voice-toggle .live-voice-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #647d8b;
+  transition: background 0.3s ease;
+}
+
+.live-voice-toggle.is-active {
+  background: rgba(0, 255, 157, 0.15);
+  border-color: #00ff9d;
+  color: #00ff9d;
+  box-shadow: 0 0 20px rgba(0, 255, 157, 0.3);
+}
+
+.live-voice-toggle.is-active .live-voice-dot {
+  background: #00ff9d;
+  box-shadow: 0 0 8px #00ff9d;
+  animation: voiceDotPulse 1.4s infinite alternate;
+}
+
+@keyframes voiceDotPulse {
+  0% { transform: scale(0.85); opacity: 0.7; }
+  100% { transform: scale(1.3); opacity: 1; }
+}
+
+/* Stage Voice Activation Button */
+.stage-voice-trigger {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 22px;
+  background: rgba(3, 14, 25, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(0, 240, 255, 0.45);
+  border-radius: 30px;
+  color: #e5f8ff;
+  font-family: var(--display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  z-index: 25;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5), 0 0 16px rgba(0, 240, 255, 0.2);
+}
+
+.stage-voice-trigger:hover {
+  background: rgba(0, 35, 60, 0.95);
+  border-color: var(--accent);
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.6), 0 0 28px rgba(0, 240, 255, 0.45);
+  transform: translateX(-50%) translateY(-2px) scale(1.03);
+}
+
+.stage-voice-pulse {
+  position: absolute;
+  inset: -6px;
+  border-radius: 34px;
+  border: 1px solid rgba(0, 240, 255, 0.4);
+  animation: stagePulseRadar 2.2s infinite ease-out;
+  pointer-events: none;
+}
+
+@keyframes stagePulseRadar {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  100% { transform: scale(1.22); opacity: 0; }
+}
+
+/* Live Voice Overlay HUD */
+.live-voice-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  padding-bottom: 24px;
+  z-index: 30;
+  pointer-events: none;
+}
+
+.live-voice-overlay[hidden] {
+  display: none !important;
+}
+
+.live-voice-card {
+  pointer-events: auto;
+  width: 90%;
+  max-width: 520px;
+  background: rgba(3, 14, 25, 0.92);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(0, 240, 255, 0.4);
+  border-radius: 16px;
+  padding: 16px 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.65), 0 0 35px rgba(0, 240, 255, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  animation: voiceCardIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes voiceCardIn {
+  from { opacity: 0; transform: translateY(18px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.live-voice-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(0, 240, 255, 0.12);
+  padding-bottom: 10px;
+}
+
+.live-voice-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+
+.live-voice-badge .pulse-ring {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+  animation: voiceDotPulse 1.2s infinite alternate;
+}
+
+.live-voice-badge.is-speaking {
+  color: #00ff9d;
+}
+
+.live-voice-badge.is-speaking .pulse-ring {
+  background: #00ff9d;
+  box-shadow: 0 0 12px #00ff9d;
+}
+
+.live-voice-badge.is-thinking {
+  color: #bb44ff;
+}
+
+.live-voice-badge.is-thinking .pulse-ring {
+  background: #bb44ff;
+  box-shadow: 0 0 12px #bb44ff;
+}
+
+.live-voice-badge.is-muted {
+  color: #ffaa00;
+}
+
+.live-voice-badge.is-muted .pulse-ring {
+  background: #ffaa00;
+  box-shadow: 0 0 10px #ffaa00;
+  animation: none;
+}
+
+/* Real-Time Voice Wave Visualizer */
+.voice-wave {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+}
+
+.voice-wave i {
+  display: block;
+  width: 3px;
+  height: 4px;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: height 0.08s ease, background 0.2s ease;
+  min-height: 3px;
+  max-height: 20px;
+}
+
+.live-voice-badge.is-speaking ~ .voice-wave i {
+  background: #00ff9d;
+}
+
+.live-voice-badge.is-thinking ~ .voice-wave i {
+  background: #bb44ff;
+  animation: thinkingWave 0.8s infinite ease-in-out alternate;
+}
+
+@keyframes thinkingWave {
+  0% { height: 4px; }
+  100% { height: 16px; }
+}
+
+/* Voice Live Caption Subtitles */
+.voice-caption-box {
+  min-height: 42px;
+  max-height: 80px;
+  overflow-y: auto;
+  display: flex;
+  align-items: center;
+}
+
+.voice-caption {
+  margin: 0;
+  font-family: var(--body);
+  font-size: 14px;
+  line-height: 1.45;
+  color: #e5f8ff;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  transition: color 0.2s ease;
+}
+
+.voice-caption.is-user {
+  color: var(--accent-bright);
+  font-style: italic;
+}
+
+.voice-caption.is-assistant,
+.voice-caption.is-ai {
+  color: #ffffff;
+}
+
+.voice-caption.is-warning {
+  color: var(--warn, #ffb454);
+}
+
+/* Voice Controls Bar */
+.live-voice-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.voice-ctrl-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--display);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.voice-ctrl-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.voice-bargein-btn {
+  background: rgba(0, 240, 255, 0.1);
+  border-color: rgba(0, 240, 255, 0.35);
+  color: var(--accent);
+}
+
+.voice-bargein-btn:hover {
+  background: rgba(0, 240, 255, 0.25);
+  border-color: var(--accent);
+  box-shadow: 0 0 14px rgba(0, 240, 255, 0.35);
+}
+
+.voice-exit-btn {
+  background: rgba(255, 78, 69, 0.1);
+  border-color: rgba(255, 78, 69, 0.3);
+  color: var(--danger);
+}
+
+.voice-exit-btn:hover {
+  background: rgba(255, 78, 69, 0.25);
+  border-color: var(--danger);
+  box-shadow: 0 0 14px rgba(255, 78, 69, 0.35);
+}
+
+/* ============================================================
+   ENHANCED SHELL
+   Skill library, the narrow-screen panel drawer, and shortcuts.
+   ============================================================ */
+
+/*
+ * The side panel is a column while it fits and a drawer once it does not.
+ * Before this, anything below 1250px simply deleted the panel - taking the
+ * activity stream, vitals, command index and alerts with it.
+ */
+.panel-toggle-button {
+  display: none;
+  color: var(--muted);
+}
+
+.panel-glyph {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.panel-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 24;
+  display: none;
+  border: 0;
+  background: rgba(1, 4, 8, 0.6);
+  backdrop-filter: blur(2px);
+}
+
+.panel-backdrop[hidden] {
+  display: none;
+}
+
+/* ── SKILLS tab ── */
+
+.skill-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.skill-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 13px;
+  border-top: 1px solid rgba(var(--accent-rgb), 0.07);
+  border-left: 1px solid transparent;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.skill-item:first-child {
+  border-top: 0;
+}
+
+.skill-item:hover {
+  background: rgba(var(--accent-rgb), 0.06);
+  border-left-color: var(--accent);
+}
+
+.skill-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.skill-name {
+  color: var(--accent-bright);
+  font: 650 9.5px/1 var(--mono);
+  letter-spacing: 0.05em;
+}
+
+.skill-badge {
+  padding: 2px 5px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  font: 650 6.5px/1 var(--mono);
+  letter-spacing: 0.14em;
+}
+
+.skill-desc {
+  margin: 0;
+  color: var(--muted);
+  font: 500 8.5px/1.45 var(--body);
+}
+
+.skill-when {
+  margin: 0;
+  color: var(--dim);
+  font: 500 8px/1.4 var(--mono);
+}
+
+.skill-foot {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 2px;
+}
+
+.skill-tools {
+  overflow: hidden;
+  color: var(--dim);
+  font: 500 7px/1.3 var(--mono);
+  letter-spacing: 0.06em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-use {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  cursor: pointer;
+  color: var(--accent);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: 2px;
+  background: rgba(var(--accent-rgb), 0.07);
+  font: 650 7.5px/1 var(--mono);
+  letter-spacing: 0.14em;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.skill-use:hover,
+.skill-use:focus-visible {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.18);
+}
+
+/* ── Shortcuts overlay ── */
+
+.shortcuts-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 62;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8vh 16px 16px;
+  background: rgba(1, 4, 8, 0.74);
+  backdrop-filter: blur(4px);
+}
+
+.shortcuts-backdrop[hidden] {
+  display: none;
+}
+
+.shortcuts {
+  width: min(460px, 100%);
+  max-height: 78vh;
+  overflow: auto;
+  padding: 18px 20px 20px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--panel-strong);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.7),
+              0 0 0 1px rgba(var(--accent-rgb), 0.08);
+  animation: palette-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.shortcuts-head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.shortcuts-head h2 {
+  margin: 4px 0 0;
+  color: var(--text);
+  font: 700 15px/1 var(--display);
+  letter-spacing: 0.16em;
+}
+
+.shortcut-grid {
+  display: grid;
+  margin: 16px 0 0;
+}
+
+.shortcut-grid > div {
+  display: grid;
+  grid-template-columns: 118px 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 0;
+  border-top: 1px solid rgba(var(--accent-rgb), 0.08);
+}
+
+.shortcut-grid > div:first-child {
+  border-top: 0;
+}
+
+.shortcut-grid dt {
+  display: flex;
+  gap: 4px;
+}
+
+.shortcut-grid dd {
+  margin: 0;
+  color: var(--muted);
+  font: 500 9px/1.4 var(--body);
+}
+
+.shortcut-grid kbd {
+  padding: 3px 6px;
+  color: var(--accent-bright);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: rgba(var(--accent-rgb), 0.06);
+  font: 600 7.5px/1 var(--mono);
+  letter-spacing: 0.08em;
+}
+
+@media (max-width: 1250px) {
+  .panel-toggle-button {
+    display: grid;
+  }
+
+  /*
+   * The panel is a drawer here, so it starts closed. The `.workspace` prefix is
+   * load-bearing: the base `.activity-panel { display: flex }` is declared later
+   * in this file than the original hiding rule, so an unprefixed selector loses
+   * and the panel renders in flow - on top of the stage.
+   */
+  .workspace .activity-panel {
+    display: none;
+  }
+
+  body.panel-open .panel-backdrop {
+    display: block;
+  }
+
+  body.panel-open .workspace .activity-panel {
+    position: fixed;
+    top: calc(var(--header-h) + 4px);
+    bottom: 34px;
+    left: 14px;
+    z-index: 26;
+    display: flex;
+    width: min(340px, calc(100vw - 28px));
+    background: var(--panel-strong);
+    box-shadow: 0 26px 70px rgba(0, 0, 0, 0.68);
+    animation: panel-in 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+}
+
+@keyframes panel-in {
+  from { opacity: 0; transform: translateX(-12px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@media (max-width: 900px) {
+  body.panel-open .workspace .activity-panel {
+    top: calc(var(--header-h) + 4px);
+    bottom: 26px;
+    left: 10px;
+  }
+}
+
+@media (max-width: 590px) {
+  body.panel-open .workspace .activity-panel {
+    left: 6px;
+    width: calc(100vw - 12px);
+  }
+
+  .shortcut-grid > div {
+    grid-template-columns: 96px 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.panel-open .workspace .activity-panel {
+    animation: none;
+  }
+}
+
+/* Fullscreen Voice Mode Active state */
+body[data-voice-mode="active"] .stage-voice-trigger {
+  display: none !important;
+}
+
+body[data-voice-mode="active"] .core-frame {
+  box-shadow: 0 0 60px rgba(var(--accent-rgb), 0.25);
+}
+
+/* ============================================================
+   Narrow header: two rows instead of an overflowing one
+   ============================================================ */
+
+/*
+ * The decorative NEURAL LINK / TERMINAL CORE readout is the first thing to
+ * drop. It is aria-hidden, it duplicates the connection pill, and holding it
+ * costs about 290px - which is what the action row needs the moment the
+ * reconnect control appears. Measured on real layout: without this rule the
+ * header overflows the viewport from 901px up to ~917px.
+ */
+@media (max-width: 1100px) {
+  .topbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .topbar-center {
+    display: none;
+  }
+}
+
+/*
+ * The brand plus the eight action controls have a min-content width of about
+ * 454px, and the widest case (the reconnect button is showing) needs about
+ * 625px. One row therefore cannot fit below ~720px, and because grid items
+ * default to `min-width: auto` the topbar used to widen the whole shell past
+ * the viewport instead - with `overflow: hidden` on body, the right-hand
+ * controls (connection pill, END SESSION) were clipped and unclickable.
+ *
+ * Declared at the end of the file on purpose: equal specificity means source
+ * order decides, so a media query placed before the rules it overrides loses.
+ */
+@media (max-width: 720px) {
+  :root {
+    --header-h: 88px;
+  }
+
+  .app-shell {
+    grid-template-rows: minmax(var(--header-h), auto) minmax(0, 1fr) 22px;
+  }
+
+  .topbar {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    align-content: center;
+    row-gap: 8px;
+  }
+
+  .topbar-actions {
+    justify-self: stretch;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  /*
+   * Below the two-row header the drawers can no longer tuck under it the way
+   * the wide layout does, so they clear it outright.
+   */
+  body.panel-open .workspace .activity-panel {
+    top: calc(var(--header-h) + 4px + env(safe-area-inset-top, 0px));
+  }
+
+  .sessions-drawer {
+    top: calc(var(--header-h) + 6px + env(safe-area-inset-top, 0px));
+    height: calc(100dvh - var(--header-h) - 24px - env(safe-area-inset-top, 0px));
+  }
+
+  .terminal-drawer {
+    bottom: 10px;
+    height: calc(100dvh - var(--header-h) - 28px);
   }
 }

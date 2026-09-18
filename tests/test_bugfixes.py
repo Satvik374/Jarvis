@@ -108,3 +108,32 @@ def test_zero_chat_history_turns_returns_nothing(tmp_path):
     cfg.data.chat_history_turns = 1
     assert "second-user-msg" in agent._chat_context()
     assert "first-user-msg" not in agent._chat_context()
+
+
+# --- XML tool call support ------------------------------------------------ #
+
+def test_parse_decision_extracts_xml_tool_call():
+    raw = (
+        "I will create the game now.\n"
+        "<tool_call>write_file\n"
+        "<arg_key>path</arg_key>\n"
+        "<arg_value>C:\\Users\\jarvis\\flappy_bird\\index.html</arg_value>"
+        "<arg_key>content</arg_key>\n"
+        "<arg_value><html>test</html></arg_value>\n"
+        "</tool_call>"
+    )
+    d = parse_decision(raw)
+    assert not d.fallback
+    assert d.action == "write_file"
+    assert "flappy_bird" in d.args["path"]
+    assert "jarvis" not in d.args["path"].lower()  # normalized to real home
+    assert d.args["content"] == "<html>test</html>"
+    assert "I will create the game now." in d.thought
+
+
+def test_parse_decision_extracts_powershell_xml():
+    raw = '<tool_call>powershell -Command "dir"</tool_call>'
+    d = parse_decision(raw)
+    assert not d.fallback
+    assert d.action == "run_command"
+    assert d.args["command"] == 'powershell -Command "dir"'

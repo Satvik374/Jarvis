@@ -15,6 +15,10 @@
     composer: $("#composer"),
     connectionPill: $("#connectionPill"),
     connectionText: $("#connectionText"),
+    reconnect: $("#reconnect"),
+    activityPanel: $("#activityPanel"),
+    panelToggle: $("#panelToggle"),
+    panelBackdrop: $("#panelBackdrop"),
     copyTerminal: $("#copyTerminal"),
     endSession: $("#endSession"),
     fileInput: $("#fileInput"),
@@ -37,12 +41,28 @@
     terminalFollow: $("#terminalFollow"),
     terminalOutput: $("#terminalOutput"),
     terminalToggle: $("#terminalToggle"),
+    audioToggle: $("#audioToggle"),
+    audioGlyph: $("#audioGlyph"),
+    liveVoiceToggle: $("#liveVoiceToggle"),
+    stageVoiceBtn: $("#stageVoiceBtn"),
+    stageVoiceText: $("#stageVoiceText"),
+    liveVoiceOverlay: $("#liveVoiceOverlay"),
+    liveVoiceBadge: $("#liveVoiceBadge"),
+    liveVoiceStateText: $("#liveVoiceStateText"),
+    voiceWave: $("#voiceWave"),
+    voiceCaption: $("#voiceCaption"),
+    voiceMuteBtn: $("#voiceMuteBtn"),
+    voiceMuteIcon: $("#voiceMuteIcon"),
+    voiceMuteLabel: $("#voiceMuteLabel"),
+    voiceBargeinBtn: $("#voiceBargeinBtn"),
+    voiceExitBtn: $("#voiceExitBtn"),
     toastRegion: $("#toastRegion"),
     welcome: $("#welcomeCard"),
     brandSubtitle: $("#brandSubtitle"),
     topbarPrimary: $("#topbarPrimary"),
     topbarSecondary: $("#topbarSecondary"),
     tabCmdsLabel: $("#tabCmdsLabel"),
+    tabBtnSkills: $("#tabBtnSkills"),
     cmdPanelEyebrow: $("#cmdPanelEyebrow"),
     cmdPanelCount: $("#cmdPanelCount"),
     telemetryRuntime: $("#telemetryRuntime"),
@@ -82,6 +102,14 @@
     // Commands
     cmdFilter: $("#cmdFilter"),
     cmdList: $("#cmdList"),
+    // Skills
+    skillFilter: $("#skillFilter"),
+    skillList: $("#skillList"),
+    reloadSkills: $("#reloadSkills"),
+    tabCountSkills: $("#tabCountSkills"),
+    // Shortcuts overlay
+    shortcutsBackdrop: $("#shortcutsBackdrop"),
+    closeShortcuts: $("#closeShortcuts"),
     // Alerts
     alertList: $("#alertList"),
     clearAlerts: $("#clearAlerts"),
@@ -171,12 +199,18 @@
   let inputMode = "command";
   let inputPrompt = "";
   let connected = false;
+  //: Short reason shown while the composer is disabled ("NO RUNTIME", ...).
+  let linkDiag = "";
   let attachment = null;
   let attachmentUploading = false;
   let uploadVersion = 0;
   let terminalText = "";
   let currentState = "booting";
   let eventSource = null;
+  //: One link probe at a time: EventSource fires onerror on every retry.
+  let linkProbeInFlight = false;
+  //: Last toast text, so a repeated failure does not stack identical alerts.
+  let lastLinkToast = "";
   let powerArmed = false;
   let powerTimer = null;
   let eventGeneration = 0;
@@ -262,22 +296,123 @@
   }
 
 
-  function setConnected(value, label) {
+  function setConnected(value, label, detail) {
     connected = value;
     root.dataset.connected = value ? "true" : "false";
     const status = label || (value ? "LINKED" : "OFFLINE");
     elements.connectionText.textContent = status;
-    elements.connectionPill.setAttribute(
-      "aria-label",
-      `Connection status: ${status.toLowerCase()}`,
-    );
-    elements.connectionPill.title = value
+    const explanation = detail || (value
       ? interfaceMode === "remote-agent"
         ? "Connected to the local remote-agent runtime"
         : "Connected to the local terminal runtime"
       : interfaceMode === "remote-agent"
         ? "Remote-agent link unavailable"
-        : "Terminal link unavailable";
+        : "Terminal link unavailable");
+    elements.connectionPill.setAttribute(
+      "aria-label",
+      `Connection status: ${status.toLowerCase()} — ${explanation}`,
+    );
+    elements.connectionPill.title = explanation;
+    // The pill is the only always-visible status surface, so the reason a link
+    // is down has to be readable on hover rather than buried in the console.
+    elements.connectionPill.dataset.detail = detail ? "true" : "false";
+    if (elements.reconnect) {
+      elements.reconnect.hidden = !(detail && !value);
+    }
+  }
+
+  /**
+   * Work out *why* the link is down, because the answer decides what the user
+   * can do about it. A rejected token and a dead terminal runtime are both
+   * permanent, and EventSource reconnects on its own forever - which is how
+   * this page used to sit at "RELINKING" with a console full of 401s and no
+   * explanation on screen.
+   */
+  async function classifyLinkFailure() {
+    try {
+      const snapshot = await api("/api/state");
+      const worker = snapshot.worker || {};
+      if (snapshot.alive === false) {
+        const code = worker.exit_code;
+        const because = worker.last_error
+          ? `${worker.last_error}${code === null || code === undefined ? "" : ` (exit ${code})`}`
+          : "the terminal runtime is not running";
+        return {
+          kind: "runtime",
+          label: "NO RUNTIME",
+          short: `Terminal runtime ended — ${because}`,
+          message: `The terminal runtime is gone: ${because}. Restart Jarvis to get it back.`,
+          permanent: true,
+        };
+      }
+      return {
+        kind: "transient",
+        label: "RELINKING",
+        short: "Reconnecting to the terminal link",
+        message: "the terminal link dropped; reconnecting",
+        permanent: false,
+      };
+    } catch (error) {
+      const text = String((error && error.message) || error);
+      if (/unauthor|token|\b401\b/i.test(text)) {
+        return {
+          kind: "token",
+          label: "TOKEN REJECTED",
+          short: "Session token refused — reopen the address from the terminal",
+          message: "This page's session token was refused: it is stale, or another "
+            + "Jarvis is serving this port. Open the URL printed in the terminal again.",
+          permanent: true,
+        };
+      }
+      return {
+        kind: "server",
+        label: "SERVER DOWN",
+        short: `Jarvis server unreachable — ${text}`,
+        message: `The Jarvis server is not answering (${text}). Start Jarvis again with --browser.`,
+        permanent: true,
+      };
+    }
+  }
+
+  function closeEvents() {
+    if (!eventSource) return;
+    eventSource.onerror = null;
+    eventSource.onmessage = null;
+    eventSource.onopen = null;
+    eventSource.close();
+    eventSource = null;
+  }
+
+  function applyLinkDiagnosis(diagnosis) {
+    linkDiag = diagnosis.permanent ? diagnosis.label : "";
+    // Pill label is terse and the stage line is short on purpose: #stateDetail
+    // is one ellipsised line, and a diagnosis nobody can finish reading is not
+    // a diagnosis. The full sentence goes to the pill's tooltip and the toast.
+    setConnected(false, diagnosis.label, diagnosis.message);
+    if (diagnosis.permanent) setState("error", diagnosis.short);
+    if (diagnosis.permanent && diagnosis.message !== lastLinkToast) {
+      lastLinkToast = diagnosis.message;
+      toast(diagnosis.message, "error");
+    }
+    updateComposer();
+  }
+
+  /** Reconnect deliberately: a permanent failure never retries on its own. */
+  function reconnect() {
+    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+    const fromHash = params.get("token");
+    if (fromHash) {
+      token = fromHash;
+      try {
+        sessionStorage.setItem("jarvis-browser-token", token);
+      } catch {
+        /* private mode: the hash is enough */
+      }
+    }
+    linkProbeInFlight = false;
+    lastLinkToast = "";
+    closeEvents();
+    connectEvents();
   }
 
   function setState(name, detail) {
@@ -332,6 +467,10 @@
       } else {
         elements.prompt.placeholder = inputPrompt || "Issue a directive…";
       }
+    } else if (linkDiag) {
+      // A disabled composer with no explanation is the worst state this page
+      // has: say what is wrong and offer the way out.
+      elements.prompt.placeholder = `${linkDiag} — press RECONNECT`;
     } else if (currentState === "offline") {
       elements.prompt.placeholder = interfaceMode === "remote-agent"
         ? "Remote agent session has ended"
@@ -428,7 +567,11 @@
       body = { ok: false, error: `HTTP ${response.status}` };
     }
     if (!response.ok || body.ok === false) {
-      throw new Error(body.error || body.message || `HTTP ${response.status}`);
+      // The server may attach a hint explaining what to do about it (out of
+      // credit, beta access, unpublished agent). Carry it into the message so
+      // it reaches the caption and the toast, not just the console.
+      const reason = body.error || body.message || `HTTP ${response.status}`;
+      throw new Error(body.hint ? `${reason} ${body.hint}` : reason);
     }
     return body;
   }
@@ -440,7 +583,12 @@
     remotePairings = Array.isArray(next.pairings) ? next.pairings : remotePairings;
     remoteUnattended = Boolean(next.unattended);
 
-    if (mode !== "remote-agent") return;
+    if (mode !== "remote-agent") {
+      // A page that has left remote-agent mode gets its local library back.
+      elements.tabBtnSkills?.removeAttribute("hidden");
+      elements.skillFilter?.removeAttribute("hidden");
+      return;
+    }
 
     document.title = "JARVIS // REMOTE AGENT";
     elements.brandSubtitle.textContent = "REMOTE AGENT";
@@ -450,10 +598,14 @@
     elements.cmdPanelEyebrow.textContent = "TRUSTED CONTROLLERS";
     elements.cmdPanelCount.textContent = String(remotePairings.length);
     elements.cmdFilter.placeholder = "Filter controllers…";
+    // Remote-agent mode has no local skill library to offer.
+    elements.tabBtnSkills?.setAttribute("hidden", "");
+    elements.skillFilter?.setAttribute("hidden", "");
+    if (activeTab === "skills") selectTab("stream");
     elements.telemetryRuntime.innerHTML = '<i class="status-led"></i> REMOTE';
     elements.telemetryControl.textContent = remoteUnattended ? "UNATTENDED" : "CONFIRM";
     elements.telemetryChannel.textContent = "E2E RELAY";
-    elements.nodeCoordinate.textContent = "LOCAL AGENT // OUTBOUND ONLY";
+    if (elements.nodeCoordinate) elements.nodeCoordinate.textContent = "LOCAL AGENT // OUTBOUND ONLY";
     elements.coreCaption.textContent = "REMOTE CORE";
     elements.dialogueEyebrow.textContent = "ENCRYPTED TASK CHANNEL";
     elements.dialogueTitle.textContent = "REMOTE ACTIVITY";
@@ -668,6 +820,16 @@
   function addMessage(role, message, timestamp) {
     const text = String(message || "").trim();
     if (!text) return;
+
+    // Universal deduplication: prevent identical back-to-back messages
+    const lastMsg = elements.messages ? elements.messages.querySelector(".message:last-of-type") : null;
+    if (lastMsg && lastMsg.classList.contains(`message-${role}`)) {
+      const lastBody = lastMsg.querySelector(".message-body");
+      if (lastBody && lastBody.textContent.trim() === text) {
+        return;
+      }
+    }
+
     hideWelcome();
     const shouldFollow = isNearBottom(elements.messages);
 
@@ -690,6 +852,11 @@
     article.append(meta, body);
     elements.messages.append(article);
 
+    if (window.liveVoice && window.liveVoice.active && role === "assistant" && elements.voiceCaption) {
+      elements.voiceCaption.textContent = text.slice(0, 180);
+      elements.voiceCaption.className = "voice-caption is-assistant";
+    }
+
     const rendered = elements.messages.querySelectorAll(".message");
     if (rendered.length > 120) {
       const removeCount = Math.max(1, rendered.length - 100);
@@ -708,9 +875,18 @@
     else elements.messageFollow.hidden = false;
   }
 
+  // Activity kinds that represent Jarvis actually doing something. Each one
+  // kicks the stage core, so consecutive actions in one state stay visible
+  // instead of relying on a state transition to move the blob.
+  const ACTION_KINDS = new Set(["act", "ok", "error", "warn", "warning"]);
+
   function addActivity(kind, message, timestamp) {
     const text = String(message || "").replace(/\s+/g, " ").trim();
     if (!text) return;
+
+    if (ACTION_KINDS.has(kind)) {
+      window.energyCore?.triggerPulse(kind === "ok" ? 1.5 : 1.1);
+    }
 
     // Every activity routes through here, so tally metrics at this one point.
     metrics.kinds.set(kind, (metrics.kinds.get(kind) || 0) + 1);
@@ -775,17 +951,221 @@
     }
   }
 
+  // ---- Web Audio & HTML5 Audio System ----
+  let audioContext = null;
+  let activeAudioSource = null;
+  let activeAudioElement = null;
+  let activeUtteranceIdPlaying = 0;
+  let audioMuted = false;
+
+  function getAudioContext() {
+    if (!audioContext) {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (AudioContextClass) {
+        audioContext = new AudioContextClass();
+      }
+    }
+    return audioContext;
+  }
+
+  function unlockAudioEngine() {
+    const ctx = getAudioContext();
+    if (ctx && ctx.state === "suspended") {
+      ctx.resume().catch(() => {});
+    }
+  }
+
+  window.addEventListener("pointerdown", unlockAudioEngine, { passive: true });
+  window.addEventListener("keydown", unlockAudioEngine, { passive: true });
+  window.addEventListener("click", unlockAudioEngine, { passive: true });
+
+  function stopSpeechAudio() {
+    activeUtteranceIdPlaying = 0;
+    if (activeAudioSource) {
+      try {
+        activeAudioSource.stop();
+        activeAudioSource.disconnect();
+      } catch (_) {}
+      activeAudioSource = null;
+    }
+    if (activeAudioElement) {
+      try {
+        activeAudioElement.pause();
+        activeAudioElement.currentTime = 0;
+      } catch (_) {}
+      activeAudioElement = null;
+    }
+    updateAudioButtonState(false);
+  }
+
+  function b64ToArrayBuffer(b64) {
+    const comma = b64.indexOf(",");
+    const raw = comma >= 0 ? b64.slice(comma + 1) : b64;
+    const binary = atob(raw);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
+  }
+
+  async function playSpeechAudio(audioSrc, utteranceId) {
+    if (audioMuted) return;
+    if (window.liveVoice && window.liveVoice.active) {
+      // When Live Voice Mode is active, all speaking belongs to gpt-realtime.
+      // The Communication Agent is silenced and must not speak.
+      return;
+    }
+    if (activeUtteranceIdPlaying === utteranceId) return;
+    stopSpeechAudio();
+    activeUtteranceIdPlaying = utteranceId;
+
+    // Strategy 1: Web Audio API via decodeAudioData (zero latency, high quality, active device routing)
+    const ctx = getAudioContext();
+    if (ctx) {
+      try {
+        if (ctx.state === "suspended") {
+          await ctx.resume();
+        }
+        let arrayBuffer = null;
+        if (audioSrc && audioSrc.startsWith("data:")) {
+          arrayBuffer = b64ToArrayBuffer(audioSrc);
+        } else {
+          const fetchUrl = `/api/speech/audio.wav?id=${utteranceId}&token=${encodeURIComponent(token)}`;
+          const resp = await fetch(fetchUrl);
+          if (resp.ok) {
+            arrayBuffer = await resp.arrayBuffer();
+          }
+        }
+        if (arrayBuffer && activeUtteranceIdPlaying === utteranceId) {
+          const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
+          if (activeUtteranceIdPlaying !== utteranceId) return;
+          const source = ctx.createBufferSource();
+          source.buffer = decoded;
+          const gain = ctx.createGain();
+          gain.gain.setValueAtTime(1.0, ctx.currentTime);
+          source.connect(gain);
+          gain.connect(ctx.destination);
+          source.onended = () => {
+            if (activeUtteranceIdPlaying === utteranceId) {
+              activeAudioSource = null;
+              activeUtteranceIdPlaying = 0;
+              updateAudioButtonState(false);
+            }
+          };
+          activeAudioSource = source;
+          source.start(0);
+          updateAudioButtonState(true);
+          return;
+        }
+      } catch (err) {
+        console.warn("Web Audio API decode notice:", err);
+      }
+    }
+
+    // Strategy 2: HTML5 Audio fallback
+    if (activeUtteranceIdPlaying !== utteranceId) return;
+    try {
+      const fallbackSrc = audioSrc || `/api/speech/audio.wav?id=${utteranceId}&token=${encodeURIComponent(token)}`;
+      const audio = new Audio(fallbackSrc);
+      activeAudioElement = audio;
+      audio.onended = () => {
+        if (activeUtteranceIdPlaying === utteranceId) {
+          activeAudioElement = null;
+          activeUtteranceIdPlaying = 0;
+          updateAudioButtonState(false);
+        }
+      };
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.then(() => {
+          updateAudioButtonState(true);
+        }).catch((err) => {
+          console.warn("HTML5 Audio playback notice:", err);
+          if (err.name === "NotAllowedError") {
+            toast("Click anywhere to enable voice output 🔊", "info");
+            updateAudioButtonState(false);
+          }
+        });
+      }
+    } catch (err) {
+      console.warn("HTML5 Audio fallback error:", err);
+    }
+  }
+
+  function updateAudioButtonState(isPlaying = false) {
+    const btn = elements.audioToggle;
+    const glyph = elements.audioGlyph;
+    if (!btn || !glyph) return;
+    if (audioMuted) {
+      glyph.textContent = "🔇";
+      btn.title = "Audio Muted (Click to unmute and test)";
+      btn.style.opacity = "0.5";
+    } else {
+      glyph.textContent = isPlaying ? "🔊" : "🔉";
+      btn.title = isPlaying ? "Audio Playing (Click to test chime)" : "Audio Active (Click to test sound)";
+      btn.style.opacity = "1";
+    }
+  }
+
+  function testAudioChime() {
+    unlockAudioEngine();
+    const ctx = getAudioContext();
+    if (!ctx) {
+      toast("AudioContext unavailable in this browser.", "warning");
+      return;
+    }
+    ctx.resume().then(() => {
+      audioMuted = false;
+      updateAudioButtonState(false);
+      const now = ctx.currentTime;
+      const osc1 = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc1.type = "sine";
+      osc1.frequency.setValueAtTime(587.33, now); // D5
+      osc2.type = "sine";
+      osc2.frequency.setValueAtTime(880.0, now + 0.09); // A5
+      gain.gain.setValueAtTime(0.22, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+      osc1.connect(gain);
+      osc2.connect(gain);
+      gain.connect(ctx.destination);
+      osc1.start(now);
+      osc1.stop(now + 0.09);
+      osc2.start(now + 0.09);
+      osc2.stop(now + 0.35);
+      toast("Voice audio active 🔊 - Tone played", "info");
+    }).catch((e) => {
+      toast("Audio unlock required: " + e.message, "warning");
+    });
+  }
+
   function clearSpeechOverlay() {
     if (speechExpiryTimer !== null) {
       clearTimeout(speechExpiryTimer);
       speechExpiryTimer = null;
     }
+    stopSpeechAudio();
     activeUtteranceId = 0;
     root.dataset.speaking = "false";
     orb.setSpeaking({ active: false });
+    if (window.liveVoice && window.liveVoice.active) {
+      window.liveVoice.setState("listening");
+      if (elements.voiceCaption) {
+        elements.voiceCaption.textContent = "Listening for your voice… say \"Hey Jarvis\"";
+        elements.voiceCaption.className = "voice-caption";
+      }
+    }
   }
 
   function applySpeech(payload) {
+    if (window.liveVoice && window.liveVoice.active) {
+      // In Live Voice Mode, the Communication Agent is silenced and must not speak.
+      // All voice output is handled solely by gpt-realtime.
+      return;
+    }
     const active = Boolean(payload.active);
     const rawId = Number(payload.utterance_id);
     const utteranceId = Number.isFinite(rawId) && rawId > 0
@@ -812,6 +1192,9 @@
       }
       activeUtteranceId = utteranceId;
       root.dataset.speaking = "true";
+      if (window.liveVoice && window.liveVoice.active) {
+        window.liveVoice.setState("speaking");
+      }
       orb.setSpeaking({
         active: true,
         durationMs,
@@ -821,6 +1204,11 @@
         bandCount: payload.band_count,
         bandFps: payload.band_fps,
       });
+
+      if (payload.audio) {
+        playSpeechAudio(payload.audio, utteranceId);
+      }
+
       if (speechExpiryTimer !== null) clearTimeout(speechExpiryTimer);
       const remainingMs = durationMs > 0
         ? Math.max(0, durationMs - elapsedMs) + 180
@@ -834,6 +1222,7 @@
 
     if (utteranceId < speechIdWatermark) return;
     speechIdWatermark = Math.max(speechIdWatermark, utteranceId);
+    stopSpeechAudio();
     clearSpeechOverlay();
   }
 
@@ -871,6 +1260,7 @@
       // Defer one frame so the panel finishes layout before canvas measures itself.
       requestAnimationFrame(() => renderVitals());
     }
+    if (name === "skills") fetchSkills();
   }
 
   function setTabCount(node, value, alert = false) {
@@ -1194,6 +1584,212 @@
   }
 
   // ============================================================
+  // SKILLS tab
+  // The library itself lives on disk and is owned by jarvis/skills;
+  // this panel reads it and stages a directive, never runs one.
+  // ============================================================
+
+  let skillCache = [];
+  let skillsFetchedAt = 0;
+  const SKILLS_TTL_MS = 15000;
+
+  function skillDirective(skill) {
+    return `Use the ${skill.name} skill to `;
+  }
+
+  function stageSkill(skill) {
+    elements.prompt.value = skillDirective(skill);
+    elements.prompt.focus();
+    const end = elements.prompt.value.length;
+    try {
+      elements.prompt.setSelectionRange(end, end);
+    } catch { /* not focusable yet; harmless */ }
+    autoSizeComposer();
+    updateSendEnabled();
+    toast(`${skill.name} staged — finish the sentence and send`);
+  }
+
+  function renderSkillsError(message) {
+    const list = elements.skillList;
+    if (!list) return;
+    list.innerHTML = "";
+    const empty = document.createElement("p");
+    empty.className = "vital-empty";
+    empty.textContent = `Could not read the skill library: ${message}`;
+    list.append(empty);
+    setTabCount(elements.tabCountSkills, 0);
+  }
+
+  function renderSkills(filter = "") {
+    const list = elements.skillList;
+    if (!list) return;
+    const needle = filter.trim().toLowerCase();
+    const matches = skillCache.filter((skill) => {
+      if (!needle) return true;
+      return [skill.name, skill.description, skill.when_to_use, (skill.tools || []).join(" ")]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle);
+    });
+    list.innerHTML = "";
+    setTabCount(elements.tabCountSkills, skillCache.length);
+
+    if (!skillCache.length) {
+      const empty = document.createElement("p");
+      empty.className = "vital-empty";
+      empty.textContent =
+        "No skills yet. Ask Jarvis to write one — \u201csave what you just did as a skill\u201d.";
+      list.append(empty);
+      return;
+    }
+    if (!matches.length) {
+      const empty = document.createElement("p");
+      empty.className = "vital-empty";
+      empty.textContent = `No skill matches \u201c${filter}\u201d.`;
+      list.append(empty);
+      return;
+    }
+
+    matches.forEach((skill) => {
+      const item = document.createElement("article");
+      item.className = "skill-item";
+      item.setAttribute("role", "listitem");
+
+      const head = document.createElement("div");
+      head.className = "skill-head";
+      const name = document.createElement("strong");
+      name.className = "skill-name";
+      name.textContent = skill.name;
+      head.append(name);
+      if (skill.builtin) {
+        const badge = document.createElement("span");
+        badge.className = "skill-badge";
+        badge.textContent = "BUILT-IN";
+        head.append(badge);
+      }
+
+      const desc = document.createElement("p");
+      desc.className = "skill-desc";
+      desc.textContent = skill.description || "No description.";
+
+      item.append(head, desc);
+
+      if (skill.when_to_use) {
+        const when = document.createElement("p");
+        when.className = "skill-when";
+        when.textContent = `Use when: ${skill.when_to_use}`;
+        item.append(when);
+      }
+
+      const foot = document.createElement("div");
+      foot.className = "skill-foot";
+      const tools = document.createElement("span");
+      tools.className = "skill-tools";
+      tools.textContent = (skill.tools || []).length
+        ? (skill.tools || []).join(" · ")
+        : "no tools declared";
+      const use = document.createElement("button");
+      use.type = "button";
+      use.className = "skill-use";
+      use.textContent = "USE";
+      use.title = `Stage a directive that loads ${skill.name}`;
+      use.addEventListener("click", () => stageSkill(skill));
+      foot.append(tools, use);
+      item.append(foot);
+      list.append(item);
+    });
+  }
+
+  async function fetchSkills({ force = false } = {}) {
+    if (!token) return;
+    if (!force && skillCache.length && Date.now() - skillsFetchedAt < SKILLS_TTL_MS) {
+      renderSkills(elements.skillFilter?.value || "");
+      return;
+    }
+    try {
+      const body = await api("/api/skills");
+      skillCache = Array.isArray(body.skills) ? body.skills : [];
+      skillsFetchedAt = Date.now();
+      renderSkills(elements.skillFilter?.value || "");
+    } catch (error) {
+      // A skills fetch must never take the console down with it: the library is
+      // a convenience panel, and the agent can still list skills itself.
+      renderSkillsError(error.message || "unavailable");
+    }
+  }
+
+  if (elements.skillFilter) {
+    elements.skillFilter.addEventListener("input", () =>
+      renderSkills(elements.skillFilter.value));
+  }
+  if (elements.reloadSkills) {
+    elements.reloadSkills.addEventListener("click", () => fetchSkills({ force: true }));
+  }
+
+  // ============================================================
+  // Side panel: a column when it fits, a drawer when it does not
+  // ============================================================
+
+  function sidePanelOpen() {
+    return document.body.classList.contains("panel-open");
+  }
+
+  function toggleSidePanel(force) {
+    const next = force === undefined ? !sidePanelOpen() : Boolean(force);
+    document.body.classList.toggle("panel-open", next);
+    if (elements.panelToggle) {
+      elements.panelToggle.setAttribute("aria-expanded", next ? "true" : "false");
+    }
+    if (elements.panelBackdrop) elements.panelBackdrop.hidden = !next;
+    if (next) {
+      // The drawer covers the stage, so the tab the user came for gets focus.
+      const button = tabButtons.find((b) => b.dataset.tab === activeTab);
+      if (button) button.focus({ preventScroll: true });
+    } else if (elements.panelToggle) {
+      elements.panelToggle.focus({ preventScroll: true });
+    }
+  }
+
+  if (elements.panelToggle) {
+    elements.panelToggle.addEventListener("click", () => toggleSidePanel());
+  }
+  if (elements.panelBackdrop) {
+    elements.panelBackdrop.addEventListener("click", () => toggleSidePanel(false));
+  }
+
+  // ============================================================
+  // Shortcuts overlay
+  // ============================================================
+
+  let focusBeforeShortcuts = null;
+
+  function shortcutsOpen() {
+    return elements.shortcutsBackdrop ? !elements.shortcutsBackdrop.hidden : false;
+  }
+
+  function toggleShortcuts(force) {
+    if (!elements.shortcutsBackdrop) return;
+    const next = force === undefined ? !shortcutsOpen() : Boolean(force);
+    elements.shortcutsBackdrop.hidden = !next;
+    if (next) {
+      focusBeforeShortcuts = document.activeElement;
+      elements.closeShortcuts?.focus({ preventScroll: true });
+    } else if (focusBeforeShortcuts && focusBeforeShortcuts.focus) {
+      focusBeforeShortcuts.focus({ preventScroll: true });
+      focusBeforeShortcuts = null;
+    }
+  }
+
+  if (elements.closeShortcuts) {
+    elements.closeShortcuts.addEventListener("click", () => toggleShortcuts(false));
+  }
+  if (elements.shortcutsBackdrop) {
+    elements.shortcutsBackdrop.addEventListener("click", (event) => {
+      if (event.target === elements.shortcutsBackdrop) toggleShortcuts(false);
+    });
+  }
+
+  // ============================================================
   // Command palette
   // ============================================================
 
@@ -1238,6 +1834,12 @@
     });
 
     const actions = [
+      ["Keyboard shortcuts", "every key this interface listens for", "⌘",
+        () => toggleShortcuts(true)],
+      ["Show skills", "the reusable procedures Jarvis can load", "✦",
+        () => { toggleSidePanel(true); selectTab("skills"); }],
+      ["Show activity panel", "stream, vitals, commands and alerts", "◫",
+        () => { toggleSidePanel(true); selectTab("stream"); }],
       ["Toggle terminal transcript", "view the raw backend output", "▤",
         () => toggleTerminal()],
       ["Open sessions", "browse saved conversations", "☰",
@@ -1257,6 +1859,20 @@
       }
     });
 
+    skillCache.slice(0, 8).forEach((skill) => {
+      const best = Math.max(score(skill.name), score(skill.description || ""));
+      if (!needle || score(skill.name) >= 0 || score(skill.description || "") >= 0) {
+        items.push({
+          group: "SKILLS",
+          icon: "✦",
+          name: skill.name,
+          hint: `stage a directive that loads it${skill.builtin ? " · built-in" : ""}`,
+          rank: score(skill.name) >= 0 ? score(skill.name) : 100 + best,
+          run: () => stageSkill(skill),
+        });
+      }
+    });
+
     cachedSessions.slice(0, 8).forEach((session) => {
       const title = session.title || "New Session";
       if (!needle || score(title) >= 0) {
@@ -1272,8 +1888,8 @@
     });
 
     return items.sort((a, b) => {
-      // Primary: group order keeps COMMANDS before ACTIONS before SESSIONS.
-      const groupOrder = { COMMANDS: 0, ACTIONS: 1, SESSIONS: 2 };
+      // Primary: group order keeps COMMANDS before ACTIONS before SKILLS and SESSIONS.
+      const groupOrder = { COMMANDS: 0, ACTIONS: 1, SKILLS: 2, SESSIONS: 3 };
       const gd = (groupOrder[a.group] ?? 3) - (groupOrder[b.group] ?? 3);
       if (gd !== 0) return gd;
       // Secondary: substring position (closer to start = better match).
@@ -1359,6 +1975,9 @@
   }
 
   elements.paletteToggle.addEventListener("click", () => togglePalette());
+  if (elements.reconnect) {
+    elements.reconnect.addEventListener("click", () => reconnect());
+  }
   elements.paletteBackdrop.addEventListener("mousedown", (event) => {
     if (event.target === elements.paletteBackdrop) togglePalette(false);
   });
@@ -1406,10 +2025,20 @@
         if (payload.interface_mode) {
           applyInterface({ mode: payload.interface_mode });
         }
+        linkDiag = "";
+        lastLinkToast = "";
         setConnected(Boolean(payload.alive), payload.alive ? "LINKED" : "OFFLINE");
+        // Skills can change between sessions (the agent writes them), so a new
+        // link re-reads the library rather than trusting an old copy.
+        if (payload.alive) fetchSkills({ force: true });
         if (!payload.alive) {
           clearSpeechOverlay();
-          setState("offline", payload.message);
+          // An exit code is the difference between "it ended" and "it crashed
+          // with 1" - worth showing instead of a bare "OFFLINE".
+          const code = payload.exit_code;
+          const why = payload.message
+            || `Terminal runtime ended${code === null || code === undefined ? "" : ` (exit code ${code})`}`;
+          setState("offline", why);
         }
         updateComposer();
         break;
@@ -1498,6 +2127,7 @@
       try {
         const snapshot = await api("/api/state");
         applyInterface(snapshot.interface || { mode: interfaceMode });
+        fetchSkills({ force: true });
         if (generationAtRequest === eventGeneration) {
           acceptingInput = Boolean(snapshot.accepting_input);
           inputMode = snapshot.input_mode || "command";
@@ -1518,9 +2148,20 @@
         console.warn("Ignored malformed Jarvis event", error);
       }
     };
-    eventSource.onerror = () => {
+    eventSource.onerror = async () => {
       setConnected(false, "RELINKING");
       updateComposer();
+      if (linkProbeInFlight) return;
+      linkProbeInFlight = true;
+      try {
+        const diagnosis = await classifyLinkFailure();
+        // A permanent cause never recovers on its own, and EventSource would
+        // otherwise retry it forever behind an unchanged "RELINKING".
+        if (diagnosis.permanent) closeEvents();
+        applyLinkDiagnosis(diagnosis);
+      } finally {
+        linkProbeInFlight = false;
+      }
     };
   }
 
@@ -1543,6 +2184,22 @@
     const generationAtSubmit = eventGeneration;
     acceptingInput = false;
     updateComposer();
+
+    const voice = window.liveVoice;
+    if (
+      voice && voice.active && !attachment &&
+      !["confirmation", "answer"].includes(inputMode)
+    ) {
+      // While live voice mode is active the conversation belongs to the voice
+      // agent (it falls back to the main agent when no transport is open).
+      // Confirmations and attachments still go to the main agent above.
+      elements.prompt.value = "";
+      autoSizeComposer();
+      await voice.submitVoiceTurn(text);
+      updateComposer();
+      return;
+    }
+
     try {
       await api("/api/input", { text, display_text: displayText });
       elements.prompt.value = "";
@@ -1729,6 +2386,7 @@
   }
 
   elements.terminalToggle.addEventListener("click", () => toggleTerminal());
+  elements.audioToggle?.addEventListener("click", () => testAudioChime());
   elements.closeTerminal.addEventListener("click", () => toggleTerminal(false));
 
   elements.copyTerminal.addEventListener("click", async () => {
@@ -1922,17 +2580,75 @@
     }
   });
 
+  //
+  // Publish the header's real height as `--header-h`.
+  //
+  // The stylesheet sets it per breakpoint, but the header is not a fixed height:
+  // below 720px the action row wraps to a second line when the reconnect
+  // control appears, and no px value survives every font metric and zoom level.
+  // Every drawer anchors off this variable, so measuring it here is what keeps
+  // them below the header instead of across it. Without this the stylesheet's
+  // breakpoint values still apply and the layout is merely approximate, never
+  // broken: measurement only ever refines it.
+  function syncHeaderHeight() {
+    const header = document.querySelector(".topbar");
+    if (!header) return;
+    const publish = () => {
+      const height = Math.round(header.getBoundingClientRect().height);
+      if (height > 0) {
+        document.documentElement.style.setProperty("--header-h", `${height}px`);
+      }
+    };
+    publish();
+    if (typeof ResizeObserver === "function") {
+      new ResizeObserver(publish).observe(header);
+    }
+    window.addEventListener("resize", publish);
+    window.addEventListener("orientationchange", publish);
+  }
+
+  syncHeaderHeight();
+
+  // Keys typed into a field belong to that field, never to a global shortcut.
+  function isTypingTarget(node) {
+    if (!node || !node.tagName) return false;
+    if (node.isContentEditable) return true;
+    return ["INPUT", "TEXTAREA", "SELECT"].includes(node.tagName);
+  }
+
   document.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       togglePalette();
     } else if (event.key === "Escape" && paletteOpen()) {
       togglePalette(false);
+    } else if (event.key === "Escape" && shortcutsOpen()) {
+      toggleShortcuts(false);
     } else if (event.key === "Escape" && elements.terminalDrawer.classList.contains("open")) {
       toggleTerminal(false);
     } else if (event.key === "Escape" && elements.sessionsDrawer.classList.contains("open")) {
       toggleSessions(false);
+    } else if (event.key === "Escape" && sidePanelOpen()) {
+      toggleSidePanel(false);
+    } else if (event.key === "?" && !event.ctrlKey && !event.metaKey && !isTypingTarget(event.target)) {
+      event.preventDefault();
+      toggleShortcuts();
+    } else if (event.key === "/" && !event.ctrlKey && !event.metaKey && !isTypingTarget(event.target)) {
+      event.preventDefault();
+      elements.prompt.focus({ preventScroll: true });
     }
+  });
+
+  // Paste a screenshot straight into the composer. A text paste keeps its
+  // default behaviour; only an image is intercepted.
+  document.addEventListener("paste", (event) => {
+    if (!acceptingInput || attachmentUploading) return;
+    const items = Array.from(event.clipboardData?.items || []);
+    const image = items.find((item) => String(item.type || "").startsWith("image/"));
+    const file = image?.getAsFile();
+    if (!file) return;
+    event.preventDefault();
+    uploadAttachment(file);
   });
 
 
@@ -2004,6 +2720,9 @@
       this.speechEnvelope = [];
       this.speechMix = 0;
       this.speechLevel = 0;
+      // Level reported by the browser's own voice session (Fish Agents or the
+      // realtime socket), independent of the server's speech envelopes.
+      this.voiceLevel = 0;
       this.bands = null;
       this.bandCount = 0;
       this.bandFps = 30;
@@ -2043,11 +2762,71 @@
         error:         { speed: 0.3,  deform: 0.88, energy: 0.68, pulse: 0.6,  color: [255,  51,   0] },
         offline:       { speed: 0.04, deform: 0.08, energy: 0.08, pulse: 0.1,  color: [255,  34,   0] },
       };
+      // Liquid energy core (blob.js). It renders inside this core's frame loop
+      // and is the default stage visual; the 3D hologram stays one click away.
+      this.blob = null;
+      this.displayMode = "hologram";
+      const blobHost = document.getElementById("fluidBlob");
+      if (blobHost && window.FluidBlob) {
+        this.blob = new window.FluidBlob(blobHost, { reducedMotion: this.reducedMotion });
+        if (this.blob.available) this.displayMode = "blob";
+        else this.blob = null;
+      }
+
       this.resizeObserver = new ResizeObserver(() => this.resize());
       this.resizeObserver.observe(canvas.parentElement);
       this.seedGeometry();
       this.bind();
       this.schedule();
+    }
+
+    /** Switch the stage between the liquid blob and the 3D hologram modes. */
+    setDisplayMode(mode) {
+      const next = mode || "blob";
+      this.displayMode = next;
+      const blobMode = next === "blob" && Boolean(this.blob);
+      if (blobMode) {
+        this.canvas.parentElement?.setAttribute("data-core-mode", "blob");
+        this.holo3d?.setSuspended(true);
+        this.blob.setActive(true);
+      } else {
+        this.canvas.parentElement?.setAttribute("data-core-mode", "hologram");
+        this.blob?.setActive(false);
+        this.holo3d?.setSuspended(false);
+        this.holo3d?.setDisplayMode(next);
+      }
+      // The 2D canvas is display:none in blob mode, so its measured size has to
+      // be refreshed explicitly when the hologram takes the stage back.
+      this.resize();
+    }
+
+    resetView() {
+      this.holo3d?.resetView();
+      this.triggerPulse(1.2);
+    }
+
+    triggerPulse(power = 1.5) {
+      this.holo3d?.triggerPulse(power);
+      this.blob?.pulse(power);
+    }
+
+    /**
+     * Voice level from the browser's live-voice analyser. Fed to both the blob
+     * and the hologram, which otherwise only reacts to server speech envelopes.
+     */
+    setVoiceLevel(level, speaking) {
+      const value = Math.max(0, Math.min(1, Number(level) || 0));
+      this.voiceLevel = value;
+      if (this.holo3d) {
+        if (value > 0.02 && speaking) {
+          this.holo3d.speechMix = Math.min(1.0, value * 2.5);
+          this.holo3d.speechLevel = value;
+        } else if (value > 0.08) {
+          this.holo3d.speechMix = Math.min(1.0, value * 2.0);
+          this.holo3d.speechLevel = value;
+        }
+      }
+      if (this.reducedMotion) this.schedule();
     }
 
     bind() {
@@ -2081,7 +2860,15 @@
     }
 
     resize() {
-      const rect = this.canvas.getBoundingClientRect();
+      // Measure the frame rather than the canvas: the canvas is hidden while
+      // the blob owns the stage, which would report a 0x0 box.
+      const frame = this.canvas.parentElement;
+      const measured = (frame || this.canvas).getBoundingClientRect();
+      const own = this.canvas.getBoundingClientRect();
+      const rect = {
+        width: measured.width || own.width,
+        height: measured.height || own.height,
+      };
       this.dpr = Math.min(window.devicePixelRatio || 1, 1.55);
       this.width = Math.max(1, rect.width);
       this.height = Math.max(1, rect.height);
@@ -2093,6 +2880,7 @@
       if (this.holo3d && typeof this.holo3d.resize === "function") {
         this.holo3d.resize(this.width, this.height);
       }
+      if (this.blob) this.blob.resize();
       this.cx = this.width / 2;
       this.cy = this.height / 2 - Math.min(12, this.height * 0.025);
       this.radius = Math.max(92, Math.min(this.width, this.height) * 0.46);
@@ -2136,10 +2924,18 @@
     }
 
     setState(name) {
+      // The blob understands states the 2D profiles do not (speaking, muted,
+      // connecting), so it receives the raw name and falls back on its own.
+      const requested = name;
+      const changed = requested !== this.state;
       if (!this.profiles[name]) name = "working";
       this.state = name;
       if (this.holo3d) {
         this.holo3d.setState(name);
+      }
+      if (this.blob) {
+        this.blob.setState(requested);
+        if (changed) this.pulseForState(requested);
       }
       const profile = this.profiles[name];
       this.target = {
@@ -2153,6 +2949,14 @@
         this.current = { ...this.target, color: [...this.target.color] };
         this.schedule();
       }
+    }
+
+    /** Kick the blob when Jarvis changes gear, hardest when it acts or fails. */
+    pulseForState(name) {
+      if (!this.blob) return;
+      if (name === "acting" || name === "success") this.blob.pulse(1.5);
+      else if (name === "error" || name === "warning") this.blob.pulse(1.2);
+      else this.blob.pulse(0.5);
     }
 
     setSpeaking(payload) {
@@ -2318,6 +3122,27 @@
       this.updateBars(t, dt);
       this.pointer.x = this.mix(this.pointer.x, this.pointer.tx, 0.03 * dt);
       this.pointer.y = this.mix(this.pointer.y, this.pointer.ty, 0.03 * dt);
+      // Let the browser voice level fall away on its own, so one loud frame
+      // does not leave the core lit up.
+      this.voiceLevel = this.mix(this.voiceLevel, 0, Math.min(1, 0.045 * dt));
+
+      if (this.blob && this.blob.active) {
+        const voice = this.voiceLevel;
+        this.blob.setSignals({
+          time: t,
+          energy: this.current.energy,
+          deform: this.current.deform,
+          speed: this.current.speed,
+          pulse: this.current.pulse,
+          // Whichever source is louder: the server's speech envelope or the
+          // browser's live-voice analyser.
+          speech: Math.max(this.speechLevel, voice),
+          speechMix: Math.max(this.speechMix, voice > 0.03 ? Math.min(1, voice * 2.4) : 0),
+          bass: this.bass,
+          bars: this.bars,
+          color: this.current.color,
+        });
+      }
     }
 
     updateBars(t, dt) {
@@ -2375,10 +3200,14 @@
     }
 
     draw(time) {
+      const t = (time - this.startTime) / 1000;
+      if (this.displayMode === "blob" && this.blob && this.blob.active) {
+        this.blob.render(t);
+        return;
+      }
       if (this.holo3d && this.holo3d.isWebGLAvailable) return;
       const ctx = this.ctx;
       if (!ctx) return;
-      const t = (time - this.startTime) / 1000;
       const { energy, speed, deform, pulse } = this.current;
       ctx.clearRect(0, 0, this.width, this.height);
       ctx.save();
@@ -2820,6 +3649,9 @@
   }
 
   const orb = new EnergyCore($("#coreCanvas"));
+  // Exposed alongside `window.liveVoice` so the stage visual can be inspected
+  // and driven from the console.
+  window.energyCore = orb;
   setState("booting");
   setConnected(false, "LINKING");
   updateComposer();
@@ -2829,46 +3661,1291 @@
   updateHud();
   connectEvents();
 
-  // 3D Holographic Core Controls
+  // Core Stage Visualisation Controls (blob + 3D hologram modes)
+  const CORE_MODES = ["blob", "hologram", "orbit", "wireframe", "quantum"];
   const holoButtons = document.querySelectorAll("[data-holo-mode]");
+
+  /** Select a stage mode, falling back to the hologram if the blob is unavailable. */
+  function applyCoreMode(mode) {
+    const resolved = mode === "blob" && !orb.blob ? "hologram" : mode;
+    holoButtons.forEach((b) => b.classList.toggle("is-active", b.dataset.holoMode === resolved));
+    orb.setDisplayMode(resolved);
+    return resolved;
+  }
+
   holoButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
-      const mode = btn.dataset.holoMode;
-      holoButtons.forEach((b) => b.classList.toggle("is-active", b === btn));
-      orb.holo3d?.setDisplayMode(mode);
-      toast(`Hologram Mode: ${mode.toUpperCase()}`);
+      const mode = applyCoreMode(btn.dataset.holoMode);
+      toast(`Core Mode: ${mode.toUpperCase()}`);
     });
   });
+
+  applyCoreMode(orb.displayMode);
 
   const holoResetBtn = document.getElementById("holoResetBtn");
   if (holoResetBtn) {
     holoResetBtn.addEventListener("click", () => {
-      orb.holo3d?.resetView();
-      toast("3D Camera Reset");
+      orb.resetView();
+      toast("Core Perspective Reset");
     });
   }
 
   const holoPulseBtn = document.getElementById("holoPulseBtn");
   if (holoPulseBtn) {
     holoPulseBtn.addEventListener("click", () => {
-      orb.holo3d?.triggerPulse(1.8);
+      orb.triggerPulse(1.8);
     });
   }
 
-  // Keyboard shortcut: Press 'H' (when not in inputs) to cycle hologram modes
+  // Keyboard shortcut: Press 'H' (when not in inputs) to cycle stage modes
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.ctrlKey || e.metaKey) return;
     if (e.key.toLowerCase() === "h") {
-      const modes = ["hologram", "orbit", "wireframe", "quantum"];
-      const currentMode = orb.holo3d?.displayMode || "hologram";
-      const nextMode = modes[(modes.indexOf(currentMode) + 1) % modes.length];
-      holoButtons.forEach((b) => b.classList.toggle("is-active", b.dataset.holoMode === nextMode));
-      orb.holo3d?.setDisplayMode(nextMode);
-      toast(`Hologram Mode: ${nextMode.toUpperCase()}`);
+      const currentMode = orb.displayMode || "blob";
+      const nextMode = CORE_MODES[(CORE_MODES.indexOf(currentMode) + 1) % CORE_MODES.length];
+      toast(`Core Mode: ${applyCoreMode(nextMode).toUpperCase()}`);
     } else if (e.key.toLowerCase() === "r") {
-      orb.holo3d?.resetView();
+      orb.resetView();
     } else if (e.key.toLowerCase() === "p") {
-      orb.holo3d?.triggerPulse(1.8);
+      orb.triggerPulse(1.8);
     }
   });
+
+  // ============================================================
+  // ============================================================
+  // Live Voice Controller (Direct gpt-realtime WebSocket & Audio Streaming)
+  // ============================================================
+
+  const DEFAULT_LIVE_VOICE_SYSTEM_PROMPT =
+    "You are JARVIS (Just A Rather Very Intelligent System), the user's personal, highly capable AI executive aide. " +
+    "You speak directly to the user in a natural, polite, quietly witty, brilliant, British-accented executive voice.\n\n" +
+    "=== YOUR ROLE & ARCHITECTURE ===\n" +
+    "You are the real-time conversational front-of-house Voice AI Agent for Jarvis. " +
+    "You operate in tandem with a silent, autonomous Main Worker Agent running locally on the user's Windows computer.\n" +
+    "1. YOU (Voice AI Agent):\n" +
+    "   - You handle all spoken conversation, Q&A, brainstorming, explanations, and advice.\n" +
+    "   - You speak naturally with crisp, engaging, concise responses (1-3 sentences per turn).\n" +
+    "   - You possess the ability to delegate computer tasks to the Main Worker Agent using your tools.\n" +
+    "2. MAIN WORKER AGENT:\n" +
+    "   - The autonomous desktop worker that sees the screen, clicks buttons, launches applications, " +
+    "types text, runs bash/powershell commands, navigates websites, and writes/debugs code.\n\n" +
+    "=== RULES OF ENGAGEMENT & TOOL CALLING ===\n" +
+    "Rule 1: CASUAL CONVERSATION & Q&A (NO TOOL CALLING)\n" +
+    "   - If the user is chatting, greeting you, asking general knowledge questions, discussing ideas, " +
+    "brainstorming, or joking, talk with them directly and immediately in voice.\n" +
+    "   - Do NOT call any tools for conversation, explanations, or questions.\n\n" +
+    "Rule 2: COMPUTER AUTOMATION & TASK EXECUTION (MUST CALL 'execute_task')\n" +
+    "   - Whenever the user asks you to perform an action on the computer (such as opening an application, " +
+    "opening Notepad, browsing a website, searching Google, playing music, creating/editing files, running terminal commands, " +
+    "controlling windows, or automating a workflow), you MUST call the 'execute_task' tool immediately.\n" +
+    "   - CRITICAL: You do NOT have hands or direct access to the operating system; only the Main Worker Agent does. " +
+    "NEVER claim, pretend, or say 'I will execute the task for you' or 'Opening now' without ACTUALLY invoking the 'execute_task' tool. " +
+    "Talking about doing it does nothing; you must call 'execute_task'.\n" +
+    "   - Pass the user's exact natural language instruction in the 'task' parameter.\n" +
+    "   - Accompany the tool call with a brief, natural, in-character spoken acknowledgment " +
+    "(e.g. 'Right away, sir. Opening Notepad for you now.', 'On it, sir. Setting the main agent to work on that.').\n\n" +
+    "Rule 3: TASK CANCELLATION & INTERRUPT (CALL 'cancel_task')\n" +
+    "   - If the user says 'stop', 'cancel', 'hold on', 'abort', or 'never mind', immediately call 'cancel_task'.\n\n" +
+    "Rule 4: TASK STATUS & PROGRESS (CALL 'get_task_status')\n" +
+    "   - If the user asks what the agent is currently doing, what step it is on, or how the task is progressing, " +
+    "call 'get_task_status' and summarize the active status concisely aloud.\n\n" +
+    "Rule 5: EXECUTIVE VOICE TONE & BREVITY\n" +
+    "   - Keep spoken turns concise, natural, and punchy. Avoid robotic boilerplate.\n" +
+    "   - Never recite raw markdown tables, URLs, or long blocks of code verbatim unless explicitly asked.";
+
+  // The voice agent's direct actions can legitimately run for a while (a build,
+  // a download, a browser pass). Keep this just under the server-side deadline
+  // in jarvis/live/direct_tools.py so the client gives up first and the model
+  // still hears a truthful result instead of a surprise timeout.
+  const DIRECT_TOOL_TIMEOUT_MS = 110000;
+
+  // How many times an unreachable realtime endpoint is retried before live mode
+  // gives up and tells the user, rather than retrying for as long as it is open.
+  const MAX_RECONNECT_ATTEMPTS = 3;
+
+  const DEFAULT_LIVE_VOICE_TOOLS = [
+    {
+      type: "function",
+      name: "execute_task",
+      description: "Prompt the Jarvis Main Worker Agent to autonomously execute a computer task or action on the Windows computer (e.g. launching applications, opening Notepad, browsing websites, writing code, running terminal commands, manipulating files, clicking UI).",
+      parameters: {
+        type: "object",
+        properties: {
+          task: {
+            type: "string",
+            description: "The exact natural language task or directive for the Main Worker Agent to execute."
+          }
+        },
+        required: ["task"]
+      }
+    },
+    {
+      type: "function",
+      name: "cancel_task",
+      description: "Cancel or interrupt the currently running computer task if the user asks to stop, cancel, or abort.",
+      parameters: {
+        type: "object",
+        properties: {
+          reason: {
+            type: "string",
+            description: "Optional reason for cancelling the task."
+          }
+        }
+      }
+    },
+    {
+      type: "function",
+      name: "get_task_status",
+      description: "Query the current execution status, active action, and progress of the Jarvis Main Worker Agent.",
+      parameters: {
+        type: "object",
+        properties: {}
+      }
+    }
+  ];
+
+  class LiveVoiceController {
+    constructor() {
+      this.active = false;
+      this.muted = false;
+      this.ws = null;
+      this.wsConnected = false;
+      this.audioStream = null;
+      this.audioCtx = null;
+      this.micSource = null;
+      this.processorNode = null;
+      this.playbackAnalyser = null;
+      this.analyser = null;
+      this.dataArray = null;
+      this.recognition = null;
+      this.isRecognizing = false;
+      this.silenceTimer = null;
+      this.rafId = null;
+      this.state = "idle"; // "idle" | "connecting" | "listening" | "thinking" | "speaking" | "muted"
+      this.waveBars = [];
+      this.activeSources = [];
+      this.nextPlayTime = 0;
+      this.echoGuardUntil = 0;
+      this.currentAiTranscript = "";
+      this.recentUserSpeech = "";
+      this.modelName = "gpt-realtime";
+      // Empty until /api/live/config says otherwise. A baked-in placeholder URL
+      // made live mode open a socket to nothing and retry it forever; with no
+      // endpoint we now say so instead of pretending to listen.
+      this.wsUrl = "";
+      this.reconnectAttempts = 0;
+      this.voiceName = "en-US-Ava:DragonHDLatestNeural";
+      this.systemPrompt = DEFAULT_LIVE_VOICE_SYSTEM_PROMPT;
+      this.tools = DEFAULT_LIVE_VOICE_TOOLS;
+      this.handledCallIds = new Set();
+      // "realtime" = live_voice.ws_url (OpenAI-Realtime compatible endpoint);
+      // "fish" = Fish Audio Agents, whose client tools drive the main worker agent.
+    this.provider = "realtime";
+    this.fishAgentId = "";
+    this.fishSession = null;
+    // Why the hosted agent could not be started, verbatim from the server.
+    this.fishFailure = "";
+      // Names of the actions the voice agent may call directly, from
+      // /api/live/config. Each runs locally through /api/tool/execute.
+      this.directTools = [];
+      this.wsWatchdog = null;
+      this.voiceFallbackWarned = false;
+    }
+
+    isAiSpeaking() {
+      if (this.state === "speaking") return true;
+      if (this.activeSources && this.activeSources.length > 0) return true;
+      if (this.audioCtx && this.audioCtx.currentTime < this.nextPlayTime) return true;
+      if (Date.now() < this.echoGuardUntil) return true;
+      return false;
+    }
+
+    init() {
+      this.waveBars = elements.voiceWave ? Array.from(elements.voiceWave.querySelectorAll("i")) : [];
+      if (elements.liveVoiceToggle) {
+        elements.liveVoiceToggle.addEventListener("click", () => this.toggle());
+      }
+      if (elements.stageVoiceBtn) {
+        elements.stageVoiceBtn.addEventListener("click", () => this.start());
+      }
+      if (elements.voiceMuteBtn) {
+        elements.voiceMuteBtn.addEventListener("click", () => this.toggleMute());
+      }
+      if (elements.voiceBargeinBtn) {
+        elements.voiceBargeinBtn.addEventListener("click", () => this.bargeIn());
+      }
+      if (elements.voiceExitBtn) {
+        elements.voiceExitBtn.addEventListener("click", () => this.stop());
+      }
+
+      // Spacebar for instant Barge-in while Jarvis is speaking
+      window.addEventListener("keydown", (e) => {
+        if (!this.active) return;
+        if (e.code === "Space" && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) {
+          if (this.isAiSpeaking()) {
+            e.preventDefault();
+            this.bargeIn();
+          }
+        }
+      });
+
+      // Clicking holographic canvas / orb interrupts Jarvis if speaking
+      if (elements.holographicCanvas) {
+        elements.holographicCanvas.addEventListener("click", () => {
+          if (this.active && this.isAiSpeaking()) {
+            this.bargeIn();
+          }
+        });
+      }
+
+      // Check if URL specifies #live=true or live query param
+      const hash = window.location.hash;
+      const query = new URLSearchParams(window.location.search);
+      if (hash.includes("live=true") || query.get("live") === "true") {
+        const startOnInteract = () => {
+          this.start();
+          window.removeEventListener("pointerdown", startOnInteract);
+          window.removeEventListener("keydown", startOnInteract);
+        };
+        window.addEventListener("pointerdown", startOnInteract, { once: true });
+        window.addEventListener("keydown", startOnInteract, { once: true });
+        setTimeout(() => this.start(), 350);
+      }
+    }
+
+    async toggle() {
+      if (this.active) {
+        this.stop();
+      } else {
+        await this.start();
+      }
+    }
+
+    async start() {
+      if (this.active) return;
+      unlockAudioEngine();
+
+      this.voiceFallbackWarned = false;
+      this.setState("connecting");
+      document.body.dataset.voiceMode = "active";
+      if (elements.liveVoiceToggle) elements.liveVoiceToggle.classList.add("is-active");
+      if (elements.liveVoiceOverlay) elements.liveVoiceOverlay.hidden = false;
+      if (elements.stageVoiceText) elements.stageVoiceText.textContent = "CONNECTING...";
+      if (elements.voiceCaption) {
+        elements.voiceCaption.textContent = "Connecting to gpt-realtime Live Model…";
+        elements.voiceCaption.className = "voice-caption";
+      }
+
+      // Fetch live model configuration from backend
+      try {
+        const liveCfg = await api("/api/live/config").catch(() => null);
+        if (liveCfg && liveCfg.ok) {
+          if (liveCfg.ws_url) this.wsUrl = liveCfg.ws_url;
+          if (liveCfg.model) this.modelName = liveCfg.model;
+          if (liveCfg.voice) this.voiceName = liveCfg.voice;
+          if (liveCfg.system_prompt) this.systemPrompt = liveCfg.system_prompt;
+          if (liveCfg.tools && Array.isArray(liveCfg.tools) && liveCfg.tools.length > 0) {
+            this.tools = liveCfg.tools;
+          }
+          if (liveCfg.fish_agent_id) {
+            this.fishAgentId = String(liveCfg.fish_agent_id);
+          }
+          if (Array.isArray(liveCfg.direct_tools)) {
+            this.directTools = liveCfg.direct_tools.map(String);
+          }
+        }
+      } catch (e) {
+        console.warn("Could not load /api/live/config, using default config:", e);
+      }
+
+      // Prefer the configured Fish Audio Agents voice agent: it owns the speech
+      // stack (ASR, turn-taking, TTS) and its client tools drive the local main
+      // worker agent through /api/live/execute, /api/interrupt and /api/state.
+      this.fishFailure = "";
+      if (this.fishAgentId) {
+        if (await this.startFishSession()) {
+          this.active = true;
+          this.muted = false;
+          api("/api/live/state", { active: true }).catch(() => {});
+          this.startVisualizerLoop();
+          return;
+        }
+        const reason = this.fishFailure || "the hosted voice agent is unavailable";
+        console.warn("[LiveVoice] Fish Agents unavailable:", reason);
+        if (!this.wsUrl) {
+          // Nothing to fall back to. Say why, and stop - rather than opening a
+          // socket to a placeholder endpoint and retrying it forever.
+          const message = `Live voice is unavailable. ${reason}`;
+          toast("Live voice unavailable - see the caption", "error");
+          if (elements.voiceCaption) {
+            elements.voiceCaption.textContent = message;
+            elements.voiceCaption.className = "voice-caption is-warning";
+          }
+          if (elements.stageVoiceText) elements.stageVoiceText.textContent = message;
+          this.setState("error");
+          return;
+        }
+        console.warn("[LiveVoice] Falling back to the configured realtime endpoint.");
+        toast("Fish voice agent unavailable - falling back to realtime", "warning");
+      }
+
+      // Acquire microphone with hardware/software acoustic echo cancellation
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error("Microphone access is not supported in this browser.");
+        }
+
+        this.audioStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            sampleRate: 24000,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            googEchoCancellation: true,
+            googAutoGainControl: true,
+            googNoiseSuppression: true,
+            googHighpassFilter: true,
+          },
+        });
+      } catch (err) {
+        console.warn("Microphone access notice:", err);
+        toast("Microphone access: " + (err.message || "Permission required"), "warning");
+        this.stop();
+        return;
+      }
+
+      this.active = true;
+      this.muted = false;
+      // Each time live mode starts, the retry budget starts over - otherwise a
+      // previous failed attempt would use up this session's allowance.
+      this.reconnectAttempts = 0;
+      api("/api/live/state", { active: true }).catch(() => {});
+      toast(`Live Voice Mode Active 🎙️ (${this.modelName})`, "info");
+
+      this.setupAudioNodes();
+      this.connectWebSocket();
+      this.setupSpeechRecognition();
+      this.startVisualizerLoop();
+    }
+
+    setupAudioNodes() {
+      try {
+        const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+        this.audioCtx = new AudioCtxClass({ sampleRate: 24000 });
+        if (this.audioCtx.state === "suspended") {
+          this.audioCtx.resume().catch(() => {});
+        }
+
+        // 1. Mic Analysis
+        this.micSource = this.audioCtx.createMediaStreamSource(this.audioStream);
+        this.analyser = this.audioCtx.createAnalyser();
+        this.analyser.fftSize = 64;
+        this.analyser.smoothingTimeConstant = 0.55;
+        this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+        this.micSource.connect(this.analyser);
+
+        // 2. Playback Analyser for incoming AI voice
+        this.playbackAnalyser = this.audioCtx.createAnalyser();
+        this.playbackAnalyser.fftSize = 64;
+        this.playbackAnalyser.smoothingTimeConstant = 0.55;
+
+        // 3. Audio Streaming Node (ScriptProcessor buffer)
+        // Sends 24kHz 16-bit PCM chunks to gpt-realtime
+        const bufferSize = 4096;
+        this.processorNode = this.audioCtx.createScriptProcessor(bufferSize, 1, 1);
+        this.processorNode.onaudioprocess = (e) => {
+          if (!this.active || this.muted || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            return;
+          }
+          // ACOUSTIC ECHO SUPPRESSION:
+          // Never stream microphone audio while Jarvis is speaking or in echo cooldown.
+          if (this.isAiSpeaking()) {
+            return;
+          }
+
+          const inputData = e.inputBuffer.getChannelData(0);
+          const pcm16 = new Int16Array(inputData.length);
+          for (let i = 0; i < inputData.length; i++) {
+            let s = Math.max(-1, Math.min(1, inputData[i]));
+            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+          let binary = "";
+          const bytes = new Uint8Array(pcm16.buffer);
+          for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          const base64Audio = btoa(binary);
+
+          this.ws.send(JSON.stringify({
+            type: "input_audio_buffer.append",
+            audio: base64Audio,
+          }));
+        };
+
+        this.micSource.connect(this.processorNode);
+        const silentGain = this.audioCtx.createGain();
+        silentGain.gain.value = 0;
+        this.processorNode.connect(silentGain);
+        silentGain.connect(this.audioCtx.destination);
+      } catch (err) {
+        console.warn("Audio node setup error:", err);
+      }
+    }
+
+    connectWebSocket() {
+      if (!this.wsUrl) {
+        const message =
+          "No live voice endpoint is configured. Set live_voice.ws_url to your " +
+          "OpenAI-Realtime-compatible relay, or set live_voice.fish_agent_id to " +
+          "use the hosted Fish Audio agent.";
+        console.warn("[LiveVoice] " + message);
+        toast("Live voice is not configured - see the caption", "error");
+        if (elements.voiceCaption) {
+          elements.voiceCaption.textContent = message;
+          elements.voiceCaption.className = "voice-caption is-warning";
+        }
+        this.setState("error");
+        this.stop();
+        return;
+      }
+      try {
+        console.info(`[LiveVoice] Connecting to ${this.modelName} at ${this.wsUrl}`);
+        this.ws = new WebSocket(this.wsUrl);
+
+        // A dead ws_url otherwise looks like a healthy session: the browser's
+        // own speech recognition still fills the caption, so the user sees
+        // "LISTENING" and simply never gets an answer. Say so instead.
+        clearTimeout(this.wsWatchdog);
+        this.wsWatchdog = setTimeout(() => {
+          if (!this.active || this.wsConnected) return;
+          const message =
+            `No response from the live voice endpoint (${this.wsUrl}). ` +
+            "Start your realtime relay, set live_voice.ws_url, or set live_voice.fish_agent_id.";
+          console.warn("[LiveVoice] " + message);
+          toast("Live voice endpoint unreachable - see the caption", "error");
+          if (elements.voiceCaption) {
+            elements.voiceCaption.textContent = message;
+            elements.voiceCaption.className = "voice-caption is-warning";
+          }
+          this.setState("error");
+        }, 5000);
+
+        this.ws.onopen = () => {
+          clearTimeout(this.wsWatchdog);
+          this.wsConnected = true;
+          this.reconnectAttempts = 0;
+          this.setState("listening");
+          if (elements.stageVoiceText) elements.stageVoiceText.textContent = "gpt-realtime ACTIVE";
+          if (elements.voiceCaption) {
+            elements.voiceCaption.textContent = "Listening… Speak naturally with Jarvis (gpt-realtime)";
+            elements.voiceCaption.className = "voice-caption";
+          }
+          toast(`Connected to ${this.modelName} Live Voice`, "success");
+
+          // Send session update with Jarvis system prompt & tools
+          const activeTools = (this.tools && this.tools.length > 0) ? this.tools : DEFAULT_LIVE_VOICE_TOOLS;
+          const sessionPayload = {
+            instructions: this.systemPrompt || DEFAULT_LIVE_VOICE_SYSTEM_PROMPT,
+            tools: activeTools,
+            tool_choice: "auto",
+          };
+          console.info(`[LiveVoice] 🚀 session.update sent with ${activeTools.length} tools`);
+          this.ws.send(JSON.stringify({
+            type: "session.update",
+            session: sessionPayload,
+          }));
+        };
+
+        this.ws.onmessage = (event) => {
+          this.handleServerMessage(event.data);
+        };
+
+        this.ws.onerror = (err) => {
+          console.warn("[LiveVoice] WebSocket error:", err);
+        };
+
+        this.ws.onclose = (ev) => {
+          this.wsConnected = false;
+          if (!this.active) return;
+          console.warn("[LiveVoice] WebSocket closed code:", ev.code);
+          // Bounded retries. An unreachable endpoint used to be retried every
+          // two seconds for as long as live mode stayed open, which spammed the
+          // console and left the UI claiming to listen. Give up and say so.
+          if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            const message =
+              `Lost the live voice endpoint (${this.wsUrl}) after ` +
+              `${MAX_RECONNECT_ATTEMPTS} attempts. Check the relay, or set ` +
+              "live_voice.fish_agent_id to use the hosted Fish Audio agent.";
+            console.warn("[LiveVoice] " + message);
+            toast("Live voice endpoint unreachable - see the caption", "error");
+            if (elements.voiceCaption) {
+              elements.voiceCaption.textContent = message;
+              elements.voiceCaption.className = "voice-caption is-warning";
+            }
+            this.setState("error");
+            this.stop();
+            return;
+          }
+          this.reconnectAttempts += 1;
+          const delay = 1000 * 2 ** (this.reconnectAttempts - 1);
+          console.info(
+            `[LiveVoice] Reconnecting in ${delay}ms ` +
+            `(attempt ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`
+          );
+          setTimeout(() => {
+            if (this.active && (!this.ws || this.ws.readyState === WebSocket.CLOSED)) {
+              this.connectWebSocket();
+            }
+          }, delay);
+        };
+      } catch (err) {
+        console.error("[LiveVoice] Failed to create WebSocket:", err);
+        toast("Live Voice connection error: " + err.message, "error");
+      }
+    }
+
+    /// Start a hosted Fish Audio Agents session. Returns false (without
+    /// touching the microphone) when the agent or the vendored SDK is missing,
+    /// so the caller can fall back to the local realtime path.
+    async startFishSession() {
+      let sdk;
+      try {
+        sdk = await import("/vendor/fish-agent-client.esm.js");
+      } catch (err) {
+        console.warn("[LiveVoice] Fish Agents SDK is not vendored:", err);
+        return false;
+      }
+
+      const clientTools = {
+        execute_task: (params) => this.executeToolCall("execute_task", params || {}),
+        cancel_task: (params) => this.executeToolCall("cancel_task", params || {}),
+        get_task_status: (params) => this.executeToolCall("get_task_status", params || {}),
+      };
+      // Every directly callable Jarvis action gets a handler that runs it
+      // locally. The voice agent names the action itself, so there is no
+      // planning loop and no screenshot round trip in between.
+      for (const name of this.directTools) {
+        if (clientTools[name]) continue;
+        clientTools[name] = (params) => this.executeDirectTool(name, params || {});
+      }
+
+      // Private agents: Jarvis mints a short-lived session token with the API
+      // key it already holds, so the key never reaches the page.
+      let sessionToken = null;
+      try {
+        const resp = await api("/api/voice/session", {});
+        if (resp && resp.ok && resp.session) {
+          sessionToken = resp.session;
+        }
+      } catch (err) {
+        // The server already classified this; carry its hint into the UI so a
+        // real cause (out of credit, beta access) is not buried in a console.
+        const detail = err.message || String(err);
+        this.fishFailure = detail;
+        console.warn("[LiveVoice] Fish session token unavailable:", detail);
+      }
+
+      // No public-agent fallback. These agents are private by default, and this
+      // page is served from a random loopback port, so an `agentId` attempt can
+      // only ever fail with "Origin not allowed" - which told the user nothing
+      // and made a credit problem look like a broken agent.
+      if (!sessionToken) {
+        const detail = this.fishFailure || "the server did not return a session token";
+        console.warn("[LiveVoice] Fish Agents unavailable:", detail);
+        return false;
+      }
+
+      try {
+        this.fishSession = await sdk.AgentSession.start({
+          sessionToken,
+          clientTools,
+          // Long actions (a build, a download, a browser automation pass) run
+          // to their own deadline; the SDK's 15s default would abort them.
+          clientToolTimeoutMs: DIRECT_TOOL_TIMEOUT_MS,
+        });
+      } catch (err) {
+        this.fishSession = null;
+        const detail = (err && err.message) || String(err);
+        this.fishFailure = detail;
+        console.warn("[LiveVoice] Fish session failed:", detail);
+        return false;
+      }
+
+      this.provider = "fish";
+      this.bindFishEvents();
+      this.setState("listening");
+      if (elements.stageVoiceText) elements.stageVoiceText.textContent = "FISH AGENTS ACTIVE";
+      if (elements.voiceCaption) {
+        elements.voiceCaption.textContent = "Listening… Speak naturally with Jarvis (Fish Agents)";
+        elements.voiceCaption.className = "voice-caption";
+      }
+      toast("Connected to Fish Agents Live Voice", "success");
+      return true;
+    }
+
+    /// Mirror Fish Agents session events into the console UI.
+    bindFishEvents() {
+      const session = this.fishSession;
+      if (!session || typeof session.on !== "function") return;
+
+      session.on("modeChange", (mode) => {
+        if (!this.active) return;
+        if (mode === "speaking") this.setState("speaking");
+        else if (mode === "thinking") this.setState("thinking");
+        else this.setState(this.muted ? "muted" : "listening");
+      });
+
+      session.on("userTranscript", ({ text, final }) => {
+        if (!text) return;
+        if (elements.voiceCaption) {
+          elements.voiceCaption.textContent = text;
+          elements.voiceCaption.className = "voice-caption is-user";
+        }
+        if (final) {
+          addMessage("user", text);
+          metrics.userMessages += 1;
+          updateHud();
+        }
+      });
+
+      session.on("agentResponseDelta", ({ text }) => {
+        if (!text) return;
+        if (elements.voiceCaption) {
+          elements.voiceCaption.textContent = text;
+          elements.voiceCaption.className = "voice-caption is-ai";
+        }
+      });
+
+      session.on("agentResponse", ({ text }) => {
+        const spoken = (text || "").trim();
+        if (!spoken) return;
+        addMessage("assistant", spoken);
+        metrics.assistantMessages += 1;
+        updateHud();
+      });
+
+      session.on("toolCallStarted", ({ toolName }) => {
+        addActivity("task", `🎙️ Voice AI Agent called ${toolName}`);
+      });
+
+      session.on("toolCallFailed", ({ toolName, error }) => {
+        const detail = typeof error === "string" ? error : JSON.stringify(error);
+        addActivity("warn", `🎙️ ${toolName} failed: ${detail}`);
+      });
+
+      session.on("error", (err) => {
+        console.warn("[LiveVoice] Fish Agents error:", err);
+      });
+
+      session.on("disconnect", ({ reason }) => {
+        console.info("[LiveVoice] Fish Agents session ended:", reason);
+        if (this.active) this.stop();
+      });
+    }
+
+    handleServerMessage(raw) {
+      if (!this.active || !raw) return;
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch (_) {
+        return;
+      }
+
+      const type = data.type;
+
+      // 1. User starts speaking (Barge-in detected by server)
+      if (type === "input_audio_buffer.speech_started") {
+        if (!this.isAiSpeaking()) {
+          this.setState("listening");
+        }
+      }
+
+      // 2. User stops speaking
+      else if (type === "input_audio_buffer.speech_stopped") {
+        if (!this.isAiSpeaking()) {
+          this.setState("thinking");
+        }
+      }
+
+      // 3. Response creation
+      else if (type === "response.created") {
+        this.setState("speaking");
+        this.currentAiTranscript = "";
+        this.nextPlayTime = this.audioCtx ? this.audioCtx.currentTime : 0;
+        if (this.silenceTimer) clearTimeout(this.silenceTimer);
+        this.recentUserSpeech = "";
+      }
+
+      // 4. Streaming text transcript
+      else if (type === "response.audio_transcript.delta") {
+        this.setState("speaking");
+        if (this.silenceTimer) clearTimeout(this.silenceTimer);
+        this.recentUserSpeech = "";
+        const delta = data.delta || "";
+        this.currentAiTranscript += delta;
+        if (elements.voiceCaption) {
+          elements.voiceCaption.textContent = this.currentAiTranscript;
+          elements.voiceCaption.className = "voice-caption is-ai";
+        }
+      }
+
+      // 5. Raw audio delta chunks (PCM16 24kHz)
+      else if (type === "response.audio.delta") {
+        this.setState("speaking");
+        if (this.silenceTimer) clearTimeout(this.silenceTimer);
+        this.recentUserSpeech = "";
+        const b64 = data.delta || "";
+        if (b64 && this.audioCtx) {
+          this.enqueueAudioChunk(b64);
+        }
+      }
+
+      // 6. Function / Tool calling from gpt-realtime
+      else if (type === "response.function_call_arguments.done") {
+        const callId = data.call_id;
+        const name = data.name;
+        const args = data.arguments;
+        if (callId && name) {
+          this.handleFunctionCall(callId, name, args);
+        }
+      }
+
+      else if (type === "response.output_item.done") {
+        const item = data.item || {};
+        if (item.type === "function_call" && item.call_id && item.name) {
+          this.handleFunctionCall(item.call_id, item.name, item.arguments);
+        }
+      }
+
+      // 7. Response complete
+      else if (type === "response.done" || type === "response.audio.done") {
+        const outputItems = data.response?.output || [];
+        for (const item of outputItems) {
+          if (item && item.type === "function_call" && item.call_id && item.name) {
+            this.handleFunctionCall(item.call_id, item.name, item.arguments);
+          }
+        }
+        if (this.currentAiTranscript.trim()) {
+          addMessage("assistant", this.currentAiTranscript.trim());
+          metrics.assistantMessages += 1;
+          updateHud();
+          this.currentAiTranscript = "";
+        }
+        const remainingTime = Math.max(0, (this.nextPlayTime - (this.audioCtx ? this.audioCtx.currentTime : 0)) * 1000);
+        setTimeout(() => {
+          if (this.active && this.state === "speaking") {
+            // Set 450ms acoustic echo cooldown so room reverb is fully absorbed
+            this.echoGuardUntil = Date.now() + 450;
+            this.setState("listening");
+            if (elements.voiceCaption) {
+              elements.voiceCaption.textContent = "Listening…";
+              elements.voiceCaption.className = "voice-caption";
+            }
+          }
+        }, remainingTime + 80);
+      }
+
+      else if (type === "error") {
+        console.warn("[LiveVoice] Server error:", data.error);
+      }
+    }
+
+    async handleFunctionCall(callId, name, rawArgs) {
+      if (!callId || this.handledCallIds.has(callId)) return;
+      this.handledCallIds.add(callId);
+      if (this.handledCallIds.size > 100) {
+        const first = this.handledCallIds.values().next().value;
+        this.handledCallIds.delete(first);
+      }
+
+      let args = {};
+      try {
+        args = typeof rawArgs === "string" ? JSON.parse(rawArgs) : (rawArgs || {});
+      } catch (err) {
+        console.warn("[LiveVoice] Error parsing function call args:", err, rawArgs);
+      }
+
+      console.info(`[LiveVoice] ⚡ Tool Call received: ${name}`, args);
+      const result = this.directTools.includes(name)
+        ? await this.executeDirectTool(name, args)
+        : await this.executeToolCall(name, args);
+
+      // Return function call output to gpt-realtime
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "function_call_output",
+            call_id: callId,
+            output: JSON.stringify(result),
+          },
+        }));
+        this.ws.send(JSON.stringify({ type: "response.create" }));
+      }
+    }
+
+    /// Run one Jarvis action directly and return its result to the voice agent.
+    ///
+    /// This is the fast path: the voice agent names the action and gets the
+    /// real answer back, with no perceive/think/act loop in between. The result
+    /// is always returned - including failures - because the agent has to be
+    /// able to say out loud what went wrong.
+    async executeDirectTool(name, args) {
+      console.info(`[LiveVoice] ⚡ Direct action: ${name}`, args);
+      addActivity("task", `🎙️ Voice AI Agent ran ${name}`);
+      let body;
+      try {
+        const response = await fetch("/api/tool/execute", {
+          method: "POST",
+          headers: { "X-Jarvis-Token": token, "Content-Type": "application/json" },
+          body: JSON.stringify({ tool: name, args: args || {} }),
+        });
+        body = await response.json().catch(() => null);
+        if (!body) {
+          body = { ok: false, error: `HTTP ${response.status}` };
+        }
+      } catch (err) {
+        body = { ok: false, error: `request failed: ${err.message}` };
+      }
+
+      if (body.ok) {
+        addActivity("info", `✅ ${name}: ${String(body.result || "done").slice(0, 200)}`);
+        return { ok: true, tool: name, result: body.result || "" };
+      }
+      const reason = body.error || "the action failed";
+      addActivity("warn", `⚠️ ${name}: ${String(reason).slice(0, 200)}`);
+      return { ok: false, tool: name, error: reason };
+    }
+
+    /// Run one tool call locally and return its result. Shared by both
+    /// transports: the realtime socket and the Fish Agents client tools.
+    async executeToolCall(name, args) {
+      console.info(`[LiveVoice] ⚡ Tool Call: ${name}`, args);
+      let result = { status: "success" };
+
+      if (name === "execute_task") {
+        const task = (args.task || "").trim();
+        if (task) {
+          toast(`🤖 Voice Agent prompted Main Agent: "${task}"`, "info");
+          addActivity("task", `🎙️ Voice AI Agent prompted Main Agent: "${task}"`);
+          addMessage("user", `🎙️ [Voice Directive]: ${task}`);
+
+          try {
+            const resp = await api("/api/live/execute", { task });
+            if (resp && resp.ok) {
+              result = {
+                status: "success",
+                message: `Task '${task}' successfully launched. The Jarvis Main Worker Agent is now actively executing on the Windows machine.`,
+              };
+            } else {
+              result = {
+                status: "busy",
+                message: resp?.message || "Main Worker Agent is currently busy with another directive.",
+              };
+            }
+          } catch (err) {
+            result = {
+              status: "error",
+              message: `Could not launch task: ${err.message}`,
+            };
+          }
+        } else {
+          result = { status: "error", message: "Task description was empty." };
+        }
+      } else if (name === "cancel_task") {
+        toast("Interrupting active computer task...", "warning");
+        addActivity("warn", "🎙️ Voice AI Agent requested task cancellation");
+        try {
+          const resp = await api("/api/interrupt", {});
+          result = { status: "cancelling", message: resp.message || "Interrupt requested for the active task." };
+        } catch (err) {
+          result = { status: "error", message: err.message };
+        }
+      } else if (name === "get_task_status") {
+        try {
+          const state = await api("/api/state");
+          result = {
+            status: "ok",
+            agent_state: state.state,
+            accepting_input: state.accepting_input,
+            input_mode: state.input_mode,
+          };
+        } catch (err) {
+          result = { status: "error", message: err.message };
+        }
+      } else {
+        result = { status: "error", message: `Unknown tool: ${name}` };
+      }
+
+      return result;
+    }
+
+    enqueueAudioChunk(base64Data) {
+      try {
+        const binary = atob(base64Data);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        const int16 = new Int16Array(bytes.buffer);
+        const float32 = new Float32Array(int16.length);
+        for (let i = 0; i < int16.length; i++) {
+          float32[i] = int16[i] / 32768.0;
+        }
+
+        const buffer = this.audioCtx.createBuffer(1, float32.length, 24000);
+        buffer.copyToChannel(float32, 0);
+
+        const source = this.audioCtx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(this.playbackAnalyser);
+        this.playbackAnalyser.connect(this.audioCtx.destination);
+
+        const now = this.audioCtx.currentTime;
+        const playTime = Math.max(now, this.nextPlayTime);
+        source.start(playTime);
+        this.nextPlayTime = playTime + buffer.duration;
+        this.activeSources.push(source);
+
+        source.onended = () => {
+          const idx = this.activeSources.indexOf(source);
+          if (idx !== -1) this.activeSources.splice(idx, 1);
+        };
+      } catch (err) {
+        console.warn("[LiveVoice] Error playing audio chunk:", err);
+      }
+    }
+
+    setupSpeechRecognition() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        console.info("Native SpeechRecognition not available in this browser engine.");
+        return;
+      }
+
+      try {
+        const recog = new SpeechRecognition();
+        recog.continuous = true;
+        recog.interimResults = true;
+        recog.lang = "en-US";
+        recog.maxAlternatives = 1;
+
+        recog.onstart = () => {
+          this.isRecognizing = true;
+        };
+
+        recog.onresult = (event) => {
+          if (!this.active || this.muted) return;
+          // ACOUSTIC ECHO SUPPRESSION:
+          // Discard speech recognition events while Jarvis is speaking or during echo cooldown.
+          // This stops the microphone from picking up and transcribing Jarvis's own voice from the speakers.
+          if (this.isAiSpeaking()) {
+            if (this.silenceTimer) clearTimeout(this.silenceTimer);
+            this.recentUserSpeech = "";
+            return;
+          }
+
+          let interimTranscript = "";
+          let finalTranscript = "";
+
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            const transcript = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              finalTranscript += transcript;
+            } else {
+              interimTranscript += transcript;
+            }
+          }
+
+          const currentSpeech = (finalTranscript || interimTranscript).trim();
+          if (currentSpeech) {
+            this.setState("listening");
+            if (elements.voiceCaption) {
+              elements.voiceCaption.textContent = `"${currentSpeech}"`;
+              elements.voiceCaption.className = "voice-caption is-user";
+            }
+
+            if (this.silenceTimer) clearTimeout(this.silenceTimer);
+
+            if (finalTranscript.trim()) {
+              this.recentUserSpeech = finalTranscript.trim();
+              this.silenceTimer = setTimeout(() => {
+                if (!this.isAiSpeaking() && this.recentUserSpeech) {
+                  const heard = this.recentUserSpeech;
+                  addMessage("user", heard);
+                  metrics.userMessages += 1;
+                  updateHud();
+                  this.recentUserSpeech = "";
+                  this.deliverVoiceTurn(heard);
+                }
+              }, 400);
+            }
+          }
+        };
+
+        recog.onerror = (event) => {
+          if (event.error === "no-speech") return;
+          console.warn("Speech recognition notice:", event.error);
+        };
+
+        recog.onend = () => {
+          this.isRecognizing = false;
+          if (this.active && !this.muted) {
+            try {
+              recog.start();
+            } catch (_) {}
+          }
+        };
+
+        recog.start();
+        this.recognition = recog;
+      } catch (err) {
+        console.warn("SpeechRecognition init error:", err);
+      }
+    }
+
+    async submitVoiceTurn(text) {
+      if (!this.active || !text || !text.trim()) return;
+      const clean = text.trim();
+      this.setState("thinking");
+      if (elements.voiceCaption) {
+        elements.voiceCaption.textContent = `"${clean}"`;
+        elements.voiceCaption.className = "voice-caption is-user";
+      }
+
+      addMessage("user", clean);
+      metrics.userMessages += 1;
+      updateHud();
+
+      // Typed input carries no audio, so force a text turn on the realtime path.
+      await this.deliverVoiceTurn(clean, true);
+    }
+
+    /// Hand a turn to whichever transport owns the live conversation.
+    ///
+    /// In live mode user speech belongs to the live model, so the local speech
+    /// recognition above is UI-only while a transport is open. With no
+    /// transport, the utterance is routed to the normal Jarvis agent instead of
+    /// being dropped (which is what made a dead ws_url look like silence).
+    async deliverVoiceTurn(text, forceText = false) {
+      const clean = (text || "").trim();
+      if (!clean) return;
+
+      if (this.fishSession) {
+        try {
+          this.fishSession.sendUserMessage(clean, { audio: true });
+          return;
+        } catch (err) {
+          console.warn("[LiveVoice] Fish sendUserMessage failed:", err);
+        }
+      }
+
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        if (!forceText) return; // the audio already reached the model
+        this.ws.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: clean }],
+          },
+        }));
+        this.ws.send(JSON.stringify({ type: "response.create" }));
+        return;
+      }
+
+      if (!this.voiceFallbackWarned) {
+        this.voiceFallbackWarned = true;
+        console.warn("[LiveVoice] No live voice transport; routing speech to the main agent.");
+        toast("Live voice endpoint unreachable - routing speech to Jarvis", "warning");
+      }
+      try {
+        await api("/api/input", {
+          text: clean,
+          display_text: `🎙️ [Live Voice]: ${clean}`,
+        });
+      } catch (err) {
+        console.warn("[LiveVoice] Voice fallback failed:", err);
+      }
+    }
+
+    bargeIn(notify = true) {
+      this.activeSources.forEach((s) => {
+        try { s.stop(); } catch (_) {}
+      });
+      this.activeSources = [];
+      if (this.audioCtx) this.nextPlayTime = this.audioCtx.currentTime;
+      this.echoGuardUntil = 0; // Immediate reset so user can speak right away
+
+      if (this.fishSession) {
+        try { this.fishSession.interrupt(); } catch (_) {}
+      } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: "response.cancel" }));
+      }
+
+      if (this.silenceTimer) clearTimeout(this.silenceTimer);
+      this.recentUserSpeech = "";
+      stopSpeechAudio();
+      clearSpeechOverlay();
+      api("/api/interrupt", {}).catch(() => {});
+      this.setState("listening");
+      if (elements.voiceCaption) {
+        elements.voiceCaption.textContent = "Listening…";
+        elements.voiceCaption.className = "voice-caption";
+      }
+      if (notify) toast("Interrupted Jarvis (Barge-in ⚡)", "info");
+    }
+
+    toggleMute() {
+      this.muted = !this.muted;
+      if (this.audioStream) {
+        this.audioStream.getAudioTracks().forEach((track) => {
+          track.enabled = !this.muted;
+        });
+      }
+      if (this.fishSession) {
+        try { this.fishSession.setMicMuted(this.muted); } catch (_) {}
+      }
+      if (this.muted) {
+        this.setState("muted");
+        if (elements.voiceMuteIcon) elements.voiceMuteIcon.textContent = "🔇";
+        if (elements.voiceMuteLabel) elements.voiceMuteLabel.textContent = "UNMUTE";
+        toast("Microphone muted", "warning");
+      } else {
+        this.setState("listening");
+        if (elements.voiceMuteIcon) elements.voiceMuteIcon.textContent = "🎙️";
+        if (elements.voiceMuteLabel) elements.voiceMuteLabel.textContent = "MUTE";
+        toast("Microphone unmuted", "info");
+      }
+    }
+
+    stop() {
+      this.active = false;
+      api("/api/live/state", { active: false }).catch(() => {});
+      clearTimeout(this.wsWatchdog);
+      this.wsWatchdog = null;
+      this.voiceFallbackWarned = false;
+      if (this.fishSession) {
+        try { this.fishSession.end(); } catch (_) {}
+        this.fishSession = null;
+      }
+      this.provider = "realtime";
+      this.bargeIn(false);
+      if (this.silenceTimer) clearTimeout(this.silenceTimer);
+      if (this.ws) {
+        try { this.ws.close(); } catch (_) {}
+        this.ws = null;
+      }
+      if (this.recognition) {
+        try { this.recognition.abort(); } catch (_) {}
+        this.recognition = null;
+      }
+      if (this.processorNode) {
+        try { this.processorNode.disconnect(); } catch (_) {}
+        this.processorNode = null;
+      }
+      if (this.audioStream) {
+        this.audioStream.getTracks().forEach((t) => t.stop());
+        this.audioStream = null;
+      }
+      if (this.audioCtx) {
+        try { this.audioCtx.close(); } catch (_) {}
+        this.audioCtx = null;
+      }
+      if (this.rafId) {
+        cancelAnimationFrame(this.rafId);
+        this.rafId = null;
+      }
+      document.body.removeAttribute("data-voice-mode");
+      if (elements.liveVoiceToggle) elements.liveVoiceToggle.classList.remove("is-active");
+      if (elements.liveVoiceOverlay) elements.liveVoiceOverlay.hidden = true;
+      if (elements.stageVoiceText) elements.stageVoiceText.textContent = "LIVE VOICE (gpt-realtime)";
+      this.setState("idle");
+      toast("Live Voice Mode closed", "info");
+    }
+
+    setState(stateName) {
+      this.state = stateName;
+      if (!elements.liveVoiceBadge) return;
+      elements.liveVoiceBadge.classList.remove("is-speaking", "is-thinking", "is-muted");
+      if (stateName === "speaking") elements.liveVoiceBadge.classList.add("is-speaking");
+      if (stateName === "thinking") elements.liveVoiceBadge.classList.add("is-thinking");
+      if (stateName === "muted") elements.liveVoiceBadge.classList.add("is-muted");
+
+      if (elements.liveVoiceStateText) {
+        elements.liveVoiceStateText.textContent = stateName.toUpperCase();
+      }
+    }
+
+    startVisualizerLoop() {
+      const updateVisualizer = () => {
+        if (!this.active) return;
+
+        let level = 0;
+        let spectrum = null;
+        if (this.provider === "fish" && this.fishSession) {
+          // Fish Agents owns the audio graph; read its FFT for the visualiser.
+          try {
+            spectrum = this.state === "speaking"
+              ? this.fishSession.getOutputFrequencyData()
+              : this.fishSession.getInputFrequencyData();
+            if (spectrum && spectrum.length) {
+              let sum = 0;
+              for (let i = 0; i < spectrum.length; i++) sum += spectrum[i];
+              level = sum / (spectrum.length * 255);
+            }
+          } catch (_) {
+            level = 0;
+          }
+        } else if (this.state === "speaking" && this.playbackAnalyser) {
+          const pbData = new Uint8Array(this.playbackAnalyser.frequencyBinCount);
+          this.playbackAnalyser.getByteFrequencyData(pbData);
+          let sum = 0;
+          for (let i = 0; i < pbData.length; i++) sum += pbData[i];
+          level = sum / (pbData.length * 255);
+          spectrum = pbData;
+        } else if (this.analyser && this.dataArray && !this.muted) {
+          this.analyser.getByteFrequencyData(this.dataArray);
+          let sum = 0;
+          for (let i = 0; i < this.dataArray.length; i++) sum += this.dataArray[i];
+          level = sum / (this.dataArray.length * 255);
+          spectrum = this.dataArray;
+        }
+
+        // Drive the wave bars
+        if (this.waveBars.length > 0) {
+          this.waveBars.forEach((bar, idx) => {
+            let barH = 4;
+            if (this.state === "speaking") {
+              barH = Math.sin(Date.now() * 0.018 + idx * 0.45) * 9 + 11;
+            } else if (this.state === "thinking") {
+              barH = Math.sin(Date.now() * 0.008 + idx * 0.3) * 6 + 8;
+            } else if (level > 0.02) {
+              const bins = (spectrum && spectrum.length) ? spectrum : (this.dataArray || []);
+              const freqIdx = Math.min(bins.length - 1, Math.floor((idx / this.waveBars.length) * bins.length));
+              const freqVal = (bins[freqIdx] || 0) / 255;
+              barH = Math.max(3, freqVal * 22);
+            }
+            bar.style.height = `${Math.min(22, Math.max(3, barH))}px`;
+          });
+        }
+
+        // Drive the stage core with voice energy. Routing through EnergyCore
+        // means the blob and the 3D hologram both react to a live session.
+        if (orb) {
+          orb.setVoiceLevel(level, this.state === "speaking");
+        }
+
+        this.rafId = requestAnimationFrame(updateVisualizer);
+      };
+
+      this.rafId = requestAnimationFrame(updateVisualizer);
+    }
+  }
+
+  const liveVoice = new LiveVoiceController();
+  window.liveVoice = liveVoice;
+  liveVoice.init();
 })();

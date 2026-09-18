@@ -1,6 +1,8 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from jarvis.config import Config
 from jarvis.macro import (
@@ -9,7 +11,6 @@ from jarvis.macro import (
     MacroPlayer,
     MacroRecorder,
     MacroStep,
-    get_macro_manager,
 )
 from jarvis.macro.recorder import RawEvent
 from jarvis.tools import registry
@@ -19,7 +20,15 @@ from jarvis.tools.schema import ACTIONS_BY_NAME
 class MacroRecorderTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.mgr = get_macro_manager(storage_dir=Path(self.temp_dir.name))
+        self.mgr = MacroManager(storage_dir=Path(self.temp_dir.name))
+        for patcher in (
+            patch("jarvis.macro.manager._GLOBAL_MACRO_MGR", self.mgr),
+            patch("jarvis.memory.manager.get_memory_manager"),
+            patch.dict("sys.modules", {"pyautogui": Mock(PAUSE=0.1)}),
+            patch("jarvis.macro.player.time.sleep"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.player = MacroPlayer(macro_manager=self.mgr)
         self.recorder = MacroRecorder(macro_manager=self.mgr)
 
@@ -167,6 +176,27 @@ class MacroRecorderTests(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(len(executed_args), 1)
         self.assertEqual(executed_args[0]["text"], "User 42 requested quantum_core.")
+
+    def test_player_restores_pause_on_success_failure_and_cancellation(self):
+        import pyautogui
+
+        macro = Macro(name="pause_check", description="Pause restoration", steps=[MacroStep(action="type", args={})])
+        for outcome in ("success", "failure", "cancelled"):
+            with self.subTest(outcome=outcome):
+                pyautogui.PAUSE = 0.37
+                cancel = threading.Event()
+                if outcome == "cancelled":
+                    cancel.set()
+                with patch.object(self.player, "_execute_step") as execute:
+                    def execute_step(*args):
+                        self.assertEqual(pyautogui.PAUSE, 0.025)
+                        if outcome == "failure":
+                            raise RuntimeError("step failed")
+                    execute.side_effect = execute_step
+                    result = self.player.play(macro, speed=2, cancel_event=cancel)
+                    self.assertEqual(result["ok"], outcome == "success")
+                    self.assertEqual(execute.call_count, 0 if outcome == "cancelled" else 1)
+                self.assertEqual(pyautogui.PAUSE, 0.37)
 
     def test_06_tool_action_registry(self):
         self.assertIn("macro", ACTIONS_BY_NAME)

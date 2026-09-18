@@ -67,40 +67,45 @@ class MacroPlayer:
 
         try:
             import pyautogui
-            # Disable pyautogui fail-safe delay for snappy playback
+            # Temporarily reduce the inter-call pause for snappy playback.
+            original_pause = pyautogui.PAUSE
             pyautogui.PAUSE = 0.05 / speed_factor
         except Exception:
             pyautogui = None
 
-        for idx, step in enumerate(macro.steps, start=1):
-            if cancel.is_set():
-                log.warn(f"Macro '{macro.name}' playback interrupted by user at step {idx}.")
-                return {
-                    "ok": False,
-                    "message": f"Playback interrupted at step {idx}/{len(macro.steps)}.",
-                    "steps_executed": executed,
-                    "failed_step_index": idx,
-                    "failed_step": step.to_dict(),
-                }
+        try:
+            for idx, step in enumerate(macro.steps, start=1):
+                if cancel.is_set():
+                    log.warn(f"Macro '{macro.name}' playback interrupted by user at step {idx}.")
+                    return {
+                        "ok": False,
+                        "message": f"Playback interrupted at step {idx}/{len(macro.steps)}.",
+                        "steps_executed": executed,
+                        "failed_step_index": idx,
+                        "failed_step": step.to_dict(),
+                    }
 
-            try:
-                self._execute_step(step, speed_factor, params_dict, pyautogui)
-                executed += 1
-            except Exception as exc:
-                log.warn(f"Step {idx} ({step.summary()}) encountered an error during macro playback: {exc}")
-                return {
-                    "ok": False,
-                    "message": f"Step {idx} failed: {exc}",
-                    "error": str(exc),
-                    "steps_executed": executed,
-                    "failed_step_index": idx,
-                    "failed_step": step.to_dict(),
-                    "macro": macro.name,
-                }
+                try:
+                    self._execute_step(step, speed_factor, params_dict, pyautogui)
+                    executed += 1
+                except Exception as exc:
+                    log.warn(f"Step {idx} ({step.summary()}) encountered an error during macro playback: {exc}")
+                    return {
+                        "ok": False,
+                        "message": f"Step {idx} failed: {exc}",
+                        "error": str(exc),
+                        "steps_executed": executed,
+                        "failed_step_index": idx,
+                        "failed_step": step.to_dict(),
+                        "macro": macro.name,
+                    }
 
-            # Inter-step delay
-            step_delay = max(0.05, step.delay / speed_factor)
-            time.sleep(step_delay)
+                # Inter-step delay
+                step_delay = max(0.05, step.delay / speed_factor)
+                time.sleep(step_delay)
+        finally:
+            if pyautogui is not None:
+                pyautogui.PAUSE = original_pause
 
         log.ok(f"✓ Macro '{macro.name}' completed successfully ({executed} steps).")
         return {

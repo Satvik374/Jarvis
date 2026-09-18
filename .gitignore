@@ -58,3 +58,11 @@ relay_server/relay_state.json
 relay_server/relay_state.json.tmp
 /relay_state.json
 /relay_state.json.tmp
+
+# Codex/ChatGPT OAuth tokens written by `--codex-login`. The file holds live
+# access and refresh tokens, so it must never be committed.
+.codex_tokens.json
+
+# Local tool state and test artefacts.
+.freebuff/
+.pytest_tmp/

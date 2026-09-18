@@ -69,12 +69,26 @@ class FastFillerEngine:
         ("media", re.compile(r"\b(volume|mute|unmute|play|pause|next track|song|music|media)\b", re.I)),
     ]
 
+    _CONVERSATIONAL_PATTERNS = re.compile(
+        r"^(hey|hello|hi|good\s+(morning|afternoon|evening)|howdy|greetings|sup|yo|what's\s+up|"
+        r"how\s+are\s+you|who\s+are\s+you|what\s+can\s+you\s+do|help|tell\s+me\s+a\s+joke|"
+        r"thank\s+you|thanks|goodbye|bye|see\s+you)(\s+(jarvis|there))?[.!?]*$",
+        re.I
+    )
+
     def __init__(self):
         self._last_selected: Dict[str, str] = {}
+
+    def is_conversational(self, task: str) -> bool:
+        """Check if the text is casual conversation rather than an automation task."""
+        clean = (task or "").strip().lower()
+        return bool(self._CONVERSATIONAL_PATTERNS.match(clean))
 
     def predict_intent(self, task: str) -> str:
         """Classify task into high-level intent in sub-millisecond time."""
         clean = (task or "").strip()
+        if self.is_conversational(clean):
+            return "conversation"
         for intent, pattern in self._INTENT_PATTERNS:
             if pattern.search(clean):
                 return intent
@@ -83,6 +97,8 @@ class FastFillerEngine:
     def get_fast_filler(self, task: str) -> str:
         """Return an instant, natural conversational fast-filler response."""
         intent = self.predict_intent(task)
+        if intent == "conversation":
+            return ""
         candidates = self._FILLERS.get(intent, self._FILLERS["general_task"])
 
         # Avoid repeating the exact same filler twice in a row for the same category

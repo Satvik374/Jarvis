@@ -378,11 +378,13 @@ class Agent:
 
                 from .. import mcp
                 from .. import remote
+                from .. import skills
                 from ..tools import connectors
                 from ..tools import tool_synthesis
                 system = (build_system_prompt(memory) + chat_note + agents_note()
                           + connectors.note() + mcp.tools_note() + remote.note(self.cfg)
                           + tool_synthesis.synthesized_tools_prompt_note(task)
+                          + skills.note(task)
                           + plan_note)
 
                 traj = Trajectory(task=task, backend=self.cfg.brain.backend,

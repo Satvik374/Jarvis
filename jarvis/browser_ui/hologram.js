@@ -46,6 +46,9 @@
       this.state = "booting";
       this.displayMode = "hologram"; // "hologram", "orbit", "wireframe", "quantum"
       this.autoOrbit = true;
+      // Suspended while the liquid blob (or another mode) owns the stage, so a
+      // hidden hologram never burns GPU time.
+      this.suspended = false;
 
       // Audio / speech state
       this.speaking = false;
@@ -371,6 +374,15 @@
       this.triggerPulse(1.0);
     }
 
+    /**
+     * Pause rendering while another visualisation owns the stage. Visibility of
+     * the canvas itself is handled by the stage CSS, so this only owns the loop.
+     */
+    setSuspended(suspended) {
+      this.suspended = Boolean(suspended);
+      if (!this.suspended) this.resize();
+    }
+
     setDisplayMode(mode) {
       this.displayMode = mode || "hologram";
       if (this.displayMode === "wireframe") {
@@ -466,6 +478,12 @@
 
       const animate = (currentTime) => {
         requestAnimationFrame(animate);
+
+        // Keep the clock current while paused so resuming does not leap.
+        if (this.suspended || document.hidden) {
+          lastTime = currentTime;
+          return;
+        }
 
         const dt = Math.min(40, currentTime - lastTime) / 16.67;
         lastTime = currentTime;

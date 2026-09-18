@@ -50,6 +50,7 @@ class LiveAudioStream:
         self._noise_floor = 300.0
         self._barge_in_hold = 0
         self._muted = False
+        self._echo_guard_until = 0.0
 
     @property
     def is_running(self) -> bool:
@@ -145,6 +146,7 @@ class LiveAudioStream:
                 break
         self._cancel_event.clear()
         self._is_playing = False
+        self._echo_guard_until = 0.0
 
     def _mic_callback(self, indata, frames, time_info, status) -> None:
         if not self._is_running or self._muted:
@@ -160,6 +162,12 @@ class LiveAudioStream:
             shorts = struct.unpack(f"<{sample_count}h", raw_bytes)
             energy = math.sqrt(sum(s * s for s in shorts) / sample_count)
             self._update_vad(energy)
+
+        # ACOUSTIC ECHO SUPPRESSION:
+        # Do not forward microphone audio to the live model while playing speaker output
+        # or during the post-speech echo guard interval.
+        if self._is_playing or time.time() < self._echo_guard_until:
+            return
 
         # Forward audio to callback
         if self.on_audio_in is not None:
@@ -207,7 +215,9 @@ class LiveAudioStream:
                     try:
                         chunk = self._play_queue.get(timeout=0.1)
                     except queue.Empty:
-                        self._is_playing = False
+                        if self._is_playing:
+                            self._is_playing = False
+                            self._echo_guard_until = time.time() + 0.35
                         continue
 
                     if chunk is None or not self._is_running:

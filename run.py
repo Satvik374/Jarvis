@@ -27,11 +27,35 @@ if sys.platform == "win32":
         import signal
         if hasattr(signal, "SIGBREAK"):
             signal.signal(signal.SIGBREAK, signal.default_int_handler)
+        if hasattr(signal, "SIGINT"):
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+    except Exception:
+        pass
+    try:
+        import _thread
+        from ctypes import wintypes
+
+        _HANDLER = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+        def _ctrl_handler(dwCtrlType: int) -> bool:
+            # 0=CTRL_C_EVENT, 1=CTRL_BREAK_EVENT, 2=CTRL_CLOSE_EVENT
+            if dwCtrlType in (0, 1, 2):
+                try:
+                    import _thread
+                    _thread.interrupt_main()
+                except Exception:
+                    pass
+                return False
+            return False
+
+        _GLOBAL_CTRL_HANDLER = _HANDLER(_ctrl_handler)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(_GLOBAL_CTRL_HANDLER, True)
     except Exception:
         pass
 
 
 import argparse
+import os
 
 
 from jarvis.config import load_config
@@ -41,7 +65,7 @@ from jarvis.utils import logging as log
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Jarvis - local agentic desktop assistant")
     parser.add_argument("task", nargs="*", help="a task to run once, then exit")
-    parser.add_argument("--backend", help="override brain backend (ollama/openai/anthropic/llamacpp)")
+    parser.add_argument("--backend", help="override brain backend (ollama/openai/openrouter/anthropic/llamacpp)")
     parser.add_argument("--model", help="override model name")
     parser.add_argument("--adapter", help="path to a trained LoRA adapter (hf backend)")
     parser.add_argument("--base-url", dest="base_url", help="override backend base URL")
@@ -53,11 +77,25 @@ def main(argv: list[str] | None = None) -> int:
                         help="launch straight into Real-Time Gemini Live Voice Supervisor mode")
     parser.add_argument("--live-model", dest="live_model", help="override live voice model name")
     parser.add_argument("--live-voice", dest="live_voice", help="override live voice name (Aoede/Puck/Charon/Kore/Fenrir)")
+    parser.add_argument("--terminal-live", dest="terminal_live", action="store_true",
+                        help="launch Live Voice Supervisor in the terminal console rather than the browser")
 
     parser.add_argument("--wake", action="store_true", help='launch straight into hands-free mode: say "Hey Jarvis" to command')
     parser.add_argument("--confirm", action="store_true", help="confirm each action")
     parser.add_argument("--steps", type=int, help="max steps per task")
     parser.add_argument("--check", action="store_true", help="run an environment check and exit")
+    parser.add_argument("--codex-login", action="store_true",
+                        help="sign in with ChatGPT via OpenAI Codex OAuth flow (PKCE S256)")
+    parser.add_argument("--codex-status", action="store_true",
+                        help="check OpenAI Codex OAuth session status")
+    parser.add_argument("--codex-logout", action="store_true",
+                        help="log out and remove saved ChatGPT Codex credentials")
+    parser.add_argument("--azure-login", action="store_true",
+                        help="sign in to Microsoft Azure AI Foundry via browser")
+    parser.add_argument("--azure-status", action="store_true",
+                        help="check Microsoft Azure AI Foundry credential status")
+    parser.add_argument("--azure-tts", nargs="?", const="Hello, welcome to Azure AI Foundry!",
+                        help="test Microsoft Azure Cognitive Services Speech TTS synthesis")
     parser.add_argument(
         "--browser",
         action="store_true",
@@ -179,6 +217,63 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return run_check(cfg)
 
+    if args.codex_login:
+        from jarvis.auth import codex_oauth
+        codex_oauth.login()
+        return 0
+
+    if args.codex_status:
+        import time
+        from jarvis.auth import codex_oauth
+        tokens = codex_oauth.load_tokens()
+        if tokens.get("access_token"):
+            exp_in = tokens.get("expires_at", 0.0) - time.time()
+            log.ok(f"OpenAI Codex session active (Source: {tokens.get('source')})")
+            log.info(f"ChatGPT Account ID: {tokens.get('chatgpt_account_id')}")
+            log.info(f"Access Token Expires in: {int(exp_in)} seconds (~{int(exp_in/3600)} hours)")
+        else:
+            log.warn("OpenAI Codex session not found. Run 'python run.py --codex-login' to authenticate.")
+        return 0
+
+    if args.codex_logout:
+        from jarvis.auth import codex_oauth
+        removed = codex_oauth.logout()
+        if removed:
+            log.ok("Logged out of OpenAI Codex. Saved credentials removed.")
+        else:
+            log.info("No active OpenAI Codex session found to log out.")
+        return 0
+
+    if args.azure_login:
+        from jarvis.auth import azure_auth
+        azure_auth.login(tenant_id=getattr(cfg.brain, "azure_tenant_id", None))
+        return 0
+
+    if args.azure_status:
+        from jarvis.auth import azure_auth
+        st = azure_auth.check_auth_status(tenant_id=getattr(cfg.brain, "azure_tenant_id", None))
+        if st.get("authenticated"):
+            log.ok("Microsoft Azure AI Foundry authentication is active and valid.")
+        else:
+            log.warn(f"Microsoft Azure credentials not ready: {st.get('error')}")
+            log.info("Run 'python run.py --azure-login' to sign in via your browser.")
+        return 0
+
+    if args.azure_tts is not None:
+        from jarvis.utils import voice
+        tts_text = args.azure_tts or "Hello, welcome to Azure AI Foundry!"
+        log.info(f"Testing Azure Cognitive Services Speech TTS with: '{tts_text}'")
+        try:
+            wav_data = voice._synthesize_azure_speech(tts_text, cfg.voice)
+            log.ok(f"Successfully synthesized {len(wav_data)} bytes of WAV audio via Azure Speech SDK!")
+            log.info("Playing synthesized speech...")
+            voice._play_wav(wav_data, wait=True)
+            log.ok("Audio playback completed.")
+            return 0
+        except Exception as exc:
+            log.error(f"Azure Speech synthesis failed: {exc}")
+            return 1
+
     if args.browser:
         # The browser is a presentation layer over the regular terminal REPL.
         # Rebuild only the existing runtime overrides for the child session;
@@ -203,6 +298,27 @@ def main(argv: list[str] | None = None) -> int:
 
         initial_task = " ".join(args.task).strip() or None
         return run_browser(child_args=child_args, initial_task=initial_task)
+
+    if (args.live or cfg.live_voice.enabled) and not getattr(args, "terminal_live", False):
+        child_args: list[str] = []
+        for flag, value in (
+            ("--backend", args.backend),
+            ("--model", args.model),
+            ("--adapter", args.adapter),
+            ("--base-url", args.base_url),
+        ):
+            if value:
+                child_args.extend((flag, value))
+        if args.vision:
+            child_args.append("--vision")
+        if args.confirm:
+            child_args.append("--confirm")
+        if args.steps:
+            child_args.extend(("--steps", str(args.steps)))
+
+        from jarvis.browser import run_browser
+        initial_task = " ".join(args.task).strip() or None
+        return run_browser(child_args=child_args, initial_task=initial_task, live_voice=True)
 
     if args.live or cfg.live_voice.enabled:
         from jarvis.live import run_live_mode
@@ -241,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
             result = agent.run(task_str, asker=asker, on_progress=tracker.update_event)
             log.jarvis(result)
             try:
-                voice.speak(result, wait=False)
+                voice.speak(result, wait=True)
             except Exception:
                 pass
             return 0
@@ -335,14 +451,56 @@ def run_check(cfg) -> int:
                      ("sounddevice", "microphone input for voice mode"),
                      ("websockets", "Gemini 3.1 Flash Live Voice streaming"),
                      ("google.auth", "Google Cloud Vertex AI / ADC auth"),
-                     ("kokoro_onnx", "local offline TTS (models/tts/)")]:
+                     ("kokoro_onnx", "local offline TTS (models/tts/)"),
+                     ("azure.cognitiveservices.speech", "Microsoft Azure Cognitive Services Speech SDK")]:
         (log.ok if _has(mod) else log.info)(
             f"{'found ' if _has(mod) else 'absent'} {mod:<14} - {why}")
 
     print()
     log.info(f"backend = {cfg.brain.backend}, model = {cfg.brain.model}")
-    if cfg.brain.backend == "ollama":
+    if cfg.brain.backend == "gemini":
+        if cfg.brain.api_key:
+            log.ok(f"Gemini API key configured for model {cfg.brain.model}")
+        else:
+            log.info(f"Gemini Vertex AI ADC backend for model {cfg.brain.model}")
+    elif cfg.brain.backend in {"openrouter", "openai"}:
+        if cfg.brain.api_key:
+            masked = cfg.brain.api_key[:8] + "..." + cfg.brain.api_key[-4:] if len(cfg.brain.api_key) > 12 else "***"
+            log.ok(f"{cfg.brain.backend.title()} API key configured ({masked}) for model {cfg.brain.model}")
+        else:
+            log.warn(f"No API key configured for {cfg.brain.backend} backend.")
+    elif cfg.brain.backend == "ollama":
         _check_ollama(cfg)
+    elif cfg.brain.backend in {"codex", "openai-codex", "chatgpt"}:
+        from jarvis.auth import codex_oauth
+        tokens = codex_oauth.load_tokens()
+        if tokens.get("access_token"):
+            log.ok(f"OpenAI Codex OAuth session active (Account: {tokens.get('chatgpt_account_id') or 'detected'}) for model {cfg.brain.model}")
+        else:
+            log.warn("OpenAI Codex session not found. Run 'python run.py --codex-login' to sign in with ChatGPT.")
+    elif cfg.brain.backend in {"foundry", "azure", "azure-foundry", "azure_foundry", "foundry-agent"}:
+        endpoint = getattr(cfg.brain, "foundry_endpoint", None) or cfg.brain.base_url or "https://satviksingh-resource.services.ai.azure.com/api/projects/satviksingh"
+        agent = getattr(cfg.brain, "foundry_agent_name", None) or cfg.brain.model or "gpt-6"
+        version = getattr(cfg.brain, "foundry_agent_version", None) or "1"
+        log.ok(f"Microsoft Foundry Agent configured: {agent} (v{version}) at {endpoint}")
+        from jarvis.auth import azure_auth
+        st = azure_auth.check_auth_status(tenant_id=getattr(cfg.brain, "azure_tenant_id", None))
+        if st.get("authenticated"):
+            log.ok("Azure credentials active (DefaultAzureCredential)")
+        elif os.environ.get("AZURE_API_KEY") or os.environ.get("AZURE_AI_KEY") or (cfg.brain.api_key and not (cfg.brain.api_key.startswith("sk-or-") or cfg.brain.api_key.startswith("AIza"))):
+            log.ok("Azure API key configured")
+        else:
+            log.info("Azure credentials will auto-authenticate via interactive browser sign-in on first request, or run 'python run.py --azure-login'.")
+
+    # Check Azure Cognitive Services Speech status
+    speech_key = getattr(cfg.voice, "azure_speech_key", "") or os.environ.get("AZURE_SPEECH_KEY") or os.environ.get("SPEECH_KEY")
+    speech_voice = getattr(cfg.voice, "azure_speech_voice", "en-US-OnyxTurboMultilingualNeural")
+    speech_endpoint = getattr(cfg.voice, "azure_speech_endpoint", "https://satviksingh-resource.cognitiveservices.azure.com/")
+    if speech_key:
+        masked_k = speech_key[:4] + "..." + speech_key[-4:] if len(speech_key) > 8 else "***"
+        log.ok(f"Azure Speech TTS active (engine={cfg.voice.engine}, voice={speech_voice}, key={masked_k}) at {speech_endpoint}")
+    elif cfg.voice.engine in {"azure", "azure_speech", "foundry"}:
+        log.info(f"Azure Speech TTS selected (voice={speech_voice}). Set AZURE_SPEECH_KEY in .env to activate.")
 
     print()
     if ok:
@@ -375,12 +533,25 @@ def _check_ollama(cfg) -> None:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        code = main()
+        import os, sys
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code if isinstance(code, int) else 0)
     except KeyboardInterrupt:
         print()
-        sys.exit(0)
+        import os, sys
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
     except SystemExit as exc:
-        sys.exit(exc.code)
+        import os, sys
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(exc.code if isinstance(exc.code, int) else 0)
     except Exception as exc:
         log.error(f"Fatal error: {exc}")
-        sys.exit(1)
+        import os, sys
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)

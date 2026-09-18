@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .files import _expand, _within
-from .system import _threatens_self
+from .system import ExecutionOutput, _threatens_self
 
 
 @dataclass
@@ -44,6 +44,7 @@ class InteractiveSession:
         self.last_used = time.time()
         self.commands_run = 0
         self._lock = threading.Lock()
+        self._closed = False
 
         # Build startup command
         if self.shell_type in ("powershell", "pwsh"):
@@ -93,13 +94,13 @@ class InteractiveSession:
             self._out_queue.put(None)  # Process terminated marker
 
     def is_alive(self) -> bool:
-        return self.proc.poll() is None
+        return not self._closed and self.proc.poll() is None
 
-    def execute(self, command: str, timeout: float = 30.0) -> str:
+    def execute(self, command: str, timeout: float = 30.0) -> ExecutionOutput:
         """Run a command inside the persistent session and return output up to sentinel."""
         with self._lock:
             if not self.is_alive():
-                return f"session '{self.name}' has terminated (exit code {self.proc.returncode})"
+                return ExecutionOutput(f"session '{self.name}' has terminated (exit code {self.proc.returncode})", ok=False)
 
             self.last_used = time.time()
             self.commands_run += 1
@@ -125,56 +126,59 @@ class InteractiveSession:
                 full_input = f"{cmd_clean}\necho '{token}'\n"
 
             try:
-                if self.proc.stdin:
-                    self.proc.stdin.write(full_input)
-                    self.proc.stdin.flush()
+                if self.proc.stdin is None:
+                    raise BrokenPipeError("session stdin is unavailable")
+                self.proc.stdin.write(full_input)
+                self.proc.stdin.flush()
             except Exception as exc:
-                return f"failed to write to session stdin: {exc}"
+                self.close()
+                return ExecutionOutput(f"failed to write to session stdin: {exc}", ok=False)
 
-            # Read until sentinel is seen or timeout expires
+            # Only the sentinel proves completion; partial/empty output does not.
             collected: List[str] = []
-            deadline = time.time() + max(1.0, timeout)
+            deadline = time.monotonic() + max(1.0, timeout)
+            failure = ""
+            completed = False
 
-            while time.time() < deadline:
+            while time.monotonic() < deadline:
                 try:
                     line = self._out_queue.get(timeout=0.1)
                 except queue.Empty:
                     if not self.is_alive():
-                        collected.append(f"\n[session exited with code {self.proc.returncode}]")
+                        failure = f"session exited with code {self.proc.returncode} before command completed"
                         break
                     continue
 
                 if line is None:
-                    collected.append(f"\n[session exited with code {self.proc.returncode}]")
+                    failure = f"session output closed before command completed (exit code {self.proc.poll()})"
                     break
 
                 if token in line:
-                    # Sentinel found: command completed
+                    completed = True
                     break
 
                 collected.append(line)
 
             output = "".join(collected).strip()
-            if not output and self.is_alive():
-                return "(command executed successfully with no output)"
-            return output[:8000]
+            if not completed:
+                failure = failure or f"command timed out after {timeout}s; session closed"
+                # Never reuse a stream whose previous command is still pending.
+                self.close()
+                return ExecutionOutput(failure + ("\n" + output[:8000] if output else ""), ok=False)
+            return ExecutionOutput(output[:8000] or "(command completed with no output)")
 
     def close(self) -> None:
-        """Gracefully terminate the session subprocess."""
-        if not self.is_alive():
+        """Invalidate the session even if terminating the subprocess fails."""
+        self._closed = True
+        if self.proc.poll() is not None:
             return
         try:
-            if self.proc.stdin:
-                try:
-                    self.proc.stdin.write("exit\n")
-                    self.proc.stdin.flush()
-                except Exception:
-                    pass
             self.proc.terminate()
             self.proc.wait(timeout=2.0)
         except Exception:
             try:
                 self.proc.kill()
+                self.proc.wait(timeout=2.0)
             except Exception:
                 pass
 
@@ -186,39 +190,45 @@ class SessionManager:
         self._sessions: Dict[str, InteractiveSession] = {}
         self._lock = threading.Lock()
 
-    def start(self, name: str = "default", shell_type: str = "powershell", cwd: Optional[str] = None) -> str:
+    def start(self, name: str = "default", shell_type: str = "powershell", cwd: Optional[str] = None) -> ExecutionOutput:
         s_name = (name or "default").strip().lower()
         with self._lock:
             if s_name in self._sessions and self._sessions[s_name].is_alive():
-                return f"session '{s_name}' is already running ({self._sessions[s_name].shell_type}, PID {self._sessions[s_name].proc.pid})"
+                return ExecutionOutput(f"session '{s_name}' is already running ({self._sessions[s_name].shell_type}, PID {self._sessions[s_name].proc.pid})")
 
             # Clean up old dead instance if present
             if s_name in self._sessions:
                 self._sessions[s_name].close()
 
-            session = InteractiveSession(name=s_name, shell_type=shell_type, cwd=cwd)
+            try:
+                session = InteractiveSession(name=s_name, shell_type=shell_type, cwd=cwd)
+            except Exception as exc:
+                return ExecutionOutput(f"failed to start session '{s_name}': {exc}", ok=False)
             self._sessions[s_name] = session
-            return f"started persistent session '{s_name}' ({shell_type}, PID {session.proc.pid})"
+            return ExecutionOutput(f"started persistent session '{s_name}' ({shell_type}, PID {session.proc.pid})")
 
-    def execute(self, command: str, name: str = "default", timeout: float = 30.0, blocked: tuple[str, ...] = ()) -> str:
+    def execute(self, command: str, name: str = "default", timeout: float = 30.0, blocked: tuple[str, ...] = ()) -> ExecutionOutput:
         s_name = (name or "default").strip().lower()
         low = command.lower()
         for pat in blocked:
             if pat.lower() in low:
-                return f"refused: command matches blocked pattern '{pat.strip()}'"
+                return ExecutionOutput(f"refused: command matches blocked pattern '{pat.strip()}'", ok=False)
         if _threatens_self(command):
-            return "refused: that command could kill Jarvis or its host process."
+            return ExecutionOutput("refused: that command could kill Jarvis or its host process.", ok=False)
 
         with self._lock:
             session = self._sessions.get(s_name)
             if session is None or not session.is_alive():
                 # Auto-start default session if not started
-                session = InteractiveSession(name=s_name, cwd=str(Path.home()))
+                try:
+                    session = InteractiveSession(name=s_name, cwd=str(Path.home()))
+                except Exception as exc:
+                    return ExecutionOutput(f"failed to start session '{s_name}': {exc}", ok=False)
                 self._sessions[s_name] = session
 
         return session.execute(command, timeout=timeout)
 
-    def list_sessions(self) -> str:
+    def list_sessions(self) -> ExecutionOutput:
         with self._lock:
             active = []
             for name, s in list(self._sessions.items()):
@@ -229,10 +239,10 @@ class SessionManager:
                     self._sessions.pop(name, None)
 
             if not active:
-                return "no active interactive sessions"
-            return f"Active interactive sessions ({len(active)}):\n" + "\n".join(active)
+                return ExecutionOutput("no active interactive sessions")
+            return ExecutionOutput(f"Active interactive sessions ({len(active)}):\n" + "\n".join(active))
 
-    def close(self, name: str = "") -> str:
+    def close(self, name: str = "") -> ExecutionOutput:
         s_name = (name or "").strip().lower()
         with self._lock:
             if not s_name:
@@ -241,14 +251,14 @@ class SessionManager:
                 for s in self._sessions.values():
                     s.close()
                 self._sessions.clear()
-                return f"closed all {count} interactive sessions"
+                return ExecutionOutput(f"closed all {count} interactive sessions")
 
             if s_name not in self._sessions:
-                return f"no session found named '{s_name}'"
+                return ExecutionOutput(f"no session found named '{s_name}'", ok=False)
 
             s = self._sessions.pop(s_name)
             s.close()
-            return f"closed session '{s_name}'"
+            return ExecutionOutput(f"closed session '{s_name}'")
 
 
 # Global singleton
@@ -268,7 +278,7 @@ def session_exec(
     cwd: Optional[str] = None,
     blocked: tuple[str, ...] = (),
     allow: tuple[str, ...] = (),
-) -> str:
+) -> ExecutionOutput:
     """Execute persistent stateful interactive shell/REPL operations.
 
     Operations:
@@ -282,7 +292,7 @@ def session_exec(
 
     if op_clean in ("exec", "run", "eval"):
         if not command.strip():
-            return "session_exec 'exec' needs a command to run"
+            return ExecutionOutput("session_exec 'exec' needs a command to run", ok=False)
         return mgr.execute(command, name=name, timeout=float(timeout or 30), blocked=blocked)
 
     elif op_clean in ("start", "new", "open"):
@@ -294,4 +304,4 @@ def session_exec(
     elif op_clean in ("close", "stop", "kill", "exit"):
         return mgr.close(name=name)
 
-    return f"unknown session_exec op '{op}' - supported: exec, start, list, close"
+    return ExecutionOutput(f"unknown session_exec op '{op}' - supported: exec, start, list, close", ok=False)

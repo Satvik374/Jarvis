@@ -409,7 +409,17 @@ class GeminiLiveClient:
             current_model = candidates[model_idx % len(candidates)]
             self._active_model = current_model
             try:
-                if use_api_key:
+                ws_url = (
+                    getattr(self.config, "ws_url", "")
+                    or os.environ.get("JARVIS_LIVE_WS_URL")
+                    or os.environ.get("JARVIS_REALTIME_URL")
+                    or ""
+                )
+                if ws_url:
+                    uri = ws_url
+                    headers = None
+                    project_id = ""
+                elif use_api_key:
                     uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={api_key}"
                     headers = None
                     project_id = ""
@@ -420,7 +430,7 @@ class GeminiLiveClient:
                     uri = f"wss://{host}/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent"
                     headers = {"Authorization": f"Bearer {token}"}
 
-                log.debug(f"Connecting to Gemini Live WebSocket ({current_model})...")
+                log.debug(f"Connecting to Live WebSocket ({current_model}) at {uri[:40]}...")
 
                 async with websockets.connect(
                     uri,

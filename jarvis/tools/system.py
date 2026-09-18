@@ -39,16 +39,27 @@ def _threatens_self(command: str) -> bool:
     return bool(set(re.findall(r"\b(\d{2,7})\b", low)) & pids)
 
 
+class ExecutionOutput(str):
+    """Keep direct callers' text API while carrying status to action adapters."""
+
+    ok: bool
+
+    def __new__(cls, message: str, ok: bool = True) -> ExecutionOutput:
+        result = super().__new__(cls, message)
+        result.ok = ok
+        return result
+
+
 def run_command(command: str, blocked: tuple[str, ...] = (),
-                timeout: int = 60, cwd: str | None = None) -> str:
+                timeout: int = 60, cwd: str | None = None) -> ExecutionOutput:
     low = command.lower()
     for pat in blocked:
         if pat.lower() in low:
-            return f"refused: command matches blocked pattern '{pat.strip()}'"
+            return ExecutionOutput(f"refused: command matches blocked pattern '{pat.strip()}'", ok=False)
     if _threatens_self(command):
-        return ("refused: that command could kill Jarvis's own terminal or "
-                "process. If you really want those processes stopped, ask "
-                "the user to do it manually (e.g. via Task Manager).")
+        return ExecutionOutput("refused: that command could kill Jarvis's own terminal or "
+                               "process. If you really want those processes stopped, ask "
+                               "the user to do it manually (e.g. via Task Manager).", ok=False)
     try:
         proc = subprocess.run(
             command, shell=True, capture_output=True, text=True,
@@ -56,9 +67,9 @@ def run_command(command: str, blocked: tuple[str, ...] = (),
             timeout=timeout, cwd=cwd or None, stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
-        return f"command timed out after {timeout}s"
+        return ExecutionOutput(f"command timed out after {timeout}s", ok=False)
     except Exception as exc:
-        return f"failed to run: {exc}"
+        return ExecutionOutput(f"failed to run: {exc}", ok=False)
 
     out = (proc.stdout or "").strip()
     err = (proc.stderr or "").strip()
@@ -67,10 +78,10 @@ def run_command(command: str, blocked: tuple[str, ...] = (),
         parts.append("stdout:\n" + out[:6000])
     if err:
         parts.append("stderr:\n" + err[:2000])
-    return "\n".join(parts)
+    return ExecutionOutput("\n".join(parts), ok=proc.returncode == 0)
 
 
-def run_python(code: str, timeout: int = 60, cwd: str | None = None) -> str:
+def run_python(code: str, timeout: int = 60, cwd: str | None = None) -> ExecutionOutput:
     """Run a Python snippet in a fresh subprocess and return its output.
 
     A general-purpose compute action: use any installed library, crunch data,
@@ -81,7 +92,7 @@ def run_python(code: str, timeout: int = 60, cwd: str | None = None) -> str:
     """
     code = code or ""
     if not code.strip():
-        return "python needs code to run"
+        return ExecutionOutput("python needs code to run", ok=False)
     try:
         timeout = max(1, min(600, int(timeout or 60)))
     except (TypeError, ValueError):
@@ -97,9 +108,9 @@ def run_python(code: str, timeout: int = 60, cwd: str | None = None) -> str:
         )
 
     except subprocess.TimeoutExpired:
-        return f"python timed out after {timeout}s (raise the timeout if it needs longer)"
+        return ExecutionOutput(f"python timed out after {timeout}s (raise the timeout if it needs longer)", ok=False)
     except Exception as exc:
-        return f"failed to run python: {exc}"
+        return ExecutionOutput(f"failed to run python: {exc}", ok=False)
     out = (proc.stdout or "").strip()
     err = (proc.stderr or "").strip()
     parts = [f"exit code {proc.returncode}"]
@@ -109,7 +120,7 @@ def run_python(code: str, timeout: int = 60, cwd: str | None = None) -> str:
         parts.append("stderr:\n" + err[:2000])
     if not out and not err:
         parts.append("(no output - remember to print() any result you want to see)")
-    return "\n".join(parts)
+    return ExecutionOutput("\n".join(parts), ok=proc.returncode == 0)
 
 
 def http_request(method: str, url: str, headers=None, params=None,

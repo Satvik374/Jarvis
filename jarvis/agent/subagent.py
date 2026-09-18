@@ -218,7 +218,12 @@ def _contract(allowed: frozenset) -> str:
 
 def run_agent(spec: AgentSpec, brain: Brain, cfg: Config, task: str,
               max_steps: int | None = None) -> tuple[str, bool]:
-    system = spec.prompt.strip() + "\n\n" + _contract(spec.actions)
+    # A delegated task deserves the same procedure library as the main loop: a
+    # subagent that rediscovers a skill the parent already wrote is wasted work.
+    from .. import skills
+
+    system = (spec.prompt.strip() + "\n\n" + _contract(spec.actions)
+              + skills.note(task))
     return run_loop(brain, cfg, system, f"TASK: {task}", spec.actions,
                     spec.name, max_steps or max(cfg.safety.max_steps, 40))
 

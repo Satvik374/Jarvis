@@ -139,9 +139,20 @@ class LiveVoiceSupervisor:
         if not task:
             return {"status": "error", "message": "Empty task description"}
 
+        # Casual conversation check: greetings, small-talk, and general questions
+        # should be answered directly and naturally in voice without invoking computer automation.
+        if hasattr(self.agent, "_looks_like_task") and not self.agent._looks_like_task(task):
+            from ..console import _handle_idle_conversation
+            chat_reply = _handle_idle_conversation(task, self.agent)
+            if chat_reply:
+                log.jarvis(f"🎙️ [Communicating Agent]: {chat_reply}")
+                self._narrate_voice(chat_reply, force=True)
+                return {"status": "chat", "reply": chat_reply}
+
         # 1. Speculative Fast Filler (Instant Acknowledgment with 0ms perceived delay)
         fast_filler = self.filler_engine.get_fast_filler(task)
-        self._narrate_voice(fast_filler, force=True)
+        if fast_filler:
+            self._narrate_voice(fast_filler, force=True)
 
         # Never run two Agent.run calls against the same desktop/agent at once.
         # A shared cancellation Event previously allowed an older worker to be
@@ -224,6 +235,14 @@ class LiveVoiceSupervisor:
 
         # If websocket is offline and no task is active, the main Agent still
         # provides a useful text-assisted fallback for the user.
+        if hasattr(self.agent, "_looks_like_task") and not self.agent._looks_like_task(text):
+            from ..console import _handle_idle_conversation
+            chat_reply = _handle_idle_conversation(text, self.agent)
+            if chat_reply:
+                log.jarvis(f"🎙️ [Communicating Agent]: {chat_reply}")
+                self._narrate_voice(chat_reply, force=True)
+                return
+
         self.launch_task(text)
 
     def cancel_active_task(self) -> dict[str, Any]:
@@ -472,9 +491,16 @@ class LiveVoiceSupervisor:
             if not self._is_current_run(generation, cancel_event) or cancel_event.is_set():
                 return
         self.tracker.update_event({"event": "finish" if success else "error", "result": summary})
-        prefix = "Completed: " if success else "Note on task: "
         clean_summary = summary.replace("\n", " ").strip()[:160]
-        final_msg = f"{prefix}{clean_summary}"
+        is_task = (
+            hasattr(self.agent, "_looks_like_task")
+            and self.agent._looks_like_task(getattr(self, "_current_task", ""))
+        )
+        if is_task:
+            prefix = "Completed: " if success else "Note on task: "
+            final_msg = f"{prefix}{clean_summary}"
+        else:
+            final_msg = clean_summary
         self._narrate_voice(final_msg, force=True)
 
     def _ask_user_bridge(

@@ -34,6 +34,11 @@
       </div>
 
       <div class="topbar-actions">
+        <button class="icon-button panel-toggle-button" id="panelToggle" type="button"
+                aria-label="Show activity panel" aria-expanded="false"
+                aria-controls="activityPanel" title="Activity panel">
+          <span class="panel-glyph" aria-hidden="true">◫</span>
+        </button>
         <button class="icon-button palette-button" id="paletteToggle" type="button"
                 aria-label="Open command palette" title="Command palette (Ctrl+K)">
           <span aria-hidden="true">⌘</span>
@@ -47,11 +52,24 @@
                 aria-label="Open terminal transcript" aria-expanded="false">
           <span class="terminal-glyph" aria-hidden="true">&gt;_</span>
         </button>
+        <button class="icon-button live-voice-toggle" id="liveVoiceToggle" type="button"
+                aria-label="Toggle Live Voice Mode (gpt-realtime)" title="Live Voice Mode (gpt-realtime)">
+          <span class="live-voice-dot" aria-hidden="true"></span>
+          <span class="live-voice-glyph" aria-hidden="true">🎙️</span>
+          <span class="live-voice-text">VOICE</span>
+        </button>
+        <button class="icon-button" id="audioToggle" type="button"
+                aria-label="Audio output" title="Audio: Click to test sound">
+          <span class="audio-glyph" id="audioGlyph" aria-hidden="true">🔊</span>
+        </button>
         <div class="connection-pill" id="connectionPill" role="status"
              aria-label="Connection status: linking">
           <span class="connection-dot"></span>
           <span id="connectionText">LINKING</span>
         </div>
+        <button class="reconnect-button" id="reconnect" type="button" hidden
+                aria-label="Reconnect to the Jarvis terminal runtime"
+                title="Reconnect">RECONNECT</button>
         <button class="power-button" id="endSession" type="button"
                 aria-label="End Jarvis session" disabled>
           <span aria-hidden="true"></span>
@@ -61,7 +79,7 @@
 
 
     <main class="workspace">
-      <aside class="activity-panel hud-panel" aria-label="Live activity">
+      <aside class="activity-panel hud-panel" id="activityPanel" aria-label="Live activity">
         <div class="panel-tabs" role="tablist" aria-label="Side panel views">
           <button role="tab" id="tabBtnStream" type="button" class="panel-tab"
                   aria-selected="true" aria-controls="tabStream" data-tab="stream">
@@ -74,6 +92,10 @@
           <button role="tab" id="tabBtnCmds" type="button" class="panel-tab"
                   aria-selected="false" aria-controls="tabCmds" data-tab="cmds" tabindex="-1">
             <span id="tabCmdsLabel">CMDS</span>
+          </button>
+          <button role="tab" id="tabBtnSkills" type="button" class="panel-tab"
+                  aria-selected="false" aria-controls="tabSkills" data-tab="skills" tabindex="-1">
+            <span>SKILLS</span><i class="tab-count" id="tabCountSkills">0</i>
           </button>
           <button role="tab" id="tabBtnLogs" type="button" class="panel-tab"
                   aria-selected="false" aria-controls="tabLogs" data-tab="logs" tabindex="-1">
@@ -193,6 +215,21 @@
             <div class="cmd-list" id="cmdList" role="list"></div>
           </section>
 
+          <!-- SKILLS -->
+          <section class="tab-panel" id="tabSkills" role="tabpanel"
+                   aria-labelledby="tabBtnSkills" tabindex="0" hidden>
+            <div class="panel-heading">
+              <span class="eyebrow">SKILL LIBRARY</span>
+              <button class="text-button" id="reloadSkills" type="button">REFRESH</button>
+            </div>
+            <label class="sr-only" for="skillFilter">Filter skills</label>
+            <input class="cmd-filter" id="skillFilter" type="search"
+                   placeholder="Filter skills…" autocomplete="off" spellcheck="false">
+            <div class="skill-list" id="skillList" role="list">
+              <p class="vital-empty">Loading skills…</p>
+            </div>
+          </section>
+
           <!-- LOGS -->
           <section class="tab-panel" id="tabLogs" role="tabpanel"
                    aria-labelledby="tabBtnLogs" tabindex="0" hidden>
@@ -231,16 +268,59 @@
             </div>
           </div>
 
-          <div class="hologram-toolbar" role="toolbar" aria-label="3D Holographic controls">
+          <div class="hologram-toolbar" role="toolbar" aria-label="Core visualisation controls">
             <div class="hologram-modes">
-              <button type="button" class="holo-btn is-active" data-holo-mode="hologram" title="Full 3D Holographic Arc Reactor">HOLOGRAM</button>
+              <button type="button" class="holo-btn is-active" data-holo-mode="blob" title="Liquid Energy Core (reacts to voice and actions)">BLOB</button>
+              <button type="button" class="holo-btn" data-holo-mode="hologram" title="Full 3D Holographic Arc Reactor">HOLOGRAM</button>
               <button type="button" class="holo-btn" data-holo-mode="orbit" title="Free Orbital Rotation">ORBIT</button>
               <button type="button" class="holo-btn" data-holo-mode="wireframe" title="Geodesic Neural Lattice">WIREFRAME</button>
               <button type="button" class="holo-btn" data-holo-mode="quantum" title="Volumetric Quantum Swarm">QUANTUM</button>
             </div>
             <div class="hologram-actions">
-              <button type="button" class="holo-action-btn" id="holoResetBtn" title="Reset Camera Perspective">⟲ RESET</button>
-              <button type="button" class="holo-action-btn" id="holoPulseBtn" title="Emit Holographic Energy Pulse">⚡ PULSE</button>
+              <button type="button" class="holo-action-btn" id="holoResetBtn" title="Reset Core Perspective">⟲ RESET</button>
+              <button type="button" class="holo-action-btn" id="holoPulseBtn" title="Emit a Core Energy Pulse">⚡ PULSE</button>
+            </div>
+          </div>
+
+          <!-- Stage Voice Activation Trigger (gpt-realtime Live Model) -->
+          <button class="stage-voice-trigger" id="stageVoiceBtn" type="button"
+                  aria-label="Start Live Voice Session" title="Click to talk with Jarvis (gpt-realtime Live Voice)">
+            <div class="stage-voice-pulse" aria-hidden="true"></div>
+            <span class="stage-voice-icon" aria-hidden="true">🎙️</span>
+            <span class="stage-voice-text" id="stageVoiceText">LIVE VOICE (gpt-realtime)</span>
+          </button>
+
+          <!-- Live Voice Interactive HUD Overlay (ChatGPT Voice & Gemini Live Mode) -->
+          <div class="live-voice-overlay" id="liveVoiceOverlay" hidden>
+            <div class="live-voice-card">
+              <div class="live-voice-header">
+                <div class="live-voice-badge" id="liveVoiceBadge">
+                  <span class="pulse-ring" aria-hidden="true"></span>
+                  <span class="live-voice-state-text" id="liveVoiceStateText">LISTENING</span>
+                </div>
+                <div class="voice-wave" id="voiceWave" aria-hidden="true">
+                  <i></i><i></i><i></i><i></i><i></i>
+                  <i></i><i></i><i></i><i></i><i></i>
+                  <i></i><i></i><i></i><i></i><i></i>
+                </div>
+              </div>
+              <div class="voice-caption-box" id="voiceCaptionBox">
+                <p class="voice-caption" id="voiceCaption">Listening for your voice… say "Hey Jarvis"</p>
+              </div>
+              <div class="live-voice-controls">
+                <button type="button" class="voice-ctrl-btn" id="voiceMuteBtn" title="Mute / Unmute Microphone">
+                  <span id="voiceMuteIcon">🎙️</span>
+                  <span id="voiceMuteLabel">MUTE</span>
+                </button>
+                <button type="button" class="voice-ctrl-btn voice-bargein-btn" id="voiceBargeinBtn" title="Interrupt Jarvis">
+                  <span>⚡</span>
+                  <span>INTERRUPT</span>
+                </button>
+                <button type="button" class="voice-ctrl-btn voice-exit-btn" id="voiceExitBtn" title="Exit Live Voice Mode">
+                  <span>✕</span>
+                  <span>EXIT VOICE</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -382,6 +462,30 @@
   </aside>
 
 
+  <div class="panel-backdrop" id="panelBackdrop" hidden></div>
+
+  <div class="shortcuts-backdrop" id="shortcutsBackdrop" hidden>
+    <div class="shortcuts" role="dialog" aria-modal="true"
+         aria-labelledby="shortcutsTitle" aria-describedby="shortcutsHint">
+      <div class="shortcuts-head">
+        <div>
+          <span class="eyebrow">KEYBOARD</span>
+          <h2 id="shortcutsTitle">SHORTCUTS</h2>
+        </div>
+        <button class="text-button" id="closeShortcuts" type="button">CLOSE</button>
+      </div>
+      <dl class="shortcut-grid" id="shortcutsHint">
+        <div><dt><kbd>Ctrl</kbd><kbd>K</kbd></dt><dd>Command palette — commands, actions, sessions, skills</dd></div>
+        <div><dt><kbd>/</kbd></dt><dd>Jump to the composer</dd></div>
+        <div><dt><kbd>Enter</kbd></dt><dd>Send the directive</dd></div>
+        <div><dt><kbd>Shift</kbd><kbd>Enter</kbd></dt><dd>New line without sending</dd></div>
+        <div><dt><kbd>Ctrl</kbd><kbd>V</kbd></dt><dd>Attach an image from the clipboard</dd></div>
+        <div><dt><kbd>?</kbd></dt><dd>Show this panel</dd></div>
+        <div><dt><kbd>Esc</kbd></dt><dd>Close the palette, a drawer, or this panel</dd></div>
+      </dl>
+    </div>
+  </div>
+
   <div class="toast-region" id="toastRegion" aria-live="polite"></div>
 
   <div class="palette-backdrop" id="paletteBackdrop" hidden>
@@ -408,6 +512,7 @@
 
   <script src="/vendor/three.min.js"></script>
   <script src="/grainient.js"></script>
+  <script src="/blob.js"></script>
   <script src="/hologram.js"></script>
   <script src="/app.js"></script>
 </body>

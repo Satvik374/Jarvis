@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import subprocess
 import struct
@@ -165,6 +166,7 @@ class TerminalBridgeInputTests(unittest.TestCase):
             "mode": "command",
             "prompt": "you >",
         })
+        self.assertEqual(bridge.input_prompt, "you >")
         time.sleep(0.15)
 
         wires = bridge.process.stdin.getvalue().decode("ascii").splitlines()
@@ -217,6 +219,21 @@ class TerminalBridgeInputTests(unittest.TestCase):
             [(item["active"], item["utterance_id"]) for item in speech_events],
             [(True, 7), (False, 7)],
         )
+
+    def test_process_exit_drops_buffered_state_and_input_request(self):
+        bridge = TerminalBridge(token="state-exit-test")
+        bridge.process = _ExitedProcess()
+        bridge._watch_process()
+        for payload in (
+            {"event": "state", "state": "working"},
+            {"event": "input_request", "mode": "command", "prompt": "you >"},
+        ):
+            bridge._handle_structured(payload)
+        self.assertEqual(bridge.state, "offline")
+        self.assertFalse(bridge.accepting_input)
+        subscriber, history = bridge.broker.subscribe()
+        bridge.broker.unsubscribe(subscriber)
+        self.assertEqual([item["event"] for item in history], ["state", "session"])
 
     def test_process_exit_stops_speech_and_drops_buffered_start(self):
         bridge = TerminalBridge(token="speech-exit-test")
@@ -574,6 +591,7 @@ class BrowserHTTPTests(unittest.TestCase):
             page = response.read().decode("utf-8")
         self.assertIn("JARVIS // NEURAL INTERFACE", page)
         self.assertIn("default-src 'self'", response.headers["Content-Security-Policy"])
+        self.assertIn("media-src 'self' data: blob:", response.headers["Content-Security-Policy"])
 
     def test_api_state_requires_session_token(self):
         with self.assertRaises(HTTPError) as caught:
@@ -586,6 +604,49 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertFalse(body["speech"]["active"])
         self.assertEqual(body["interface"]["mode"], "console")
 
+    def test_skills_endpoint_requires_token_and_lists_the_library(self):
+        from jarvis.skills import SkillManager
+
+        with self.assertRaises(HTTPError) as caught:
+            self.request("/api/skills")
+        self.assertEqual(caught.exception.code, 401)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = SkillManager(tmp)
+            manager.ensure_seeded()
+            with patch("jarvis.skills.get_skill_manager", return_value=manager):
+                with self.request("/api/skills", token=True) as response:
+                    body = json.load(response)
+
+        self.assertTrue(body["ok"])
+        self.assertIn("research-brief", [skill["name"] for skill in body["skills"]])
+        sample = body["skills"][0]
+        for key in ("name", "slug", "description", "when_to_use", "tools", "builtin"):
+            self.assertIn(key, sample)
+        self.assertTrue(sample["builtin"])
+
+    def test_skills_endpoint_degrades_instead_of_returning_an_error(self):
+        # The panel is a convenience; a broken library must not blank the page.
+        with patch("jarvis.skills.get_skill_manager", side_effect=RuntimeError("boom")):
+            with self.request("/api/skills", token=True) as response:
+                self.assertEqual(response.status, 200)
+                body = json.load(response)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["skills"], [])
+        self.assertIn("boom", body["error"])
+
+    def test_speech_audio_endpoint_requires_token_and_returns_wav(self):
+        with self.assertRaises(HTTPError) as caught:
+            self.request("/api/speech/audio.wav")
+        self.assertEqual(caught.exception.code, 401)
+        with self.request("/api/speech/audio.wav", token=True) as response:
+            self.assertEqual(response.status, 204)
+        self.server.bridge.speech_wav_bytes = b"RIFFfakeWAVdata"
+        with self.request("/api/speech/audio.wav", token=True) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers["Content-Type"], "audio/wav")
+            self.assertEqual(response.read(), b"RIFFfakeWAVdata")
+
     def test_static_assets_include_speech_spectrum_overlay(self):
         with self.request("/app.js") as response:
             app = response.read().decode("utf-8")
@@ -597,6 +658,21 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertIn("speechExpiryTimer", app)
         self.assertIn("speechIdWatermark", app)
         self.assertIn('data-speaking="true"', styles)
+
+    def test_static_assets_include_the_liquid_energy_core(self):
+        with self.request("/blob.js") as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(
+                response.headers["Content-Type"],
+                "text/javascript; charset=utf-8",
+            )
+            blob = response.read().decode("utf-8")
+        with self.request("/") as response:
+            page = response.read().decode("utf-8")
+
+        self.assertIn("window.FluidBlob", blob)
+        self.assertIn('id="fluidBlob"', page)
+        self.assertIn('data-holo-mode="blob"', page)
 
     def test_static_interface_replaces_send_with_stop_while_generating(self):
         with self.request("/") as response:
@@ -785,6 +861,90 @@ class CLIRoutingTests(unittest.TestCase):
         self.assertEqual(result, 7)
         check.assert_called_once_with(cfg)
         browser.assert_not_called()
+
+
+class WorkerParentWatchdogTests(unittest.TestCase):
+    """The worker must not outlive the console that launched it.
+
+    Force-killing the launcher used to leave the worker running with the whole
+    desktop runtime, the proactive daemon and the scheduled jobs still alive and
+    no UI attached to them.
+    """
+
+    def test_a_live_process_reads_as_alive(self):
+        self.assertTrue(browser_worker._parent_process_alive(os.getpid()))
+
+    def test_a_pid_that_never_existed_reads_as_dead(self):
+        self.assertFalse(browser_worker._parent_process_alive(999_999_999))
+
+    def test_an_unusable_pid_reads_as_alive(self):
+        # Never exit on a bad read: killing a session in use is far worse than
+        # leaving an orphan behind.
+        self.assertTrue(browser_worker._parent_process_alive(0))
+        self.assertTrue(browser_worker._parent_process_alive(-1))
+
+    def test_watchdog_exits_once_the_parent_is_gone(self):
+        # ``os._exit`` never returns in production, so the stand-in must not
+        # return either - otherwise the poll loop simply goes round again.
+        with (
+            patch.object(browser_worker, "_parent_process_alive", return_value=False),
+            patch.object(browser_worker, "emit"),
+            patch.object(browser_worker.os, "_exit", side_effect=SystemExit(0)) as exit_process,
+        ):
+            with self.assertRaises(SystemExit):
+                browser_worker._watch_parent(os.getpid(), poll_seconds=0.01)
+        exit_process.assert_called_once_with(0)
+
+    def test_watchdog_keeps_running_while_the_parent_lives(self):
+        calls = {"n": 0}
+
+        def alive_then_dead(_ppid):
+            calls["n"] += 1
+            return calls["n"] < 3
+
+        with (
+            patch.object(browser_worker, "_parent_process_alive", alive_then_dead),
+            patch.object(browser_worker, "emit"),
+            patch.object(browser_worker.os, "_exit", side_effect=SystemExit(0)),
+        ):
+            with self.assertRaises(SystemExit):
+                browser_worker._watch_parent(os.getpid(), poll_seconds=0.01)
+        self.assertEqual(calls["n"], 3)
+
+    def test_a_closed_console_does_not_raise_out_of_the_watchdog(self):
+        with (
+            patch.object(browser_worker, "_parent_process_alive", return_value=False),
+            patch.object(browser_worker, "emit", side_effect=OSError("broken pipe")),
+            patch.object(browser_worker.os, "_exit", side_effect=SystemExit(0)) as exit_process,
+        ):
+            with self.assertRaises(SystemExit):
+                browser_worker._watch_parent(os.getpid(), poll_seconds=0.01)
+        exit_process.assert_called_once_with(0)
+
+    def test_worker_starts_the_watchdog_unless_detached(self):
+        started = []
+
+        class _Thread:
+            def __init__(self, target=None, args=(), **kwargs):
+                started.append(target)
+
+            def start(self):
+                pass
+
+        launcher = SimpleNamespace(load_config=lambda: Config(), main=lambda argv: 0)
+        with (
+            patch.object(browser_worker, "install_event_bridge"),
+            patch.object(browser_worker, "emit"),
+            patch.object(browser_worker, "_load_launcher", return_value=launcher),
+            patch.object(browser_worker.threading, "Thread", _Thread),
+        ):
+            browser_worker.main([])
+            self.assertIn(browser_worker._watch_parent, started)
+
+            started.clear()
+            with patch.dict(os.environ, {"JARVIS_BROWSER_DETACHED": "1"}):
+                browser_worker.main([])
+            self.assertNotIn(browser_worker._watch_parent, started)
 
 
 class OwnInterfaceProtectionTests(unittest.TestCase):

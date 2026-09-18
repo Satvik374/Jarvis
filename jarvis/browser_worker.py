@@ -15,16 +15,22 @@ import importlib.util
 import io
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
 import threading
+import time
 from typing import Any, Callable
 import wave
 
 
 EVENT_PREFIX = "__JARVIS_BROWSER_EVENT__:"
 INPUT_PREFIX = "__JARVIS_BROWSER_INPUT64__:"
+# Request/response channel for direct action execution (the voice agent's
+# tools). Unlike INPUT_PREFIX this is not user input: the runtime runs the
+# action and answers with a "tool_result" event, then goes back to waiting.
+TOOL_PREFIX = "__JARVIS_BROWSER_TOOL__:"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _bridge_installed = False
 _emit_lock = threading.Lock()
@@ -57,6 +63,36 @@ def _load_launcher() -> Any:
 
 def _plain(value: Any) -> str:
     return _ANSI_RE.sub("", str(value)).strip()
+
+
+def run_tool_request(raw: str) -> None:
+    """Execute one direct action request and emit its result.
+
+    Runs on the console's own thread, inside the input boundary - which is
+    exactly when Jarvis is idle at a prompt, so a direct call can never race the
+    agentic loop over the same desktop.
+    """
+    call_id = ""
+    result: dict[str, Any]
+    try:
+        request = json.loads(raw)
+        if not isinstance(request, dict):
+            raise ValueError("tool request must be an object")
+        call_id = str(request.get("call_id", ""))
+        name = str(request.get("tool", ""))
+        args = request.get("args") or {}
+        from jarvis.live import direct_tools
+
+        result = direct_tools.run(name, args)
+    except Exception as exc:  # a malformed request must not kill the runtime
+        result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    emit(
+        "tool_result",
+        call_id=call_id,
+        ok=bool(result.get("ok")),
+        result=str(result.get("result", "")),
+        error=str(result.get("error", "")),
+    )
 
 
 def emit(event: str, **payload: Any) -> None:
@@ -228,6 +264,7 @@ def _begin_speech(
     duration: float,
     envelope: list[float],
     spectrum: tuple[int, int, str] = (0, 0, ""),
+    audio: str = "",
 ) -> int:
     global _speech_generation, _active_speech_generation
     band_count, band_fps, bands = spectrum
@@ -237,19 +274,21 @@ def _begin_speech(
         _active_speech_generation = generation
         # Keep generation assignment and wire emission in the same critical
         # section so concurrent cron/foreground speech cannot reorder starts.
-        emit(
-            "speech",
-            active=True,
-            utterance_id=generation,
-            duration_ms=max(0, round(duration * 1000)),
-            levels=[
+        payload = {
+            "active": True,
+            "utterance_id": generation,
+            "duration_ms": max(0, round(duration * 1000)),
+            "levels": [
                 max(0, min(255, round(level * 255)))
                 for level in envelope
             ],
-            band_count=band_count,
-            band_fps=band_fps,
-            bands=bands,
-        )
+            "band_count": band_count,
+            "band_fps": band_fps,
+            "bands": bands,
+        }
+        if audio:
+            payload["audio"] = audio
+        emit("speech", **payload)
     return generation
 
 
@@ -270,6 +309,73 @@ def _warm_spectrogram_deps() -> None:
         pass
 
 
+def _parent_process_alive(ppid: int | None = None) -> bool:
+    """Whether the process that launched this worker is still running.
+
+    Windows has no reparenting, so ``os.getppid()`` keeps returning the pid of
+    a parent that has already died; the only reliable test is whether that pid
+    still names a live process.  On any doubt - an unreadable pid, a parent we
+    are not allowed to open - this reports alive, because the failure we must
+    never cause is killing a session that is still in use.
+    """
+    if ppid is None:
+        try:
+            ppid = os.getppid()
+        except OSError:
+            return True
+    if not ppid or ppid <= 0:
+        return True
+    if os.name != "nt":
+        try:
+            os.kill(ppid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+        return True
+
+    import ctypes
+
+    SYNCHRONIZE = 0x00100000
+    ERROR_INVALID_PARAMETER = 87
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(ppid))
+    if not handle:
+        # ERROR_INVALID_PARAMETER is a pid that no longer exists; anything else
+        # (access denied, for instance) means we simply cannot tell.
+        return kernel32.GetLastError() != ERROR_INVALID_PARAMETER
+    try:
+        # 0 (WAIT_OBJECT_0) means the process has exited; WAIT_TIMEOUT means it
+        # is still running.  Any failure counts as alive.
+        return kernel32.WaitForSingleObject(handle, 0) != 0
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _watch_parent(ppid: int, poll_seconds: float = 2.0) -> None:
+    """Exit when the console that owns this worker disappears.
+
+    Force-killing the launcher used to leave the worker running: it keeps the
+    desktop runtime, the proactive daemon and the scheduled jobs alive with no
+    UI attached, and a later start then reports stale code and stale state.
+    Waiting for stdin to reach EOF is not enough - a worker that is blocked in
+    a task, rather than at the prompt, never notices - so the parent is polled
+    directly.
+    """
+    while True:
+        time.sleep(poll_seconds)
+        if _parent_process_alive(ppid):
+            continue
+        try:
+            emit("activity", kind="warning", message="Console closed; shutting down")
+            emit("state", state="offline", label="Console closed")
+            sys.stderr.flush()
+        except Exception:
+            # Nobody is listening any more; exiting cleanly still matters.
+            pass
+        os._exit(0)
+
+
 def _install_speech_bridge(voice_module: Any) -> None:
     """Observe WAV playback without changing the shared voice implementation."""
     if getattr(voice_module, "_browser_speech_bridge_installed", False):
@@ -280,8 +386,11 @@ def _install_speech_bridge(voice_module: Any) -> None:
 
     @functools.wraps(original_play)
     def browser_play_wav(data: bytes, wait: bool) -> Any:
+        if getattr(voice_module, "is_live_mode_active", lambda: False)():
+            return None
         duration, envelope = _wav_profile(data)
-        generation = _begin_speech(duration, envelope, _wav_spectrogram(data))
+        audio_b64 = f"data:audio/wav;base64,{base64.b64encode(data).decode('ascii')}" if data else ""
+        generation = _begin_speech(duration, envelope, _wav_spectrogram(data), audio=audio_b64)
         try:
             result = original_play(data, wait)
         except Exception:
@@ -300,6 +409,34 @@ def _install_speech_bridge(voice_module: Any) -> None:
         return result
 
     voice_module._play_wav = browser_play_wav
+
+    original_play_stream = getattr(voice_module, "_play_stream_interruptible", None)
+    if original_play_stream is not None:
+        @functools.wraps(original_play_stream)
+        def browser_play_stream(data: bytes, cancel_event: Any = None) -> Any:
+            if getattr(voice_module, "is_live_mode_active", lambda: False)():
+                return False, 0.0
+            import time
+            duration, envelope = _wav_profile(data)
+            audio_b64 = f"data:audio/wav;base64,{base64.b64encode(data).decode('ascii')}" if data else ""
+            generation = _begin_speech(duration, envelope, _wav_spectrogram(data), audio=audio_b64)
+            cancel = cancel_event or threading.Event()
+            try:
+                # The browser tab renders audio through HTML5 Audio (app.js).
+                # Pacing here maintains barge-in cancellation and telemetry synchrony.
+                step = 0.05
+                elapsed = 0.0
+                while elapsed < max(0.1, duration):
+                    if cancel.is_set():
+                        return True, elapsed
+                    time.sleep(step)
+                    elapsed += step
+                return False, elapsed
+            finally:
+                _finish_speech(generation)
+
+        voice_module._play_stream_interruptible = browser_play_stream
+
 
 
 def install_event_bridge() -> None:
@@ -358,6 +495,14 @@ def install_event_bridge() -> None:
     @functools.wraps(original_jarvis)
     def jarvis(message: Any) -> None:
         text = str(message)
+        from jarvis.utils import voice
+        if voice.is_live_mode_active():
+            # In Live Mode, gpt-realtime is the sole conversational voice and assistant.
+            # Background terminal agent chatter (e.g. Side Agent / Communicating Agent)
+            # must not emit "assistant" dialogue messages into the chatbox.
+            emit("activity", kind="agent", message=text)
+            return original_jarvis(message)
+
         emit("assistant", message=text)
         emit("state", state="responding", label="Synthesizing response")
         try:
@@ -455,7 +600,20 @@ def install_event_bridge() -> None:
             else "Awaiting directive",
         )
         try:
-            value = original_input(prompt)
+            while True:
+                value = original_input(prompt)
+                if not value.startswith(TOOL_PREFIX):
+                    break
+                # A direct action request, not a directive: run it here and go
+                # back to waiting for the console's real input.
+                emit("state", state="working", label="Running direct action")
+                run_tool_request(value[len(TOOL_PREFIX):])
+                emit(
+                    "state",
+                    state="listening",
+                    label="Awaiting confirmation" if mode == "confirmation"
+                    else "Awaiting directive",
+                )
             if value.startswith(INPUT_PREFIX):
                 try:
                     value = base64.b64decode(
@@ -536,6 +694,17 @@ def main(argv: list[str] | None = None) -> int:
     install_event_bridge()
     emit("state", state="booting", label="Initializing local runtime")
     emit("system", message="Terminal backend connected")
+
+    # The worker owns the desktop runtime, so it must not outlive the console
+    # that opened it. Force-killing the launcher does not close the child's
+    # stdin in a way the REPL acts on, so the parent is polled instead.
+    if os.environ.get("JARVIS_BROWSER_DETACHED") != "1":
+        threading.Thread(
+            target=_watch_parent,
+            args=(os.getppid(),),
+            daemon=True,
+            name="jarvis-parent-watch",
+        ).start()
 
     run = _load_launcher()
     original_load_config = run.load_config

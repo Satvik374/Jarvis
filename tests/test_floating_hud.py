@@ -409,7 +409,7 @@ def test_gemini_vertex_fast_adc_refresh(monkeypatch, tmp_path):
     import urllib.request
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
-    cfg = BrainConfig(backend="gemini", model="gemini-3.7-flash")
+    cfg = BrainConfig(backend="gemini", model="gemini-3.8-flash")
     brain = GeminiVertexBrain(cfg)
 
     # Warmup should complete in sub-millisecond with direct fast path

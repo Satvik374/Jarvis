@@ -11,19 +11,22 @@
  * with exit 0 when it is not installed.
  */
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 
 const UI = join(dirname(fileURLToPath(import.meta.url)), "..", "jarvis", "browser_ui");
 
-let JSDOM;
+let jsdomPath;
 try {
-  ({ JSDOM } = await import("jsdom"));
-} catch {
+  jsdomPath = createRequire(import.meta.url).resolve("jsdom");
+} catch (error) {
+  if (error.code !== "MODULE_NOT_FOUND") throw error;
   console.log("SKIP: jsdom not installed (npm i -D jsdom)");
   process.exit(0);
 }
+const { JSDOM } = await import(pathToFileURL(jsdomPath).href);
 
 const html = readFileSync(join(UI, "index.html"), "utf8");
 const appJs = readFileSync(join(UI, "app.js"), "utf8");
@@ -44,7 +47,34 @@ window.EventSource = class {
   close() {}
 };
 window.ResizeObserver = class { observe() {} disconnect() {} };
-window.fetch = async () => ({ json: async () => ({ ok: true, sessions: [], active_id: null }) });
+// Path-aware so the skill library can be exercised without a live server.
+window.__skills = [
+  {
+    name: "research-brief",
+    slug: "research-brief",
+    description: "Research a question and produce a short brief with sources.",
+    when_to_use: "research, look up, compare",
+    tools: ["web_search", "read_url"],
+    builtin: true,
+    updated: "2026-01-01",
+  },
+  {
+    name: "weekly-report",
+    slug: "weekly-report",
+    description: "Compile my weekly status report.",
+    when_to_use: "weekly report",
+    tools: [],
+    builtin: false,
+    updated: "2026-01-02",
+  },
+];
+window.fetch = async (path) => ({
+  ok: true,
+  status: 200,
+  json: async () => String(path).startsWith("/api/skills")
+    ? { ok: true, skills: window.__skills, active: "" }
+    : { ok: true, sessions: [], active_id: null },
+});
 window.HTMLCanvasElement.prototype.getContext = () => ({
   setTransform() {}, clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {},
   closePath() {}, fill() {}, stroke() {}, save() {}, restore() {}, translate() {},
@@ -241,6 +271,156 @@ test("session end sets the offline state cleanly", () => {
   fire({ event: "session", alive: false, message: "Terminal exited" });
   assert.equal(document.documentElement.dataset.state, "offline");
 });
+
+// --- The side panel must never be a dead end on a narrow window. ---
+test("panel toggle opens the activity drawer and Escape closes it", () => {
+  const toggle = $("#panelToggle");
+  assert.ok(toggle, "a panel toggle must exist for widths where the panel does not fit");
+  toggle.dispatchEvent(new window.Event("click"));
+  assert.equal(document.body.classList.contains("panel-open"), true);
+  assert.equal($("#panelBackdrop").hidden, false);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal(document.body.classList.contains("panel-open"), false);
+  assert.equal($("#panelBackdrop").hidden, true);
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+});
+
+// --- Skills: the library the agent can load, staged from the UI. ---
+const settleFrame = () => new Promise((resolve) => setImmediate(resolve));
+{
+  // Back to the console shell: the remote-agent tests above left the page in
+  // monitor mode, where the local skill library is deliberately not offered.
+  fire({ event: "session", alive: true, interface_mode: "console" });
+  results.push(
+    $("#tabBtnSkills").hidden === false
+      ? ["PASS", "skills tab returns with the console interface"]
+      : ["FAIL", "skills tab returns with the console interface"],
+  );
+  fire({ event: "session", alive: true, interface_mode: "remote-agent" });
+  results.push(
+    $("#tabBtnSkills").hidden === true
+      ? ["PASS", "remote-agent mode hides the local skill library"]
+      : ["FAIL", "remote-agent mode hides the local skill library"],
+  );
+  fire({ event: "session", alive: true, interface_mode: "console" });
+
+  $("#tabBtnSkills").dispatchEvent(new window.Event("click"));
+  await settleFrame();
+  const items = [...document.querySelectorAll("#skillList .skill-item")];
+  if (items.length !== 2) {
+    results.push(["FAIL", `skills tab renders the library -> ${items.length} items`]);
+  } else {
+    results.push(["PASS", "skills tab renders the library"]);
+  }
+  const badge = document.querySelector("#skillList .skill-badge");
+  results.push(
+    badge && badge.textContent === "BUILT-IN"
+      ? ["PASS", "preset skills are marked built-in"]
+      : ["FAIL", "preset skills are marked built-in"],
+  );
+  $("#skillList .skill-use").dispatchEvent(new window.Event("click"));
+  const prompt = $("#promptInput").value;
+  results.push(
+    prompt === "Use the research-brief skill to "
+      ? ["PASS", "USE stages a directive that loads that skill"]
+      : ["FAIL", `USE stages a directive that loads that skill -> ${prompt}`],
+  );
+  const filter = $("#skillFilter");
+  filter.value = "weekly";
+  filter.dispatchEvent(new window.Event("input"));
+  const shown = [...document.querySelectorAll("#skillList .skill-name")].map((n) => n.textContent);
+  results.push(
+    shown.length === 1 && shown[0] === "weekly-report"
+      ? ["PASS", "skill filter narrows the library"]
+      : ["FAIL", `skill filter narrows the library -> ${JSON.stringify(shown)}`],
+  );
+  filter.value = "";
+  filter.dispatchEvent(new window.Event("input"));
+  $("#promptInput").value = "";
+}
+
+// --- Discoverability: ? lists the keys, / reaches the composer. ---
+test("? opens the shortcuts overlay and Escape closes it", () => {
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "?", bubbles: true }));
+  assert.equal($("#shortcutsBackdrop").hidden, false);
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal($("#shortcutsBackdrop").hidden, true);
+});
+
+test("/ focuses the composer", () => {
+  // The composer is disabled until a live runtime asks for input, and a
+  // disabled field cannot take focus - so make it a real, live composer first.
+  fire({ event: "session", alive: true, interface_mode: "console" });
+  fire({ event: "input_request", prompt: "Awaiting directive", mode: "command" });
+  assert.equal($("#promptInput").disabled, false);
+  document.body.focus();
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "/", bubbles: true }));
+  assert.equal(document.activeElement, $("#promptInput"));
+});
+
+test("keys typed into a field are not stolen by global shortcuts", () => {
+  const input = $("#promptInput");
+  input.value = "what time is it?";
+  input.dispatchEvent(new window.KeyboardEvent("keydown", { key: "?", bubbles: true }));
+  assert.equal($("#shortcutsBackdrop").hidden, true);
+  assert.equal(input.value, "what time is it?");
+  input.value = "";
+});
+
+// Drive the real live toggle and mocked websocket, without mic/provider access.
+try {
+  const sent = [];
+  let socket;
+  let interruptOk = true;
+  window.fetch = async (path) => ({
+    ok: true,
+    json: async () => path === "/api/interrupt"
+      ? { ok: interruptOk, message: interruptOk ? "interrupt requested" : "Jarvis is ready for the next directive" }
+      : { ok: true, sessions: [], ws_url: "ws://test.invalid/realtime" },
+  });
+  window.WebSocket = class {
+    static OPEN = 1;
+    constructor() { this.readyState = 1; socket = this; }
+    send(data) { sent.push(JSON.parse(data)); }
+    close() { this.readyState = 3; }
+  };
+  Object.defineProperty(window.navigator, "mediaDevices", { value: {
+    getUserMedia: async () => ({ getTracks: () => [], getAudioTracks: () => [] }),
+  } });
+  const audioNode = () => ({ connect() {}, disconnect() {}, gain: { value: 0 }, frequencyBinCount: 32 });
+  window.AudioContext = class {
+    constructor() { this.state = "running"; this.currentTime = 0; this.destination = {}; }
+    createMediaStreamSource() { return audioNode(); }
+    createAnalyser() { return audioNode(); }
+    createScriptProcessor() { return audioNode(); }
+    createGain() { return audioNode(); }
+    close() { return Promise.resolve(); }
+  };
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  $("#liveVoiceToggle").click();
+  await settle();
+  assert.ok(socket, "live toggle should open the mocked websocket");
+  socket.onopen();
+  for (const [callId, ok] of [["cancel-active", true], ["cancel-idle", false]]) {
+    interruptOk = ok;
+    socket.onmessage({ data: JSON.stringify({
+      type: "response.function_call_arguments.done", call_id: callId,
+      name: "cancel_task", arguments: "{}",
+    }) });
+    await settle();
+    const item = sent.find((event) => event.item?.call_id === callId)?.item;
+    assert.ok(item, "cancellation tool must send an output");
+    const output = JSON.parse(item.output);
+    assert.equal(output.status, ok ? "cancelling" : "error");
+    assert.equal(output.message, ok ? "interrupt requested" : "Jarvis is ready for the next directive");
+  }
+  results.push(["PASS", "live cancellation acknowledges request, not completion"]);
+} catch (error) {
+  results.push(["FAIL", `live cancellation acknowledges request, not completion -> ${error.message}`]);
+} finally {
+  $("#voiceExitBtn").click();
+}
 
 let failed = 0;
 for (const [status, name] of results) {

@@ -61,6 +61,9 @@ _SLASH_COMMANDS = (
     ("/vision", "on|off - send screenshots to the model"),
     ("/steps", "set max steps per task, e.g. /steps 20"),
     ("/config", "print the active configuration"),
+    ("/codex-login", "sign in with ChatGPT via OpenAI Codex OAuth flow (PKCE S256)"),
+    ("/codex-status", "check OpenAI Codex OAuth session status"),
+    ("/codex-logout", "log out and remove saved ChatGPT Codex credentials"),
     ("/quit", "exit"),
 )
 
@@ -132,7 +135,13 @@ def _read_input(prompt: str) -> str:
         import msvcrt
     except ImportError:
         return input(prompt)
-    return _char_input(prompt, msvcrt.kbhit, msvcrt.getwch)
+
+    def _responsive_getwch() -> str:
+        while not msvcrt.kbhit():
+            time.sleep(0.02)
+        return msvcrt.getwch()
+
+    return _char_input(prompt, msvcrt.kbhit, _responsive_getwch)
 
 
 # Shortest gap before a key counts as hand-typed rather than pasted. Pasted
@@ -387,6 +396,11 @@ def _preflight(cfg: Config) -> None:
             log.warn("  1) install: https://ollama.com/download")
             log.warn(f"  2) pull the model:  ollama pull {cfg.brain.model}")
             log.warn("  3) it serves automatically; then restart Jarvis.")
+    elif cfg.brain.backend in {"foundry", "azure", "azure-foundry", "azure_foundry", "foundry-agent"}:
+        try:
+            from azure.ai.projects import AIProjectClient
+        except ImportError:
+            log.warn("Azure AI Projects SDK missing. Run: pip install azure-ai-projects>=2.1.0 azure-identity>=1.16.0")
 
 
 def _banner() -> str:
@@ -449,6 +463,12 @@ def _format_side_agent_reply(raw_reply: str) -> str:
     and leave its paragraphs, lists, and code blocks intact.
     """
     reply = str(raw_reply or "").strip()
+    if not reply:
+        return "I do not have a response yet, sir."
+
+    # Strip raw tool call tags emitted by some chat/assistant models
+    reply = re.sub(r"<tool_call>.*?</tool_call>", "", reply, flags=re.DOTALL).strip()
+    reply = re.sub(r"<tool_call>.*", "", reply, flags=re.DOTALL).strip()
     if not reply:
         return "I do not have a response yet, sir."
 
@@ -516,7 +536,8 @@ def _handle_side_agent_chat(query: str, tracker: Any, brain: Any, cfg: Config) -
         f"{tracker.format_live_context_for_prompt()}\n\n"
         "Answer the user's question or converse with them directly. If they ask about the task, refer to the live status above. "
         "Return plain Markdown only: use short paragraphs, numbered steps, and bullets where helpful. "
-        "Never return JSON, an API envelope, or a field such as 'response' or 'summary'."
+        "Never return JSON, an API envelope, or a field such as 'response' or 'summary'. "
+        "You cannot execute tools or system commands directly; never output <tool_call> tags or code scripts."
     )
     messages = [{"role": "user", "content": query}]
     try:
@@ -593,19 +614,18 @@ def _shutdown_repl(
     active_worker_cancel: Any = None,
     active_worker_thread: Any = None,
 ) -> None:
-    """Safely and gracefully shut down all background services and exit cleanly."""
+    """Safely and instantly shut down all background services and exit cleanly."""
     try:
         if active_worker_cancel is not None:
             active_worker_cancel.set()
         if active_worker_thread is not None and active_worker_thread.is_alive():
-            active_worker_thread.join(timeout=0.5)
+            active_worker_thread.join(timeout=0.05)
     except Exception:
         pass
 
     try:
-        if sched is not None:
-            sched.stop()
-            scheduler.set_default(None)
+        from .utils import voice
+        voice.interrupt_speech()
     except Exception:
         pass
 
@@ -622,19 +642,21 @@ def _shutdown_repl(
         pass
 
     try:
+        if sched is not None:
+            sched.stop()
+            scheduler.set_default(None)
+    except Exception:
+        pass
+
+    try:
         from . import mcp
         mcp.get_manager().close_all()
     except Exception:
         pass
 
     try:
-        from .utils import voice
-        voice.interrupt_speech()
-    except Exception:
-        pass
-
-    try:
         log.jarvis("Goodbye, sir. All systems offline.")
+        voice.speak("Goodbye, sir. All systems offline.", wait=True)
     except Exception:
         pass
 
@@ -803,17 +825,20 @@ def repl(cfg: Config | None = None) -> int:
                 step_num = event.get("step", 1)
                 args = event.get("args", {})
                 narration = _build_console_narration(step_num, thought, act, args)
-                log.jarvis(f"🎙️ [Side Agent]: {narration}")
-                voice.speak(narration, wait=False)
+                if not voice.is_live_mode_active():
+                    log.jarvis(f"🎙️ [Side Agent]: {narration}")
+                    voice.speak(narration, wait=False)
             elif ev == "plan_start":
                 pname = event.get("plan_name", "")
-                log.jarvis(f"🎙️ [Side Agent]: Initiating plan: {pname}.")
-                voice.speak(f"Initiating plan: {pname}.", wait=False)
+                if not voice.is_live_mode_active():
+                    log.jarvis(f"🎙️ [Side Agent]: Initiating plan: {pname}.")
+                    voice.speak(f"Initiating plan: {pname}.", wait=False)
             elif ev == "ask":
                 q = event.get("question", "")
                 waiting_for_user_answer[0] = True
-                log.jarvis(f"⚠️ [Worker Question]: {q}")
-                voice.speak(f"Question for you: {q}", wait=False)
+                if not voice.is_live_mode_active():
+                    log.jarvis(f"⚠️ [Worker Question]: {q}")
+                    voice.speak(f"Question for you: {q}", wait=False)
             elif ev == "answer_received":
                 waiting_for_user_answer[0] = False
 
@@ -848,16 +873,20 @@ def repl(cfg: Config | None = None) -> int:
                 # window exits normally rather than "cancelling" completed work.
                 done_event.set()
                 if not cancel_event.is_set():
-                    log.jarvis(f"🎙️ [Communicating Agent]: Completed: {result}")
-                    voice.speak(f"Completed: {result}", wait=False)
+                    if not voice.is_live_mode_active():
+                        log.jarvis(f"🎙️ [Communicating Agent]: Completed: {result}")
+                        voice.speak(f"Completed: {result}", wait=False)
                     log.rule(f"done in {time.time() - start_time:.1f}s")
             except Exception as exc:
                 if not cancel_event.is_set():
                     log.error(f"unexpected error: {exc}")
-                    log.jarvis(f"🎙️ [Communicating Agent]: Task failed: {exc}")
+                    if not voice.is_live_mode_active():
+                        log.jarvis(f"🎙️ [Communicating Agent]: Task failed: {exc}")
+                        voice.speak(f"Task failed: {exc}", wait=False)
             finally:
                 done_event.set()
 
+        last_ctrl_c_time = 0.0
         while True:
             is_busy = (
                 active_worker_thread is not None
@@ -868,6 +897,13 @@ def repl(cfg: Config | None = None) -> int:
             try:
                 task = _read_input(current_prompt).strip()
             except (EOFError, KeyboardInterrupt):
+                now = time.time()
+                # If Ctrl+C is pressed twice within 1.5s, exit immediately
+                if now - last_ctrl_c_time < 1.5:
+                    print()
+                    break
+                last_ctrl_c_time = now
+
                 if _cancel_console_worker(
                     active_worker_thread,
                     active_worker_cancel,
@@ -877,20 +913,28 @@ def repl(cfg: Config | None = None) -> int:
                     agent,
                     tracker,
                 ):
-                    log.warn("Cancelling active background worker task...")
+                    log.warn("Cancelling active background worker task... (Press Ctrl+C again to exit)")
                     if active_worker_thread:
-                        active_worker_thread.join(timeout=1.5)
+                        active_worker_thread.join(timeout=0.05)
                     continue
                 print()
                 break
             if not task:
                 continue
 
+            # Re-evaluate worker state now that user input was read (the worker may have finished while user was typing)
+            is_busy = (
+                active_worker_thread is not None
+                and active_worker_thread.is_alive()
+                and not active_worker_done.is_set()
+            )
+
             # If worker is waiting for a mid-task answer, forward directly
             if is_busy and waiting_for_user_answer[0]:
                 log.info(f"Answer for Worker: '{task}'")
-                log.jarvis(f"🎙️ [Communicating Agent]: Understood, proceeding with '{task}'...")
-                voice.speak(f"Understood, proceeding with {task}", wait=False)
+                if not voice.is_live_mode_active():
+                    log.jarvis(f"🎙️ [Communicating Agent]: Understood, proceeding with '{task}'...")
+                    voice.speak(f"Understood, proceeding with {task}", wait=False)
                 worker_question_queue.put(task)
                 waiting_for_user_answer[0] = False
                 continue
@@ -924,8 +968,9 @@ def repl(cfg: Config | None = None) -> int:
                         tracker,
                     ):
                         log.warn("Cancelling active Main Worker task...")
-                        log.jarvis("🎙️ [Side Agent]: Task cancelled, sir.")
-                        voice.speak("Task cancelled, sir.", wait=False)
+                        if not voice.is_live_mode_active():
+                            log.jarvis("🎙️ [Side Agent]: Task cancelled, sir.")
+                            voice.speak("Task cancelled, sir.", wait=False)
                     else:
                         log.ok("No active task running.")
                     continue
@@ -945,8 +990,8 @@ def repl(cfg: Config | None = None) -> int:
                         print()
                         log.ok("hands-free mode off; back to the prompt.")
                     continue
-                if c.startswith("voice"):
-                    if c.endswith("off"):
+                if c in {"voice", "voice on", "voice off"}:
+                    if c == "voice off":
                         _persist_voice(False)
                         log.ok("voice is already off (typed prompt).")
                         continue
@@ -963,6 +1008,23 @@ def repl(cfg: Config | None = None) -> int:
                 if _command(task, cfg):
                     break
                 continue
+
+            # If the user enters an actionable computer task while an older worker is still running,
+            # cancel the older worker so the new task executes without being swallowed as chat.
+            if is_busy and agent._looks_like_task(task):
+                log.warn("Interrupting previous background task for new directive...")
+                _cancel_console_worker(
+                    active_worker_thread,
+                    active_worker_cancel,
+                    active_worker_done,
+                    worker_question_queue,
+                    waiting_for_user_answer,
+                    agent,
+                    tracker,
+                )
+                if active_worker_thread:
+                    active_worker_thread.join(timeout=0.2)
+                is_busy = False
 
             # ------------------------------------------------------------------ #
             # CONCURRENT SIDE AGENT CHAT (WHILE WORKER IS RUNNING)
@@ -984,8 +1046,9 @@ def repl(cfg: Config | None = None) -> int:
                     )
                     log.warn("Interrupted; active task cancellation requested.")
                     continue
-                log.jarvis(f"🎙️ [Side Agent]: {side_reply}")
-                voice.speak(side_reply, wait=False)
+                if not voice.is_live_mode_active():
+                    log.jarvis(f"🎙️ [Side Agent]: {side_reply}")
+                    voice.speak(side_reply, wait=False)
                 continue
 
             # Casual chat belongs to the Communicating Agent.  Only dispatch a
@@ -1000,8 +1063,9 @@ def repl(cfg: Config | None = None) -> int:
                 log.warn("Conversation interrupted; ready for your next request.")
                 continue
             if chat_reply is not None:
-                log.jarvis(f"🎙️ [Communicating Agent]: {chat_reply}")
-                voice.speak(chat_reply, wait=False)
+                if not voice.is_live_mode_active():
+                    log.jarvis(f"🎙️ [Communicating Agent]: {chat_reply}")
+                    voice.speak(chat_reply, wait=False)
                 continue
 
             # ------------------------------------------------------------------ #
@@ -1012,8 +1076,9 @@ def repl(cfg: Config | None = None) -> int:
 
             # 1. Speculative Fast Filler (<20ms instant acknowledgment by Side Agent)
             fast_filler = get_fast_filler(task)
-            log.jarvis(f"🎙️ [Communicating Agent]: {fast_filler}")
-            voice.speak(fast_filler, wait=False)
+            if not voice.is_live_mode_active():
+                log.jarvis(f"🎙️ [Communicating Agent]: {fast_filler}")
+                voice.speak(fast_filler, wait=False)
 
             # 2. Reset telemetry state
             tracker.reset_for_new_task(task, max_steps=cfg.safety.max_steps)
@@ -1173,8 +1238,9 @@ def _voice_loop(agent: Agent, cfg: Config, announce: bool = True) -> None:
         from .live.speculative import get_fast_filler
         from .live.telemetry_state import TaskTelemetryTracker
         fast_filler = get_fast_filler(task)
-        log.jarvis(f"🎙️ [Communicating Agent]: {fast_filler}")
-        voice.speak(fast_filler, wait=False)
+        if not voice.is_live_mode_active():
+            log.jarvis(f"🎙️ [Communicating Agent]: {fast_filler}")
+            voice.speak(fast_filler, wait=False)
 
         tracker = TaskTelemetryTracker()
         tracker.reset_for_new_task(task, max_steps=cfg.safety.max_steps)
@@ -1325,6 +1391,34 @@ def _command(cmd: str, cfg: Config) -> bool:
     elif c == "config":
         import json
         print(json.dumps(cfg.as_dict(), indent=2, default=str))
+    elif c in {"codex-login", "codex_login", "login-codex"}:
+        from .auth import codex_oauth
+        try:
+            tokens = codex_oauth.login()
+            log.ok(f"Logged in successfully! ChatGPT Account ID: {tokens.get('chatgpt_account_id', 'standard')}")
+        except Exception as exc:
+            log.error(f"Codex login failed: {exc}")
+    elif c in {"codex-status", "codex_status", "codex"}:
+        import time
+        from .auth import codex_oauth
+        tokens = codex_oauth.load_tokens()
+        if tokens.get("access_token"):
+            exp_in = tokens.get("expires_at", 0.0) - time.time()
+            log.rule("OPENAI CODEX SESSION STATUS", "cyan")
+            print(f"  • Source:     {tokens.get('source')}")
+            print(f"  • Account ID: {tokens.get('chatgpt_account_id') or 'N/A'}")
+            print(f"  • Expires:    {int(exp_in)}s (~{int(exp_in/3600)}h)")
+            print(f"  • Model:      {cfg.brain.model}")
+            log.rule()
+        else:
+            log.warn("OpenAI Codex session not found. Run ':codex-login' to sign in with ChatGPT.")
+    elif c in {"codex-logout", "codex_logout", "logout-codex"}:
+        from .auth import codex_oauth
+        removed = codex_oauth.logout()
+        if removed:
+            log.ok("Logged out of OpenAI Codex. Saved credentials removed.")
+        else:
+            log.info("No active OpenAI Codex session found to log out.")
     elif c.startswith("remember") or c == "remember":
         parts = cmd.strip().split(maxsplit=1)
         fact = parts[1].strip() if len(parts) > 1 else ""
@@ -1684,6 +1778,28 @@ def _voice_command(raw: str, cfg: Config) -> None:
                 log.warn("usage: :voice sensitivity <0.1 to 1.0>")
         else:
             log.info(f"Current barge-in sensitivity: {cfg.voice.barge_in_sensitivity:.2f}")
+    elif sub in {"engine", "backend"}:
+        if arg:
+            target = "kokoro" if arg.lower() in ("local", "kokoro") else arg.lower()
+            cfg.voice.engine = target
+            voice.configure(getattr(voice, "_brain", None), cfg.voice)
+            log.ok(f"TTS engine switched to: {cfg.voice.engine}")
+        else:
+            log.info(f"Current TTS engine: {cfg.voice.engine}")
+    elif sub in {"voice", "local_voice", "local-voice"}:
+        if arg:
+            cfg.voice.local_voice = arg
+            voice.configure(getattr(voice, "_brain", None), cfg.voice)
+            log.ok(f"Local Kokoro voice set to: {cfg.voice.local_voice}")
+        else:
+            log.info(f"Current local voice: {cfg.voice.local_voice}")
+    elif sub in {"fish_voice", "fish-voice", "reference_id"}:
+        if arg:
+            cfg.voice.fish_audio_voice_id = arg
+            voice.configure(getattr(voice, "_brain", None), cfg.voice)
+            log.ok(f"Fish Audio voice ID set to: {cfg.voice.fish_audio_voice_id}")
+        else:
+            log.info(f"Current Fish Audio voice ID: {cfg.voice.fish_audio_voice_id or '(default)'}")
     elif sub in {"interrupt", "stop", "quiet", "silence"}:
         was_speaking = voice.interrupt_speech()
         if was_speaking:
@@ -1695,8 +1811,17 @@ def _voice_command(raw: str, cfg: Config) -> None:
         print(f"  • Speaking Now:         {'YES' if voice.is_speaking() else 'No'}")
         print(f"  • Full-Duplex Barge-in: {'ENABLED' if cfg.voice.full_duplex else 'Disabled'}")
         print(f"  • Barge-in Sensitivity: {cfg.voice.barge_in_sensitivity:.2f}")
-        print(f"  • TTS Engine:           {cfg.voice.engine} ({cfg.voice.voice if cfg.voice.engine == 'gemini' else cfg.voice.local_voice})")
-        print(f"  • Commands:             :voice duplex on|off | :voice sensitivity <val> | :voice interrupt")
+        v_engine = cfg.voice.engine
+        if v_engine in ("fish", "fish_audio", "fish-audio", "fishaudio"):
+            sub_info = f"Fish Audio (model: {cfg.voice.fish_audio_model}, voice: {cfg.voice.fish_audio_voice_id or 'default'})"
+        elif v_engine == "gemini":
+            sub_info = f"Gemini ({cfg.voice.voice})"
+        elif v_engine in ("azure", "azure_speech"):
+            sub_info = f"Azure Speech ({cfg.voice.azure_speech_voice})"
+        else:
+            sub_info = f"{v_engine} ({cfg.voice.local_voice})"
+        print(f"  • TTS Engine:           {sub_info}")
+        print(f"  • Commands:             :voice engine <fish|edge|azure|kokoro|sapi|gemini> | :voice local_voice <name> | :voice fish_voice <id> | :voice duplex on|off | :voice interrupt")
         log.rule()
 
 

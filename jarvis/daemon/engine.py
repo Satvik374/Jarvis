@@ -173,6 +173,8 @@ class ProactiveDaemon:
         return triggered_rules
 
     def _dispatch_action(self, rule: EventRule, event: Event) -> None:
+        if self._stop_event.is_set():
+            return
         ev_type_val = event.type.value if hasattr(event.type, "value") else str(event.type)
         log.proactive(
             rule_name=rule.name,
@@ -194,7 +196,7 @@ class ProactiveDaemon:
             pass
 
         # 2. Voice announcement (if enabled)
-        if getattr(getattr(self.cfg, "daemon", None), "voice_announcements", True) and getattr(self.cfg, "voice_enabled", False):
+        if getattr(getattr(self.cfg, "daemon", None), "voice_announcements", True):
             try:
                 from ..utils import voice
                 speak_text = rule.action_target if rule.action_type == "notify" else event.message
@@ -208,6 +210,8 @@ class ProactiveDaemon:
             def _run_task():
                 from ..scheduler import desktop
                 with desktop():
+                    if self._stop_event.is_set():
+                        return
                     try:
                         self.task_runner(rule.action_target)
                     except Exception as exc:
@@ -220,9 +224,16 @@ class ProactiveDaemon:
             def _run_macro():
                 from ..scheduler import desktop
                 with desktop():
+                    if self._stop_event.is_set():
+                        return
                     try:
                         from ..macro.manager import get_macro_manager
-                        get_macro_manager().replay_macro(rule.action_target)
+                        from ..macro.player import MacroPlayer
+                        result = MacroPlayer(get_macro_manager()).play(
+                            rule.action_target, cancel_event=self._stop_event,
+                        )
+                        if not result.get("ok"):
+                            log.warn(f"Proactive macro replay error ({rule.name}): {result.get('message', 'Playback failed')}")
                     except Exception as exc:
                         log.warn(f"Proactive macro replay error ({rule.name}): {exc}")
 
@@ -265,7 +276,7 @@ class ProactiveDaemon:
     def stop(self) -> None:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=0.05)
         log.info("⏰ Proactive Background Daemon stopped.")
 
     # -- Persistence ------------------------------------------------------- #
