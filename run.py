@@ -84,6 +84,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--confirm", action="store_true", help="confirm each action")
     parser.add_argument("--steps", type=int, help="max steps per task")
     parser.add_argument("--check", action="store_true", help="run an environment check and exit")
+    parser.add_argument("--live-check", dest="live_check", action="store_true",
+                        help="with --check: open a real Gemini Live session and verify the model answers")
+    parser.add_argument("--live-audio", dest="live_audio",
+                        help="with --live-check: send this .wav instead of a synthesized phrase")
     parser.add_argument("--codex-login", action="store_true",
                         help="sign in with ChatGPT via OpenAI Codex OAuth flow (PKCE S256)")
     parser.add_argument("--codex-status", action="store_true",
@@ -215,7 +219,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_remote_mode(args, cfg)
 
     if args.check:
-        return run_check(cfg)
+        code = run_check(cfg)
+        if getattr(args, "live_check", False):
+            return _live_check(cfg, getattr(args, "live_audio", None)) or code
+        return code
 
     if args.codex_login:
         from jarvis.auth import codex_oauth
@@ -469,6 +476,8 @@ def run_check(cfg) -> int:
             log.ok(f"{cfg.brain.backend.title()} API key configured ({masked}) for model {cfg.brain.model}")
         else:
             log.warn(f"No API key configured for {cfg.brain.backend} backend.")
+        if cfg.brain.backend == "openrouter":
+            _check_openrouter(cfg)
     elif cfg.brain.backend == "ollama":
         _check_ollama(cfg)
     elif cfg.brain.backend in {"codex", "openai-codex", "chatgpt"}:
@@ -510,9 +519,199 @@ def run_check(cfg) -> int:
     return 0 if ok else 1
 
 
+def _live_check(cfg, audio_path: str | None = None) -> int:
+    """Open a real Live session and report whether the model answers.
+
+    Reporting that a key is "configured" says nothing about whether a voice
+    session works: a spent allowance, a retired model and a microphone that is
+    never heard look identical from the UI. This is the one check that talks to
+    Google, so a failure here is the account or the session, and a success here
+    with a silent browser points at the page.
+    """
+    from jarvis.live import readiness, verify
+
+    cfg = cfg
+    print()
+    log.info("Live voice check")
+
+    # Which settings are actually in force, and where they came from: an .env
+    # line silently outranks config.yaml, and that is the usual reason live
+    # voice runs a different model or voice than the file says.
+    live = cfg.live_voice
+    from jarvis.live import gemini_live
+
+    overrides = [
+        ("JARVIS_LIVE_PROVIDER", "provider"),
+        ("JARVIS_LIVE_MODEL", "model"),
+        ("JARVIS_LIVE_VOICE", "voice_name"),
+        ("JARVIS_LIVE_BACKEND", "backend"),
+        ("JARVIS_LIVE_GOOGLE_SEARCH", "google_search"),
+        ("JARVIS_LIVE_SCREEN_SHARE", "screen_share"),
+    ]
+    set_by_env = [name for name, _ in overrides if os.environ.get(name)]
+    live_key = readiness.gemini_api_key(cfg)
+    configured_model = gemini_live.model_candidates(live)[0]
+    opening_model = gemini_live.preferred_model(live, live_key)
+    log.info(
+        f"engine = {readiness.resolve_provider(cfg)}, model = {opening_model}, voice = "
+        f"{live.voice_name or gemini_live.DEFAULT_VOICE}"
+    )
+    if opening_model != configured_model:
+        # A measured verdict, not a guess: this key's sessions on that model came
+        # back silent, so the check opens one that hears and says which.
+        log.info(
+            f"{configured_model} is configured but ignored audio on this key; "
+            f"opening {opening_model} instead"
+        )
+        log.info(
+            "  delete " + str(gemini_live.audio_state_path())
+            + " to try it again"
+        )
+    if os.environ.get("JARVIS_LIVE_BACKEND") == "gcloud" and live.backend != "gcloud":
+        # Worth saying out loud: the key wins over the backend, so a leftover
+        # `JARVIS_LIVE_BACKEND=gcloud` is not what the session is using.
+        log.info("JARVIS_LIVE_BACKEND=gcloud is set but a key is present; the key path is used")
+    if set_by_env:
+        log.info(f"overridden by the environment: {', '.join(set_by_env)}")
+
+    if readiness.resolve_provider(cfg) != "gemini":
+        log.warn(
+            "live voice is configured for another engine; this check only exercises "
+            "Gemini Live (set live_voice.provider: gemini to test it)"
+        )
+        return 1
+    if not readiness.gemini_api_key(cfg):
+        log.warn("no Gemini API key for live voice")
+        log.info("  create one at https://aistudio.google.com/apikey, then set")
+        log.info("  JARVIS_LIVE_API_KEY in .env, or store it in the vault with")
+        log.info("  ':secret set JARVIS_LIVE_API_KEY <key>' in the Jarvis console")
+        return 1
+
+    report = verify.verify_live_voice(cfg, audio_path)
+    print()
+    if report.answered:
+        log.ok("live voice answered - the key, the model and the session all work")
+        if report.ignored_audio:
+            # The answer came from a *later* candidate, so the configured model
+            # is the one thing here that does not work - and it is the one thing
+            # the API never complains about.
+            log.warn(
+                ", ".join(report.ignored_audio)
+                + " accepted the session and ignored the audio; this answer came from "
+                + report.model
+            )
+            log.info("  the browser relay and the terminal client now skip a model that")
+            log.info("  ignores audio, so live voice works without changing config.yaml")
+        else:
+            log.info("a silent browser with this passing is the page's own audio; try")
+            log.info("  python _relay_probe.py --wav <your recording.wav>")
+        return 0
+
+    log.warn("the session produced no answer")
+    if report.quota:
+        # The whole point of this check: this state looks exactly like a working
+        # session from the UI, and no local setting can fix it.
+        log.warn("the Live quota for this key is spent - that is why nothing answers")
+        log.info("  the browser shows a session opening and then silence, which is")
+        log.info("  this same state; there is nothing to fix in config.yaml")
+        log.info("  remedies: wait for the quota to reset, enable billing on the")
+        log.info("  key's project, or run the Fish engine with live_voice.provider: fish")
+        return 1
+    if report.ignored_audio:
+        # Measured, not inferred: a model can accept the handshake, take every
+        # frame, and never answer - while the same clip on another model comes
+        # back transcribed. Nothing in the API reports it, so this check is the
+        # only place it can be named.
+        log.warn(
+            "these live models accepted the session and ignored the audio: "
+            + ", ".join(report.ignored_audio)
+        )
+        log.info("  a model that answers a text turn and not your microphone is")
+        log.info("  not a configuration problem; it is that model refusing audio")
+        log.info("  input on this key. config.yaml's live_voice.model should name")
+        log.info("  a live model that accepts audio on this key")
+        return 1
+    if report.handshake != "setupComplete":
+        log.warn(f"the handshake never completed: {report.error or report.handshake}")
+        if report.error:
+            log.info(f"  upstream said: {report.error[:300]}")
+        log.info("  remedies: check the key is valid and unrestricted, or point")
+        log.info("  live_voice.model at a live model this key can open")
+    elif report.error:
+        log.info(f"  {report.error}")
+    else:
+        log.warn("the model accepted the setup and the audio, and said nothing back")
+        log.info("  that is an account/allowance state, not a Jarvis setting: check")
+        log.info("  the Live quota on the key's project, or try another live model")
+    return 1
+
+
 def _has(mod: str) -> bool:
     import importlib.util
     return importlib.util.find_spec(mod) is not None
+
+
+def _check_openrouter(cfg) -> None:
+    """Ask OpenRouter whether this key and this model id really work.
+
+    A key and a model id are both just text, so reporting that they are
+    "configured" says nothing: a mistyped key, an exhausted account and a model
+    slug that OpenRouter has retired all look equally healthy in config.yaml.
+    Both answers are one unauthenticated-friendly GET away.
+    """
+    import requests
+
+    from jarvis.agent.brain import provider_error_message
+
+    base = (cfg.brain.base_url or "https://openrouter.ai/api/v1").rstrip("/")
+    key = cfg.brain.api_key or os.environ.get("OPENROUTER_API_KEY", "")
+    if not key:
+        log.info("set OPENROUTER_API_KEY in .env, or ':secret set OPENROUTER_API_KEY sk-or-...'")
+        return
+
+    try:
+        r = requests.get(f"{base}/key", headers={"Authorization": f"Bearer {key}"}, timeout=15)
+    except Exception as exc:
+        log.warn(f"OpenRouter unreachable at {base}: {exc}")
+        return
+    if r.status_code == 401:
+        log.warn("OpenRouter rejected the key (401) - it is wrong, revoked, or truncated")
+        return
+    if not r.ok:
+        log.warn(f"OpenRouter /key returned {r.status_code}: {provider_error_message(r)}")
+        return
+
+    info = (r.json() or {}).get("data") or {}
+    tier = "free tier" if info.get("is_free_tier") else "paid"
+    limit, usage = info.get("limit"), info.get("usage")
+    if isinstance(limit, (int, float)) and limit > 0 and isinstance(usage, (int, float)):
+        log.ok(f"OpenRouter key accepted ({tier}), credit used ${usage:.2f} of ${limit:.2f}")
+    else:
+        log.ok(f"OpenRouter key accepted ({tier})")
+
+    try:
+        catalogue = requests.get(f"{base}/models", timeout=15).json().get("data", [])
+    except Exception as exc:
+        log.warn(f"could not read the OpenRouter model catalogue: {exc}")
+        return
+
+    match = next((m for m in catalogue if str(m.get("id")) == cfg.brain.model), None)
+    if match is None:
+        close = [str(m.get("id")) for m in catalogue if cfg.brain.model.split("/")[-1].split(":")[0] in str(m.get("id"))]
+        log.warn(f"model '{cfg.brain.model}' is not in OpenRouter's catalogue "
+                 f"({len(catalogue)} models). Did the slug change?")
+        if close:
+            log.info(f"similar: {', '.join(sorted(close)[:6])}")
+        return
+
+    arch = match.get("architecture") or {}
+    inputs = arch.get("input_modalities") or ["text"]
+    free = str((match.get("pricing") or {}).get("prompt", "")) in {"0", "0.0"}
+    log.ok(f"model '{match['id']}' is available ({match.get('context_length')} ctx tokens, "
+           f"inputs: {', '.join(inputs)}, {'free' if free else 'paid'})")
+    if "image" not in inputs and cfg.brain.use_vision:
+        log.warn(f"'{cfg.brain.model}' does not accept images, but vision is on - every "
+                 f"screenshot would be rejected. Set JARVIS_VISION=0 (or '/vision off').")
 
 
 def _check_ollama(cfg) -> None:

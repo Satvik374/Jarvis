@@ -16,6 +16,17 @@ import websockets
 
 from ..config import LiveVoiceConfig
 from ..utils import logging as log
+from . import gemini_live
+
+
+#: Live model names the Live API no longer serves, mapped to their replacement.
+#:
+#: Verified against the API's own model listing - `gemini-2.0-flash-exp` is
+#: absent from it while `gemini-3.1-flash-live-preview` is present. Kept as a
+#: name here because that is what the tests and the terminal HUD refer to; the
+#: table itself lives with the rest of the protocol knowledge, so the terminal
+#: supervisor and the browser relay cannot disagree about what is retired.
+RETIRED_LIVE_MODELS: dict[str, str] = gemini_live.RETIRED_MODELS
 
 
 class GeminiLiveClient:
@@ -46,6 +57,12 @@ class GeminiLiveClient:
         self._cached_token = ""
         self._token_expiry = 0.0
         self._project_id = ""
+        # Google Search grounding is offered on the first attempt only. The API
+        # answers a grounding refusal with the same generic quota error as a
+        # spent Live allowance, so a retry without the search tool is what tells
+        # the two apart (see jarvis.live.gemini_live).
+        self._grounding_enabled = gemini_live.grounding_wanted(config)
+        self.grounding_blocked = ""
 
     @property
     def is_connected(self) -> bool:
@@ -103,6 +120,35 @@ class GeminiLiveClient:
             }
         }
         self._post_message(msg)
+
+    def send_video_frame(self, jpeg_bytes: bytes) -> None:
+        """Send one screen frame to the live model.
+
+        Frames must keep arriving for the model to see anything: a single still
+        was answered with "I cannot see any image", while frames sent about once
+        a second were described correctly. Callers stream, they do not snapshot.
+        """
+        if not self._is_connected or not jpeg_bytes or self._loop is None:
+            return
+        msg = {
+            "realtimeInput": {
+                "video": {
+                    "mimeType": "image/jpeg",
+                    "data": base64.b64encode(jpeg_bytes).decode("ascii"),
+                }
+            }
+        }
+        self._post_message(msg)
+
+    def send_audio_stream_end(self) -> None:
+        """Tell the model the microphone stopped, so it can finish its turn.
+
+        Only meaningful while automatic activity detection is on (the default);
+        without it a muted microphone looks like a very long silence.
+        """
+        if not self._is_connected or self._loop is None:
+            return
+        self._post_message({"realtimeInput": {"audioStreamEnd": True}})
 
     def send_text_turn(self, text: str) -> None:
         """Inject a text message/context notification into the active live session."""
@@ -232,9 +278,15 @@ class GeminiLiveClient:
             "Please run 'gcloud auth application-default login' in terminal."
         )
 
-    def _build_setup_message(self, project_id: str = "", model_name: str | None = None) -> dict[str, Any]:
+    def _build_setup_message(
+        self,
+        project_id: str = "",
+        model_name: str | None = None,
+        *,
+        google_search: bool | None = None,
+    ) -> dict[str, Any]:
         loc = self.config.location or "us-central1"
-        raw_model = model_name or self.config.model or "gemini-3.1-flash-live-preview"
+        raw_model = model_name or self.config.model or gemini_live.DEFAULT_MODEL
 
         if raw_model.startswith("models/"):
             model_resource = raw_model
@@ -244,8 +296,6 @@ class GeminiLiveClient:
             model_resource = f"projects/{project_id}/locations/{loc}/publishers/google/models/{raw_model}"
         else:
             model_resource = f"models/{raw_model}"
-
-        voice_name = self.config.voice_name or "Aoede"
 
         system_text = (
             "You are Jarvis, the real-time AI conversational voice executive and supervisor. "
@@ -261,7 +311,13 @@ class GeminiLiveClient:
             "      extracting web data, or manipulating files), you MUST call the 'run_jarvis_task' tool with the exact "
             "     natural language task instruction to prompt the text-based Jarvis worker.\n"
             "   - Inform the user briefly in voice that you are setting the text agent to work on it.\n"
-            "3. MID-TASK SUPERVISION AND PROGRESS NARRATION:\n"
+            "3. SEEING THE SCREEN:\n"
+            "   - You do not receive the screen by default. When you need to know what is on the user's "
+            "screen, call 'share_screen'; frames then arrive about once a second. Call "
+            "'stop_screen_share' as soon as you are done looking.\n"
+            "   - To change what a window shows, hand the job to the text agent with 'run_jarvis_task' - "
+            "it clicks and types with full screen awareness.\n"
+            "4. MID-TASK SUPERVISION AND PROGRESS NARRATION:\n"
             "   - While the text-based Jarvis agent is executing the task, you will receive real-time progress events.\n"
             "   - Monitor what the text-based model is doing and proactively speak to the user, telling them what has "
             "     been done and what will be done next in the mid-task.\n"
@@ -271,87 +327,101 @@ class GeminiLiveClient:
         if self.system_instruction:
             system_text = f"{system_text}\n\n{self.system_instruction}"
 
-        tools = [
+        declarations = [
             {
-                "functionDeclarations": [
-                    {
-                        "name": "run_jarvis_task",
-                        "description": (
-                            "Prompt the normal text-based Jarvis AI agent to perform a task on the computer "
-                            "(e.g. clicking UI, launching apps, typing, web extraction, bash/python coding, file operations)."
-                        ),
-                        "parameters": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "task": {
-                                    "type": "STRING",
-                                    "description": "The exact natural language task instructions for Jarvis to execute.",
-                                },
-                            },
-                            "required": ["task"],
+                "name": "run_jarvis_task",
+                "description": (
+                    "Prompt the normal text-based Jarvis AI agent to perform a task on the computer "
+                    "(e.g. clicking UI, launching apps, typing, web extraction, bash/python coding, file operations)."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "task": {
+                            "type": "STRING",
+                            "description": "The exact natural language task instructions for Jarvis to execute.",
                         },
                     },
-                    {
-                        "name": "cancel_task",
-                        "description": "Immediately cancel/abort the currently running task when the user asks to stop.",
-                        "parameters": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "reason": {
-                                    "type": "STRING",
-                                    "description": "Optional reason for cancellation.",
-                                },
-                            },
+                    "required": ["task"],
+                },
+            },
+            {
+                "name": "cancel_task",
+                "description": "Immediately cancel/abort the currently running task when the user asks to stop.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "reason": {
+                            "type": "STRING",
+                            "description": "Optional reason for cancellation.",
                         },
                     },
-                    {
-                        "name": "ask_task_status",
-                        "description": "Query the current state and step progress of the active task.",
-                        "parameters": {
-                            "type": "OBJECT",
-                            "properties": {},
+                },
+            },
+            {
+                "name": "ask_task_status",
+                "description": "Query the current state and step progress of the active task.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "answer_agent_question",
+                "description": "Provide the user's answer or clarification to a mid-task question that the Main Worker Agent asked.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "answer": {
+                            "type": "STRING",
+                            "description": "The user's answer or clarification to the agent's question.",
                         },
                     },
-                    {
-                        "name": "answer_agent_question",
-                        "description": "Provide the user's answer or clarification to a mid-task question that the Main Worker Agent asked.",
-                        "parameters": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "answer": {
-                                    "type": "STRING",
-                                    "description": "The user's answer or clarification to the agent's question.",
-                                },
-                            },
-                            "required": ["answer"],
+                    "required": ["answer"],
+                },
+            },
+            # Screen sharing, answered locally by the supervisor: it captures the
+            # desktop about once a second and streams the frames through this same
+            # session while the model wants to look.
+            {
+                "name": "share_screen",
+                "description": (
+                    "Start seeing the user's screen so you can check what an app or dialog is showing. "
+                    "Frames then arrive about once a second until you call stop_screen_share."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "reason": {
+                            "type": "STRING",
+                            "description": "Short reason you need to look.",
                         },
                     },
-                ]
-            }
+                },
+            },
+            {
+                "name": "stop_screen_share",
+                "description": "Stop seeing the user's screen once you have finished looking.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {},
+                },
+            },
         ]
 
-        return {
-            "setup": {
-                "model": model_resource,
-                "responseModalities": ["AUDIO"],
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {
-                            "voiceName": voice_name,
-                        }
-                    }
-                },
-                # Native-audio sessions return audio chunks. Request a text
-                # transcript explicitly so terminal users can follow both
-                # agents without relying on speaker output.
-                "inputAudioTranscription": {},
-                "outputAudioTranscription": {},
-                "systemInstruction": {
-                    "parts": [{"text": system_text}],
-                },
-                "tools": tools,
-            }
-        }
+        # Everything except the model resource comes from the shared builder, so
+        # this session and the browser relay cannot drift apart: response
+        # modalities inside generationConfig, media resolution, the sliding
+        # context window, both transcripts, and the optional search tool.
+        if google_search is None:
+            google_search = self._grounding_enabled
+        return gemini_live.build_setup(
+            self.config,
+            model=model_resource,
+            system_instruction=system_text,
+            google_search=bool(google_search),
+            declarations=declarations,
+        )
 
     def _model_candidates(self, use_api_key: bool) -> list[str]:
         """Return configured model first, then compatible recovery models.
@@ -361,9 +431,21 @@ class GeminiLiveClient:
         hard-coded list.  Keeping the configured value first also makes model
         failures diagnosable instead of silently running a different model.
         """
-        configured = (self.config.model or "").strip()
+        configured = RETIRED_LIVE_MODELS.get(
+            (self.config.model or "").strip(), (self.config.model or "").strip()
+        )
+        if configured != (self.config.model or "").strip():
+            log.warn(
+                f"live_voice.model names '{self.config.model}', which the Live API no "
+                f"longer serves; using '{configured}' instead."
+            )
         if use_api_key:
+            # gemini-3.8-live is the model this project runs (the Google AI
+            # Studio template's), so it is also the first fallback: a session
+            # must not quietly end up on an older preview when the configured
+            # name is unavailable.
             fallbacks = [
+                "models/gemini-3.8-live",
                 "models/gemini-2.5-flash-native-audio-latest",
                 "models/gemini-2.5-flash-native-audio-preview-12-2025",
                 "models/gemini-2.5-flash-native-audio-preview-09-2025",
@@ -376,7 +458,18 @@ class GeminiLiveClient:
                 "gemini-2.0-flash",
                 "gemini-3.1-flash-live",
             ]
-        return list(dict.fromkeys([model for model in [configured, *fallbacks] if model]))
+        candidates = [RETIRED_LIVE_MODELS.get(model, model) for model in [configured, *fallbacks]]
+        candidates = list(dict.fromkeys([model for model in candidates if model]))
+        # A model that accepted a session and ignored the microphone for this key
+        # must not stay first just because it is the configured one: that session
+        # opens, hears nothing and never answers, which is the failure this
+        # package measured on gemini-3.8-live (see gemini_live._AUDIO_DEAF).
+        if use_api_key:
+            key = self._api_key()
+            hearing = [model for model in candidates if not gemini_live.audio_deaf(model, key)]
+            deaf = [model for model in candidates if gemini_live.audio_deaf(model, key)]
+            return hearing + deaf
+        return candidates
 
     async def _disconnect(self) -> None:
         if self._ws is not None:
@@ -471,6 +564,19 @@ class GeminiLiveClient:
                         await asyncio.sleep(0.2)
                         continue
 
+                    # A refusal that mentions quota is ambiguous: either the
+                    # Live allowance is spent or the Google Search tool was
+                    # rejected. Retrying the identical setup without that tool
+                    # is the only way to tell, and it costs one handshake.
+                    if self._grounding_enabled and gemini_live.quota_refusal(str(cc_exc)):
+                        self._grounding_enabled = False
+                        self.grounding_blocked = str(cc_exc)
+                        log.warn("Gemini Live refused the handshake with a quota error while "
+                                 "Google Search grounding was offered; retrying without it.")
+                        self._remember_grounding_failure(str(cc_exc))
+                        await asyncio.sleep(0.2)
+                        continue
+
                     if not logged_fallback_notice:
                         log.warn(f"Gemini Live connection closed: {cc_exc}. Retrying automatically.")
                         logged_fallback_notice = True
@@ -480,10 +586,31 @@ class GeminiLiveClient:
             except Exception as exc:
                 self._is_connected = False
                 if self._is_running:
+                    if self._grounding_enabled and gemini_live.quota_refusal(str(exc)):
+                        self._grounding_enabled = False
+                        self.grounding_blocked = str(exc)
+                        log.warn("Gemini Live refused the handshake with a quota error while "
+                                 "Google Search grounding was offered; retrying without it.")
+                        self._remember_grounding_failure(str(exc))
+                        await asyncio.sleep(0.2)
+                        continue
                     if not logged_fallback_notice:
                         log.warn(f"Gemini Live connection failed: {exc}. Retrying automatically.")
                         logged_fallback_notice = True
                     await asyncio.sleep(60.0)
+
+    def _remember_grounding_failure(self, reason: str) -> None:
+        """Let the voice report say why there is no web search this session."""
+        try:
+            from . import readiness
+
+            readiness.remember_failure(
+                "gemini_grounding",
+                "Google Search grounding was refused for this key (a paid-plan feature), "
+                f"so live voice runs without web search: {str(reason)[:160]}",
+            )
+        except Exception:
+            pass
 
     async def _send_loop(self, ws: Any) -> None:
         while self._is_running:

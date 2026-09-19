@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "preferences": {
+    "destination": {
+      "value": "youtube",
+      "confirmed_in": [
+        "jarvis-promo"
+      ],
+      "updated_at": "2026-09-19T09:57:17.453Z"
+    },
+    "aspect": {
+      "value": "1920x1080",
+      "confirmed_in": [
+        "jarvis-promo"
+      ],
+      "updated_at": "2026-09-19T09:57:17.558Z"
+    },
+    "language": {
+      "value": "en",
+      "confirmed_in": [
+        "jarvis-promo"
+      ],
+      "updated_at": "2026-09-19T09:57:17.637Z"
+    },
+    "flow": {
+      "value": "automation",
+      "confirmed_in": [
+        "jarvis-promo"
+      ],
+      "updated_at": "2026-09-19T09:57:17.742Z"
+    },
+    "storyboard": {
+      "value": "yes",
+      "confirmed_in": [
+        "jarvis-promo"
+      ],
+      "updated_at": "2026-09-19T09:57:17.829Z"
+    },
+    "style_preset.product-launch-video": {
+      "value": "broadside",
+      "confirmed_in": [
+        "jarvis-promo"
+      ],
+      "updated_at": "2026-09-19T10:05:30.271Z"
+    }
+  },
+  "sightings": {}
+}

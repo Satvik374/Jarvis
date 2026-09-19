@@ -1,0 +1,360 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Orbitron";
+      src: url("assets/fonts/Orbitron-Variable.woff2") format("woff2");
+      font-weight: 400 900;
+      font-style: normal;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-500.woff2") format("woff2");
+      font-weight: 500;
+      font-style: normal;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Outfit";
+      src: url("assets/fonts/Outfit-400.woff2") format("woff2");
+      font-weight: 400;
+      font-style: normal;
+      font-display: block;
+    }
+
+    #root {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      color: #e5f8ff;
+    }
+
+    /* ---- the real screen: the spine plate, static, 1:1 ---- */
+    .f01-plate {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 1920px;
+      height: 935px;
+      display: block;
+      object-fit: cover;
+    }
+
+    /* ---- mono chrome ---- */
+    .f01-chrome {
+      position: absolute;
+      font-family: "JetBrains Mono", monospace;
+      font-weight: 500;
+      font-size: 15px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #8eaab9;
+      white-space: nowrap;
+      display: flex;
+      align-items: baseline;
+    }
+    .f01-caret {
+      display: inline-block;
+      width: 8px;
+      color: #00f0ff;
+      opacity: 0;
+    }
+    .f01-rule {
+      position: absolute;
+      left: 60px;
+      top: 792px;
+      width: 36px;
+      height: 2px;
+      background: #00f0ff;
+      transform-origin: left center;
+    }
+    .f01-observe {
+      left: 60px;
+      top: 806px;
+    }
+
+    /* ---- the clicked control: real bbox (1454,17)-(1540,50) ---- */
+    .f01-target {
+      position: absolute;
+      left: 1454px;
+      top: 17px;
+      width: 86px;
+      height: 33px;
+      border: 1px solid rgba(0, 240, 255, 0.5);
+      background: rgba(0, 240, 255, 0.08);
+      opacity: 0;
+    }
+    .f01-brk {
+      position: absolute;
+      left: 1454px;
+      top: 17px;
+      width: 86px;
+      height: 33px;
+    }
+    .f01-brk i {
+      position: absolute;
+      width: 13px;
+      height: 13px;
+      border: 0 solid #00f0ff;
+      opacity: 0;
+    }
+    .f01-brk i.tl {
+      left: -3px;
+      top: -3px;
+      border-left-width: 2px;
+      border-top-width: 2px;
+    }
+    .f01-brk i.tr {
+      right: -3px;
+      top: -3px;
+      border-right-width: 2px;
+      border-top-width: 2px;
+    }
+    .f01-brk i.bl {
+      left: -3px;
+      bottom: -3px;
+      border-left-width: 2px;
+      border-bottom-width: 2px;
+    }
+    .f01-brk i.br {
+      right: -3px;
+      bottom: -3px;
+      border-right-width: 2px;
+      border-bottom-width: 2px;
+    }
+    .f01-leader {
+      position: absolute;
+      left: 1496px;
+      top: 51px;
+      width: 1px;
+      height: 18px;
+      background: #00f0ff;
+      transform-origin: top center;
+      opacity: 0;
+    }
+    .f01-badge {
+      position: absolute;
+      left: 1497px;
+      top: 72px;
+      font-family: "JetBrains Mono", monospace;
+      font-weight: 500;
+      font-size: 16px;
+      letter-spacing: 0.02em;
+      color: #e5f8ff;
+      white-space: nowrap;
+    }
+
+    /* ---- the cursor: the actor ---- */
+    .f01-cursor {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 13px;
+      height: 19px;
+      pointer-events: none;
+      z-index: 30;
+    }
+    .f01-ripple {
+      position: absolute;
+      left: 1497px;
+      top: 33px;
+      width: 96px;
+      height: 96px;
+      margin-left: -48px;
+      margin-top: -48px;
+      border-radius: 50%;
+      border: 2px solid #00f0ff;
+      transform: scale(0);
+      opacity: 0;
+      pointer-events: none;
+      z-index: 20;
+    }
+  </style>
+
+  <div id="root" data-composition-id="01-element-three-of-forty-one" data-width="1920" data-height="1080">
+    <img
+      id="f01-plate"
+      class="clip f01-plate"
+      src="assets/som-ui-home-clean-raw.png"
+      alt=""
+      data-start="0"
+      data-duration="6.315"
+      data-track-index="0"
+    />
+
+    <div class="f01-rule"></div>
+    <div class="f01-chrome f01-observe">
+      <span class="f01-observe-text"></span><span class="f01-caret f01-caret-observe">_</span>
+    </div>
+
+    <div class="f01-target"></div>
+    <div class="f01-ripple f01-r1"></div>
+    <div class="f01-ripple f01-r2"></div>
+    <div class="f01-ripple f01-r3"></div>
+
+    <div class="f01-brk">
+      <i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i>
+    </div>
+    <div class="f01-leader"></div>
+    <div class="f01-badge">
+      <span class="f01-badge-text"></span><span class="f01-caret f01-caret-badge">_</span>
+    </div>
+
+    <div class="f01-cursor">
+      <svg width="13" height="19" viewBox="0 0 13 19" aria-hidden="true">
+        <path d="M0 0 L0 15.4 L4.1 11.7 L6.7 18 L9.5 16.7 L6.9 10.6 L12.2 10.6 Z" fill="#e5f8ff" stroke="#02070d" stroke-width="1" />
+      </svg>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+
+      // ---- Scene 1 (0.0-1.2s): the plate alone, one dim mono line typing on ----
+      const OBSERVE = [
+        { t: 0.1, text: "" },
+        { t: 0.34, text: "obse" },
+        { t: 0.5, text: "observe · 4" },
+        { t: 0.68, text: "observe · 41 c" },
+        { t: 0.86, text: "observe · 41 controls" },
+      ];
+      const observeEl = document.querySelector(".f01-observe-text");
+      const caretO = document.querySelector(".f01-caret-observe");
+      const d1 = { t: 0 };
+      tl.to(
+        d1,
+        {
+          t: 1.2,
+          duration: 1.2,
+          ease: "none",
+          onUpdate: () => {
+            let s = "";
+            for (let i = OBSERVE.length - 1; i >= 0; i--) {
+              if (d1.t >= OBSERVE[i].t) {
+                s = OBSERVE[i].text;
+                break;
+              }
+            }
+            observeEl.textContent = s;
+          },
+        },
+        0,
+      );
+      const b1 = { p: 0 };
+      tl.to(
+        b1,
+        {
+          p: Math.PI * 2 * 5,
+          duration: 2.5,
+          ease: "none",
+          onUpdate: () => {
+            caretO.style.opacity = Math.sin(b1.p) > 0 ? "1" : "0";
+          },
+        },
+        0.1,
+      );
+      tl.set(caretO, { opacity: 0 }, 2.6);
+      tl.fromTo(".f01-rule", { scaleX: 0, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.45, ease: "power3.out" }, 0.3);
+
+      // ---- Scene 2 (1.2-2.1s): the cursor decel-travels the toolbar row ----
+      // explicit resting baseline: a seek before the first tween must not inherit a later fromTo
+      tl.set(".f01-cursor", { x: -70, y: 33, scale: 1 }, 0);
+      tl.set(".f01-target", { scale: 1 }, 0);
+      tl.fromTo(
+        ".f01-cursor",
+        { x: -70, y: 33 },
+        { x: 1497, y: 33, duration: 0.78, ease: "power3.out" },
+        1.2,
+      );
+      tl.fromTo(".f01-target", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "power2.out" }, 1.42);
+
+      // ---- Scene 3 (2.1-3.0s): land dead-centre, press, emit ONE ripple ----
+      tl.fromTo(
+        ".f01-cursor",
+        { scale: 1 },
+        { scale: 0.86, duration: 0.07, ease: "power2.in", yoyo: true, repeat: 1, immediateRender: false },
+        2.08,
+      );
+      tl.fromTo(
+        ".f01-target",
+        { scale: 1 },
+        { scale: 0.95, duration: 0.07, ease: "power2.in", yoyo: true, repeat: 1, immediateRender: false },
+        2.08,
+      );
+      tl.set([".f01-r1", ".f01-r2", ".f01-r3"], { opacity: 1 }, 2.14);
+      tl.fromTo(
+        [".f01-r1", ".f01-r2", ".f01-r3"],
+        { scale: 0.4, opacity: 1 },
+        {
+          scale: 3.4,
+          opacity: 0,
+          duration: 0.7,
+          ease: "power2.out",
+          stagger: 0.07,
+          immediateRender: false,
+        },
+        2.14,
+      );
+
+      // ---- Scene 4 (3.0-3.6s): the badge snaps in and names what it touched ----
+      tl.fromTo(
+        ".f01-brk i",
+        { scale: 1.3, opacity: 0 },
+        { scale: 1, opacity: 1, duration: 0.32, ease: "power3.out", stagger: 0.04 },
+        3.0,
+      );
+      tl.fromTo(".f01-leader", { scaleY: 0, opacity: 0 }, { scaleY: 1, opacity: 1, duration: 0.28, ease: "power3.out" }, 3.18);
+
+      const BADGE = [
+        { t: 3.28, text: "" },
+        { t: 3.46, text: "[3] Bu" },
+        { t: 3.62, text: '[3] Button "Open command ' },
+        { t: 3.82, text: '[3] Button "Open command palette" @ (149' },
+        { t: 4.0, text: '[3] Button "Open command palette" @ (1497,33)' },
+      ];
+      const badgeEl = document.querySelector(".f01-badge-text");
+      const caretB = document.querySelector(".f01-caret-badge");
+      const d2 = { t: 0 };
+      tl.to(
+        d2,
+        {
+          t: 4.0,
+          duration: 0.82,
+          ease: "none",
+          onUpdate: () => {
+            let s = "";
+            for (let i = BADGE.length - 1; i >= 0; i--) {
+              if (d2.t >= BADGE[i].t) {
+                s = BADGE[i].text;
+                break;
+              }
+            }
+            badgeEl.textContent = s;
+          },
+        },
+        3.18,
+      );
+      const b2 = { p: 0 };
+      tl.to(
+        b2,
+        {
+          p: Math.PI * 2 * 3,
+          duration: 1.4,
+          ease: "none",
+          onUpdate: () => {
+            caretB.style.opacity = Math.sin(b2.p) > 0 ? "1" : "0";
+          },
+        },
+        3.2,
+      );
+      tl.set(caretB, { opacity: 0 }, 4.6);
+
+      // ---- Scene 5 (4.0-6.315s): settle and hold on the held read (no exit) ----
+
+      window.__timelines["01-element-three-of-forty-one"] = tl;
+    })();
+  </script>
+</template>

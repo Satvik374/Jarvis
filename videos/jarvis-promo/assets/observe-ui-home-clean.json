@@ -1,0 +1,671 @@
+{
+  "active_window": "JARVIS // NEURAL INTERFACE - Google Chrome for Testing",
+  "screen_size": [
+    1920,
+    935
+  ],
+  "source_region": [
+    0,
+    145,
+    1920,
+    1080
+  ],
+  "elements": [
+    {
+      "id": 0,
+      "role": "Hyperlink",
+      "name": "Jarvis home",
+      "bbox": [
+        32,
+        16,
+        205,
+        51
+      ],
+      "center": [
+        118,
+        33
+      ],
+      "interactive": true
+    },
+    {
+      "id": 1,
+      "role": "Text",
+      "name": "JARVIS",
+      "bbox": [
+        79,
+        17,
+        185,
+        40
+      ],
+      "center": [
+        132,
+        28
+      ],
+      "interactive": true
+    },
+    {
+      "id": 2,
+      "role": "Text",
+      "name": "LOCAL INTELLIGENCE",
+      "bbox": [
+        79,
+        38,
+        205,
+        49
+      ],
+      "center": [
+        142,
+        43
+      ],
+      "interactive": true
+    },
+    {
+      "id": 3,
+      "role": "Button",
+      "name": "Open command palette",
+      "bbox": [
+        1454,
+        17,
+        1540,
+        50
+      ],
+      "center": [
+        1497,
+        33
+      ],
+      "interactive": true
+    },
+    {
+      "id": 4,
+      "role": "Button",
+      "name": "Open sessions sidebar",
+      "bbox": [
+        1549,
+        17,
+        1590,
+        50
+      ],
+      "center": [
+        1569,
+        33
+      ],
+      "interactive": true
+    },
+    {
+      "id": 5,
+      "role": "Button",
+      "name": "Open terminal transcript",
+      "bbox": [
+        1599,
+        17,
+        1640,
+        50
+      ],
+      "center": [
+        1619,
+        33
+      ],
+      "interactive": true
+    },
+    {
+      "id": 6,
+      "role": "Button",
+      "name": "Toggle Live Voice Mode (gpt-realtime)",
+      "bbox": [
+        1649,
+        17,
+        1690,
+        50
+      ],
+      "center": [
+        1669,
+        33
+      ],
+      "interactive": true
+    },
+    {
+      "id": 7,
+      "role": "Button",
+      "name": "Audio output",
+      "bbox": [
+        1699,
+        17,
+        1740,
+        50
+      ],
+      "center": [
+        1719,
+        33
+      ],
+      "interactive": true
+    },
+    {
+      "id": 8,
+      "role": "Text",
+      "name": "LINKED",
+      "bbox": [
+        1776,
+        28,
+        1813,
+        39
+      ],
+      "center": [
+        1794,
+        33
+      ],
+      "interactive": true
+    },
+    {
+      "id": 9,
+      "role": "Button",
+      "name": "End Jarvis session",
+      "bbox": [
+        1856,
+        17,
+        1888,
+        50
+      ],
+      "center": [
+        1872,
+        33
+      ],
+      "interactive": true
+    },
+    {
+      "id": 10,
+      "role": "Group",
+      "name": "Live activity",
+      "bbox": [
+        32,
+        82,
+        380,
+        888
+      ],
+      "center": [
+        206,
+        485
+      ],
+      "interactive": true
+    },
+    {
+      "id": 11,
+      "role": "TabItem",
+      "name": "STREAM 0",
+      "bbox": [
+        43,
+        91,
+        105,
+        126
+      ],
+      "center": [
+        74,
+        108
+      ],
+      "interactive": true
+    },
+    {
+      "id": 12,
+      "role": "TabItem",
+      "name": "VITALS",
+      "bbox": [
+        108,
+        94,
+        171,
+        123
+      ],
+      "center": [
+        139,
+        108
+      ],
+      "interactive": true
+    },
+    {
+      "id": 13,
+      "role": "TabItem",
+      "name": "CMDS",
+      "bbox": [
+        174,
+        94,
+        237,
+        123
+      ],
+      "center": [
+        205,
+        108
+      ],
+      "interactive": true
+    },
+    {
+      "id": 14,
+      "role": "TabItem",
+      "name": "SKILLS 5",
+      "bbox": [
+        240,
+        91,
+        303,
+        126
+      ],
+      "center": [
+        271,
+        108
+      ],
+      "interactive": true
+    },
+    {
+      "id": 15,
+      "role": "TabItem",
+      "name": "LOGS 0",
+      "bbox": [
+        306,
+        91,
+        369,
+        126
+      ],
+      "center": [
+        337,
+        108
+      ],
+      "interactive": true
+    },
+    {
+      "id": 16,
+      "role": "Text",
+      "name": "PROCESS STREAM",
+      "bbox": [
+        47,
+        144,
+        137,
+        155
+      ],
+      "center": [
+        92,
+        149
+      ],
+      "interactive": true
+    },
+    {
+      "id": 17,
+      "role": "Text",
+      "name": "LIVE",
+      "bbox": [
+        343,
+        146,
+        365,
+        155
+      ],
+      "center": [
+        354,
+        150
+      ],
+      "interactive": true
+    },
+    {
+      "id": 18,
+      "role": "Group",
+      "name": "Live Jarvis activity",
+      "bbox": [
+        33,
+        175,
+        379,
+        887
+      ],
+      "center": [
+        206,
+        531
+      ],
+      "interactive": true
+    },
+    {
+      "id": 19,
+      "role": "Text",
+      "name": "15:29",
+      "bbox": [
+        47,
+        193,
+        70,
+        202
+      ],
+      "center": [
+        58,
+        197
+      ],
+      "interactive": true
+    },
+    {
+      "id": 20,
+      "role": "Text",
+      "name": "SYSTEM",
+      "bbox": [
+        110,
+        192,
+        142,
+        201
+      ],
+      "center": [
+        126,
+        196
+      ],
+      "interactive": true
+    },
+    {
+      "id": 21,
+      "role": "Text",
+      "name": "Terminal backend connected",
+      "bbox": [
+        110,
+        204,
+        251,
+        216
+      ],
+      "center": [
+        180,
+        210
+      ],
+      "interactive": true
+    },
+    {
+      "id": 22,
+      "role": "Text",
+      "name": "INFO",
+      "bbox": [
+        110,
+        236,
+        131,
+        246
+      ],
+      "center": [
+        120,
+        241
+      ],
+      "interactive": true
+    },
+    {
+      "id": 23,
+      "role": "Text",
+      "name": "\u23f0 Proactive Background Daemon started.",
+      "bbox": [
+        110,
+        248,
+        323,
+        261
+      ],
+      "center": [
+        216,
+        254
+      ],
+      "interactive": true
+    },
+    {
+      "id": 24,
+      "role": "Text",
+      "name": "\u2328\ufe0f Registered global hotkey: ctrl+alt+j",
+      "bbox": [
+        110,
+        292,
+        323,
+        305
+      ],
+      "center": [
+        216,
+        298
+      ],
+      "interactive": true
+    },
+    {
+      "id": 25,
+      "role": "Text",
+      "name": "\u2328\ufe0f Registered global hotkey: alt+v",
+      "bbox": [
+        110,
+        336,
+        296,
+        349
+      ],
+      "center": [
+        203,
+        342
+      ],
+      "interactive": true
+    },
+    {
+      "id": 26,
+      "role": "Text",
+      "name": "\u2328\ufe0f Registered global hotkey: ctrl+alt+s",
+      "bbox": [
+        110,
+        380,
+        323,
+        393
+      ],
+      "center": [
+        216,
+        386
+      ],
+      "interactive": true
+    },
+    {
+      "id": 27,
+      "role": "Text",
+      "name": "\u2328\ufe0f Registered global hotkey: ctrl+alt+r",
+      "bbox": [
+        110,
+        424,
+        323,
+        437
+      ],
+      "center": [
+        216,
+        430
+      ],
+      "interactive": true
+    },
+    {
+      "id": 28,
+      "role": "Text",
+      "name": "\u2328\ufe0f Registered global hotkey: ctrl+alt+x",
+      "bbox": [
+        110,
+        468,
+        323,
+        481
+      ],
+      "center": [
+        216,
+        474
+      ],
+      "interactive": true
+    },
+    {
+      "id": 29,
+      "role": "Text",
+      "name": "\ud83d\ude80 Floating Mini HUD & Global Hotkeys initialized.",
+      "bbox": [
+        110,
+        512,
+        312,
+        538
+      ],
+      "center": [
+        211,
+        525
+      ],
+      "interactive": true
+    },
+    {
+      "id": 30,
+      "role": "Group",
+      "name": "LISTENING",
+      "bbox": [
+        391,
+        82,
+        1365,
+        888
+      ],
+      "center": [
+        878,
+        485
+      ],
+      "interactive": true
+    },
+    {
+      "id": 31,
+      "role": "Text",
+      "name": "01",
+      "bbox": [
+        731,
+        832,
+        745,
+        847
+      ],
+      "center": [
+        738,
+        839
+      ],
+      "interactive": true
+    },
+    {
+      "id": 32,
+      "role": "Text",
+      "name": "CURRENT STATE",
+      "bbox": [
+        774,
+        814,
+        858,
+        825
+      ],
+      "center": [
+        816,
+        819
+      ],
+      "interactive": true
+    },
+    {
+      "id": 33,
+      "role": "Text",
+      "name": "Awaiting directive",
+      "bbox": [
+        774,
+        852,
+        866,
+        865
+      ],
+      "center": [
+        820,
+        858
+      ],
+      "interactive": true
+    },
+    {
+      "id": 34,
+      "role": "Button",
+      "name": "BLOB",
+      "bbox": [
+        986,
+        101,
+        1038,
+        124
+      ],
+      "center": [
+        1012,
+        112
+      ],
+      "interactive": true
+    },
+    {
+      "id": 35,
+      "role": "Button",
+      "name": "HOLOGRAM",
+      "bbox": [
+        1042,
+        102,
+        1119,
+        125
+      ],
+      "center": [
+        1080,
+        113
+      ],
+      "interactive": true
+    },
+    {
+      "id": 36,
+      "role": "Button",
+      "name": "ORBIT",
+      "bbox": [
+        1123,
+        102,
+        1182,
+        125
+      ],
+      "center": [
+        1152,
+        113
+      ],
+      "interactive": true
+    },
+    {
+      "id": 37,
+      "role": "Button",
+      "name": "WIREFRAME",
+      "bbox": [
+        1186,
+        102,
+        1270,
+        125
+      ],
+      "center": [
+        1228,
+        113
+      ],
+      "interactive": true
+    },
+    {
+      "id": 38,
+      "role": "Button",
+      "name": "QUANTUM",
+      "bbox": [
+        1274,
+        102,
+        1345,
+        125
+      ],
+      "center": [
+        1309,
+        113
+      ],
+      "interactive": true
+    },
+    {
+      "id": 39,
+      "role": "Button",
+      "name": "\u27f2 RESET",
+      "bbox": [
+        1212,
+        138,
+        1276,
+        158
+      ],
+      "center": [
+        1244,
+        148
+      ],
+      "interactive": true
+    },
+    {
+      "id": 40,
+      "role": "Button",
+      "name": "\u26a1 PULSE",
+      "bbox": [
+        1284,
+        138,
+        1351,
+        158
+      ],
+      "center": [
+        1317,
+        148
+      ],
+      "interactive": true
+    }
+  ]
+}

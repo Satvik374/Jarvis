@@ -159,8 +159,41 @@ class VoiceConfig:
 class LiveVoiceConfig:
     # Real-Time Gemini Live Voice model (multimodal bidi live session via API key or gcloud / Vertex AI)
     enabled: bool = False
-    model: str = "gemini-3.1-flash-live-preview"
-    voice_name: str = "Aoede"  # Aoede, Puck, Charon, Kore, Fenrir
+    # Which engine the live voice button runs:
+    #   gemini - Gemini Live, the browser streaming 16kHz audio through the
+    #            loopback relay (default)
+    #   fish   - hosted Fish Audio Agents session (needs live_voice.fish_agent_id)
+    #   relay  - your own OpenAI-Realtime-compatible endpoint at ws_url
+    #   auto   - gemini if a Gemini key is present, else fish, else relay
+    provider: str = "gemini"
+    # Must name a *live* model. gemini-3.8-live is what the Google AI Studio
+    # template uses; `python run.py --check` and the voice report name what the
+    # configured key can actually open.
+    model: str = "gemini-3.8-live"
+    # Algenib is the template's voice; the older Aoede/Puck/Charon/Kore/Fenrir
+    # names still work.
+    voice_name: str = "Algenib"
+    # How much detail each video frame carries. MEDIUM is the template's choice.
+    media_resolution: str = "medium"  # low | medium | high
+    # Google Search grounding for the voice agent. `auto` and `on` both try it;
+    # an account without grounding quota answers the handshake with a 1011 quota
+    # error, so the relay retries without it rather than losing the session.
+    google_search: str = "auto"  # auto | on | off
+    # Sliding-window context compression, so a long conversation does not end by
+    # running into the model's context limit mid-sentence.
+    context_window_compression: bool = True
+    context_trigger_tokens: int = 104857
+    context_sliding_tokens: int = 52428
+    # Lets the relay continue a session on a fresh socket after the server's
+    # periodic disconnect instead of dropping the conversation.
+    session_resumption: bool = True
+    # Screen sharing: the voice agent asks for it (share_screen tool) and the
+    # browser streams ~1 frame/second through the open relay while it is on.
+    # Frames leave the machine, so this is the switch that authorises it.
+    screen_share: bool = True
+    screen_share_interval: float = 1.0
+    screen_share_max_dim: int = 1024
+    screen_share_quality: int = 60
     location: str = "us-central1"
     backend: str = "api_key"  # api_key | gcloud
     api_key: str = ""
@@ -430,6 +463,14 @@ def load_config(path: Path | str | None = None) -> Config:
         cfg.live_voice.fish_api_base = v
     if v := env.get("JARVIS_LIVE_MODEL"):
         cfg.live_voice.model = v
+    if v := env.get("JARVIS_LIVE_PROVIDER"):
+        cfg.live_voice.provider = v
+    if v := env.get("JARVIS_LIVE_GOOGLE_SEARCH"):
+        cfg.live_voice.google_search = v
+    if v := env.get("JARVIS_LIVE_MEDIA_RESOLUTION"):
+        cfg.live_voice.media_resolution = v
+    if v := env.get("JARVIS_LIVE_SCREEN_SHARE"):
+        cfg.live_voice.screen_share = v.lower() in {"1", "true", "yes", "on"}
     if v := env.get("JARVIS_LIVE_VOICE"):
         cfg.live_voice.voice_name = v
     if v := env.get("JARVIS_LIVE_LOCATION"):
@@ -459,7 +500,11 @@ def load_config(path: Path | str | None = None) -> Config:
             os.environ["GEMINI_API_KEY"] = v
         elif v.startswith("sk-or-"):
             os.environ["OPENROUTER_API_KEY"] = v
-            os.environ["OPENAI_API_KEY"] = v
+            # Mirrored for the code paths that only know the OpenAI name, but
+            # never over an OPENAI_API_KEY the user set themselves: that would
+            # hand an OpenRouter key to api.openai.com and report it as an
+            # invalid OpenAI key.
+            os.environ.setdefault("OPENAI_API_KEY", v)
         else:
             os.environ.setdefault("OPENAI_API_KEY", v)
     else:
@@ -469,15 +514,24 @@ def load_config(path: Path | str | None = None) -> Config:
                 cfg.brain.api_key = vault_key
                 if vault_key.startswith("sk-or-") or get_secret("OPENROUTER_API_KEY"):
                     os.environ["OPENROUTER_API_KEY"] = get_secret("OPENROUTER_API_KEY") or vault_key
-                    os.environ["OPENAI_API_KEY"] = get_secret("OPENROUTER_API_KEY") or vault_key
+                    # Same reason as above: the mirror is for compatibility, so
+                    # it must not replace a key the environment already carries.
+                    os.environ.setdefault("OPENAI_API_KEY", os.environ["OPENROUTER_API_KEY"])
                 elif vault_key.startswith("AIzaSy") or get_secret("GEMINI_API_KEY"):
                     os.environ["GEMINI_API_KEY"] = get_secret("GEMINI_API_KEY") or vault_key
                 else:
-                    os.environ["OPENAI_API_KEY"] = vault_key
+                    os.environ.setdefault("OPENAI_API_KEY", vault_key)
         except Exception:
             pass
 
-    if cfg.live_voice.backend != "gcloud" and not cfg.live_voice.api_key:
+    # A key already in the vault outranks the configured backend. This used to
+    # be skipped whenever `backend: gcloud` was set, which made the whole branch
+    # unreachable for exactly the users who needed it: a stored AI Studio key is
+    # the free-tier path, while gcloud routes to Vertex, whose quotas are spent
+    # against the project rather than a free allowance. The result was live
+    # voice failing on a 429 - or on another provider's billing - while a usable
+    # key sat unread in the vault.
+    if not cfg.live_voice.api_key:
         try:
             from .security import get_secret
             if live_key := (get_secret("JARVIS_LIVE_API_KEY") or get_secret("GEMINI_API_KEY") or get_secret("GOOGLE_API_KEY")):

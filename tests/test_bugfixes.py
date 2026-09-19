@@ -3,6 +3,8 @@
 One assertion per defect: each fails if the old behaviour comes back.
 """
 
+from PIL import Image
+
 from jarvis.agent.prompts import _extract_json, parse_decision
 from jarvis.config import Config
 from jarvis.perception.elements import Element, Observation
@@ -137,3 +139,39 @@ def test_parse_decision_extracts_powershell_xml():
     assert not d.fallback
     assert d.action == "run_command"
     assert d.args["command"] == 'powershell -Command "dir"'
+
+
+# --- live vision must build its own brain when none is supplied ------------ #
+
+def test_live_vision_builds_a_brain_when_brain_is_none(monkeypatch):
+    """``analyze(brain=None)`` called ``Config.load``, which does not exist.
+
+    Every caller in the tree passes a brain, and every test passed a mock one,
+    so the default path raised AttributeError unnoticed. Drive it with no brain
+    and assert a brain was actually built through ``load_config``.
+    """
+    from jarvis.agent import brain as brain_mod
+    from jarvis.config import load_config
+    from jarvis.perception import live_vision as vision_mod
+
+    built = []
+    sentinel = object()
+
+    def fake_make_brain(brain_cfg):
+        built.append(brain_cfg)
+        return sentinel
+
+    monkeypatch.setattr(brain_mod, "make_brain", fake_make_brain)
+    monkeypatch.setattr(
+        brain_mod, "complete_with_retry",
+        lambda brain, system, messages, image=None: "a timeline with three clips",
+    )
+
+    engine = vision_mod.LiveVisionEngine()
+    monkeypatch.setattr(engine, "capture_screen", lambda monitor=1: Image.new("RGB", (8, 8)))
+
+    out = engine.analyze(source="screen", prompt="What do you see?")
+
+    assert "timeline" in out
+    # The brain must come from the real config loader, not a classmethod.
+    assert built == [load_config().brain]

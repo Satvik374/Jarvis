@@ -1,0 +1,342 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Orbitron";
+      src: url("assets/fonts/Orbitron-Variable.woff2") format("woff2");
+      font-weight: 400 900;
+      font-style: normal;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-500.woff2") format("woff2");
+      font-weight: 500;
+      font-style: normal;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Outfit";
+      src: url("assets/fonts/Outfit-400.woff2") format("woff2");
+      font-weight: 400;
+      font-style: normal;
+      font-display: block;
+    }
+
+    #root {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      color: #e5f8ff;
+    }
+
+    .f03-plate {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 1920px;
+      height: 935px;
+      display: block;
+      object-fit: cover;
+    }
+
+    /* ---- the settled mark field, carried from frame 2 at exact geometry ---- */
+    .f03-mark {
+      position: absolute;
+      opacity: 1;
+      pointer-events: none;
+    }
+    .f03-box {
+      position: absolute;
+      inset: 0;
+      border: 1px solid rgba(0, 240, 255, 0.45);
+    }
+    .f03-chip {
+      position: absolute;
+      left: 0;
+      top: -15px;
+      background: #00f0ff;
+      color: #02070d;
+      font-family: "JetBrains Mono", monospace;
+      font-weight: 500;
+      font-size: 11px;
+      line-height: 1;
+      padding: 2px 4px;
+    }
+
+    /* ---- the three stages: the fixed anchor ---- */
+    .f03-stage {
+      position: absolute;
+      left: 1128px;
+      font-family: "Orbitron", sans-serif;
+      font-weight: 700;
+      font-size: 86px;
+      line-height: 1.1;
+      letter-spacing: -0.02em;
+      color: #e5f8ff;
+      white-space: nowrap;
+      opacity: 0;
+    }
+    .f03-stage.f03-on {
+      color: #00f0ff;
+    }
+    .f03-loop {
+      position: absolute;
+      left: 1000px;
+      top: 380px;
+    }
+
+    /* ---- the stream: real captured lines, mutating state ---- */
+    .f03-row {
+      position: absolute;
+      left: 60px;
+      width: 430px;
+      height: 22px;
+      font-family: "JetBrains Mono", monospace;
+      font-weight: 500;
+      font-size: 12px;
+      line-height: 22px;
+      letter-spacing: 0.02em;
+      color: #8ba8b7;
+      white-space: nowrap;
+      opacity: 0;
+    }
+    .f03-rid {
+      display: inline-block;
+      width: 30px;
+      color: #00f0ff;
+    }
+    .f03-label {
+      position: relative;
+      display: inline-block;
+    }
+    .f03-strike {
+      position: absolute;
+      left: 0;
+      top: 11px;
+      width: 100%;
+      height: 1px;
+      background: #647d8b;
+      transform-origin: left center;
+      transform: scaleX(0);
+    }
+    .f03-check {
+      position: absolute;
+      left: 8px;
+      top: 4px;
+      opacity: 0;
+    }
+    .f03-arc {
+      position: absolute;
+      left: 8px;
+      top: 4px;
+      opacity: 0;
+    }
+    .f03-spin {
+      position: absolute;
+      left: 1040px;
+      top: 536px;
+      opacity: 0;
+    }
+  </style>
+
+  <div id="root" data-composition-id="03-perceive-think-act" data-width="1920" data-height="1080">
+    <img
+      id="f03-plate"
+      class="clip f03-plate"
+      src="assets/som-ui-home-clean-raw.png"
+      alt=""
+      data-start="0"
+      data-duration="6.4"
+      data-track-index="0"
+    />
+
+    <svg class="f03-loop" width="120" height="330" viewBox="0 0 120 330" aria-hidden="true">
+      <polyline
+        class="f03-legs"
+        points="70,40 70,260"
+        fill="none"
+        stroke="#262828"
+        stroke-width="1"
+      />
+      <path
+        class="f03-return"
+        d="M70,260 C-6,260 -6,40 70,40"
+        fill="none"
+        stroke="#00f0ff"
+        stroke-width="1"
+        stroke-dasharray="420"
+        stroke-dashoffset="420"
+      />
+      <circle class="f03-dot" cx="70" cy="40" r="3" fill="#00f0ff" opacity="0" />
+      <circle class="f03-dot" cx="70" cy="150" r="3" fill="#00f0ff" opacity="0" />
+      <circle class="f03-dot" cx="70" cy="260" r="3" fill="#00f0ff" opacity="0" />
+    </svg>
+
+    <svg class="f03-spin" width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
+      <circle cx="17" cy="17" r="14" fill="none" stroke="#262828" stroke-width="2" />
+      <path
+        class="f03-spin-arc"
+        d="M17,3 A14,14 0 0 1 31,17"
+        fill="none"
+        stroke="#00f0ff"
+        stroke-width="2"
+        stroke-linecap="butt"
+      />
+    </svg>
+
+    <div class="f03-stage f03-perceive" style="top: 390px">perceive</div>
+    <div class="f03-stage f03-think" style="top: 500px">think</div>
+    <div class="f03-stage f03-act" style="top: 610px">act</div>
+  </div>
+
+  <script>
+    (function () {
+      const FID = "03-perceive-think-act";
+      const root = document.getElementById("root");
+
+      /* The settled mark field — identical geometry to frame 2's end state. */
+      const MARKS = [
+        [0, 32, 16, 205, 51], [1, 79, 17, 185, 40], [2, 79, 38, 205, 49], [3, 1454, 17, 1540, 50],
+        [4, 1549, 17, 1590, 50], [5, 1599, 17, 1640, 50], [6, 1649, 17, 1690, 50], [7, 1699, 17, 1740, 50],
+        [8, 1776, 28, 1813, 39], [9, 1856, 17, 1888, 50], [10, 32, 82, 380, 888], [11, 43, 91, 105, 126],
+        [12, 108, 94, 171, 123], [13, 174, 94, 237, 123], [14, 240, 91, 303, 126], [15, 306, 91, 369, 126],
+        [16, 47, 144, 137, 155], [17, 343, 146, 365, 155], [18, 33, 175, 379, 887], [19, 47, 193, 70, 202],
+        [20, 110, 192, 142, 201], [21, 110, 204, 251, 216], [22, 110, 236, 131, 246], [23, 110, 248, 323, 261],
+        [24, 110, 292, 323, 305], [25, 110, 336, 296, 349], [26, 110, 380, 323, 393], [27, 110, 424, 323, 437],
+        [28, 110, 468, 323, 481], [29, 110, 512, 312, 538], [30, 391, 82, 1365, 888], [31, 731, 832, 745, 847],
+        [32, 774, 814, 858, 825], [33, 774, 852, 866, 865], [34, 986, 101, 1038, 124], [35, 1042, 102, 1119, 125],
+        [36, 1123, 102, 1182, 125], [37, 1186, 102, 1270, 125], [38, 1274, 102, 1345, 125],
+        [39, 1212, 138, 1276, 158], [40, 1284, 138, 1351, 158],
+      ];
+      MARKS.forEach((m) => {
+        const x0 = m[1];
+        const y0 = m[2];
+        const w = m[3] - x0;
+        const h = m[4] - y0;
+        const wrap = document.createElement("div");
+        wrap.className = "f03-mark";
+        wrap.style.left = x0 + "px";
+        wrap.style.top = y0 + "px";
+        wrap.style.width = w + "px";
+        wrap.style.height = h + "px";
+        if (w >= 16 && h >= 10 && w * h <= 60000) {
+          const box = document.createElement("div");
+          box.className = "f03-box";
+          wrap.appendChild(box);
+        }
+        const chip = document.createElement("div");
+        chip.className = "f03-chip";
+        chip.textContent = String(m[0]);
+        wrap.appendChild(chip);
+        root.appendChild(wrap);
+      });
+
+      /* The real captured stream lines, with their true element ids. */
+      const ROWS = [
+        { id: 21, text: "Terminal backend connected", at: 3.1, done: 3.95 },
+        { id: 23, text: "Proactive Background Daemon started.", at: 3.55, done: 4.35 },
+        { id: 24, text: "Registered global hotkey: ctrl+alt+j", at: 4.45, done: 5.05 },
+        { id: 25, text: "Registered global hotkey: alt+v", at: 4.95, done: 5.5 },
+        { id: 26, text: "Registered global hotkey: ctrl+alt+s", at: 5.45, done: 5.95 },
+        { id: 29, text: "Floating Mini HUD & Global Hotkeys initialized.", at: 5.9, done: null },
+      ];
+      const rowEls = ROWS.map((r, i) => {
+        const row = document.createElement("div");
+        row.className = "f03-row";
+        row.style.top = 556 + i * 26 + "px";
+        row.innerHTML =
+          '<span class="f03-rid">' +
+          r.id +
+          '</span><span class="f03-label">' +
+          r.text.replace(/&/g, "&amp;") +
+          '<span class="f03-strike"></span></span>';
+        const arc = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        arc.setAttribute("class", "f03-arc");
+        arc.setAttribute("width", "14");
+        arc.setAttribute("height", "14");
+        arc.setAttribute("viewBox", "0 0 14 14");
+        arc.innerHTML =
+          '<circle cx="7" cy="7" r="5.5" fill="none" stroke="#00f0ff" stroke-width="1" ' +
+          'stroke-dasharray="34.5" stroke-dashoffset="21" />';
+        row.appendChild(arc);
+        const check = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        check.setAttribute("class", "f03-check");
+        check.setAttribute("width", "14");
+        check.setAttribute("height", "14");
+        check.setAttribute("viewBox", "0 0 14 14");
+        check.innerHTML =
+          '<circle cx="7" cy="7" r="7" fill="#00f0ff" />' +
+          '<path d="M4 7.2 L6.2 9.4 L10 5.2" fill="none" stroke="#02070d" stroke-width="1.6" ' +
+          'stroke-dasharray="12" stroke-dashoffset="12" />';
+        row.appendChild(check);
+        root.appendChild(row);
+        return { row, strike: row.querySelector(".f03-strike"), check, arc };
+      });
+
+      const tl = gsap.timeline({ paused: true });
+
+      // ---- Scene 1 (0.0-1.0s): the plate settles; PERCEIVE seats alone ----
+      tl.fromTo(".f03-plate", { opacity: 0.88 }, { opacity: 0.55, duration: 0.5, ease: "power1.out" }, 0);
+      // the mark field rides the same ramp as the plate
+      tl.fromTo(".f03-mark", { opacity: 1 }, { opacity: 0.55, duration: 0.5, ease: "power1.out" }, 0);
+      tl.fromTo(".f03-perceive", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" }, 0.12);
+      tl.fromTo(".f03-dot", { opacity: 0 }, { opacity: 1, duration: 0.3, stagger: 0.08 }, 0.5);
+
+      // ---- Scene 2 (1.0-2.0s): THINK seats; the machine's spinner ignites ----
+      tl.fromTo(".f03-think", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" }, 1.05);
+      tl.set(".f03-spin", { opacity: 0 }, 0);
+      tl.fromTo(".f03-spin", { opacity: 0 }, { opacity: 1, duration: 0.25, immediateRender: false }, 1.2);
+      tl.to(
+        { r: 0 },
+        {
+          r: 720,
+          duration: 2.0,
+          ease: "none",
+          onUpdate: function () {
+            const arc = document.querySelector(".f03-spin-arc");
+            if (arc) arc.setAttribute("transform", "rotate(" + this.targets()[0].r + " 17 17)");
+          },
+        },
+        1.2,
+      );
+
+      // ---- Scene 3 (2.0-3.0s): ACT seats — the three anchors lock ----
+      tl.fromTo(".f03-act", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" }, 2.05);
+
+      // ---- Scene 4 (3.0-4.3s): the loop closes and the stream begins ----
+      tl.fromTo(".f03-return", { strokeDashoffset: 420 }, { strokeDashoffset: 0, duration: 0.75, ease: "power2.inOut" }, 3.05);
+      tl.fromTo(".f03-spin", { opacity: 1 }, { opacity: 0, duration: 0.3, immediateRender: false }, 3.2);
+
+      rowEls.forEach((r, i) => {
+        const spec = ROWS[i];
+        tl.fromTo(r.row, { opacity: 0, x: -8 }, { opacity: 1, x: 0, duration: 0.3, ease: "power3.out" }, spec.at);
+        if (spec.done === null) {
+          // The receipt is still running when the frame cuts — held mid-check.
+          tl.fromTo(r.arc, { opacity: 0 }, { opacity: 1, duration: 0.25 }, spec.at + 0.25);
+        } else {
+          const d = spec.done;
+          tl.set(r.arc, { opacity: 1 }, spec.at + 0.05);
+          tl.to(r.arc, { opacity: 0, duration: 0.2 }, d - 0.1);
+          tl.set(r.check, { opacity: 1 }, d - 0.1);
+          tl.fromTo(
+            r.check.querySelector("path"),
+            { strokeDashoffset: 12 },
+            { strokeDashoffset: 0, duration: 0.25, ease: "power2.out" },
+            d - 0.05,
+          );
+          tl.fromTo(r.strike, { scaleX: 0 }, { scaleX: 1, duration: 0.28, ease: "power2.out" }, d);
+          tl.to(r.row, { color: "#647d8b", duration: 0.3 }, d);
+        }
+      });
+
+      // ---- Scenes 5-6 (4.3-6.4s): the loop swings back to PERCEIVE ----
+      tl.to(".f03-perceive", { color: "#00f0ff", duration: 0.3 }, 5.9);
+      tl.to(".f03-think", { color: "#8ba8b7", duration: 0.3 }, 5.9);
+      tl.to(".f03-act", { color: "#8ba8b7", duration: 0.3 }, 5.9);
+
+      window.__timelines[FID] = tl;
+    })();
+  </script>
+</template>

@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js" integrity="sha384-sG0Hv1tP1lZCk9KQmrIbY/XNwi+OY84GQqhMscbnsoBFqAz8KNCil1kvfL3Hbbk2" crossorigin="anonymous"></script>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: #000;
+      }
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: #e5f8ff;
+      }
+      .scene {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="36.011"
+      data-width="1920"
+      data-height="1080"
+    >
+      <div
+        id="el-01-element-three-of-forty-one"
+        class="scene"
+        data-composition-id="01-element-three-of-forty-one"
+        data-composition-src="compositions/frames/01-element-three-of-forty-one.html"
+        data-start="0"
+        data-duration="6.315"
+        data-track-index="1"
+      ></div>
+      <audio
+        id="el-01-element-three-of-forty-one-voice"
+        src="assets/voice/01.wav"
+        data-start="0"
+        data-duration="6.315"
+        data-track-index="10"
+        data-volume="1"
+      ></audio>
+
+      <div
+        id="el-02-never-guess-a-pixel"
+        class="scene"
+        data-composition-id="02-never-guess-a-pixel"
+        data-composition-src="compositions/frames/02-never-guess-a-pixel.html"
+        data-start="6.315"
+        data-duration="11.413"
+        data-track-index="1"
+      ></div>
+      <audio
+        id="el-02-never-guess-a-pixel-voice"
+        src="assets/voice/02.wav"
+        data-start="6.315"
+        data-duration="11.413"
+        data-track-index="10"
+        data-volume="1"
+      ></audio>
+
+      <div
+        id="el-03-perceive-think-act"
+        class="scene"
+        data-composition-id="03-perceive-think-act"
+        data-composition-src="compositions/frames/03-perceive-think-act.html"
+        data-start="17.728"
+        data-duration="6.4"
+        data-track-index="1"
+      ></div>
+      <audio
+        id="el-03-perceive-think-act-voice"
+        src="assets/voice/03.wav"
+        data-start="17.728"
+        data-duration="6.4"
+        data-track-index="10"
+        data-volume="1"
+      ></audio>
+
+      <div
+        id="el-04-four-gigabytes"
+        class="scene"
+        data-composition-id="04-four-gigabytes"
+        data-composition-src="compositions/frames/04-four-gigabytes.html"
+        data-start="24.128"
+        data-duration="8.896"
+        data-track-index="1"
+      ></div>
+      <audio
+        id="el-04-four-gigabytes-voice"
+        src="assets/voice/04.wav"
+        data-start="24.128"
+        data-duration="8.896"
+        data-track-index="10"
+        data-volume="1"
+      ></audio>
+
+      <div
+        id="el-05-local-intelligence"
+        class="scene"
+        data-composition-id="05-local-intelligence"
+        data-composition-src="compositions/frames/05-local-intelligence.html"
+        data-start="33.024"
+        data-duration="2.987"
+        data-track-index="1"
+      ></div>
+      <audio
+        id="el-05-local-intelligence-voice"
+        src="assets/voice/05.wav"
+        data-start="33.024"
+        data-duration="2.987"
+        data-track-index="10"
+        data-volume="1"
+      ></audio>
+
+      <!-- BGM -->
+      <audio
+        id="el-bgm"
+        src="assets/bgm/track.wav"
+        data-start="0"
+        data-duration="36.011"
+        data-track-index="11"
+        data-volume="0.12"
+      ></audio>
+
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      window.__timelines["main"] = gsap.timeline({ paused: true });
+    </script>
+  </body>
+</html>

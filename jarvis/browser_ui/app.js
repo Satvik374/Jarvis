@@ -257,6 +257,12 @@
   };
 
   const hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
+  // Read the live-mode request *before* the hash is stripped below. As soon as a
+  // token is present `history.replaceState` clears the whole fragment - and the
+  // URL `--live-voice` opens is `#live=true&token=...`, so `live=true` used to be
+  // erased before the voice controller ever looked at it and live mode never
+  // auto-started.
+  const autoStartLiveVoice = hashParams.get("live") === "true";
   let token = hashParams.get("token") || sessionStorage.getItem("jarvis-browser-token") || "";
   if (token) {
     sessionStorage.setItem("jarvis-browser-token", token);
@@ -3807,6 +3813,10 @@
   class LiveVoiceController {
     constructor() {
       this.active = false;
+      // True between the start of `start()` and the session being live, so the
+      // concurrent callers of it (the #live=true timer and the first click)
+      // cannot each open a session.
+      this.starting = false;
       this.muted = false;
       this.ws = null;
       this.wsConnected = false;
@@ -3845,6 +3855,25 @@
     this.fishSession = null;
     // Why the hosted agent could not be started, verbatim from the server.
     this.fishFailure = "";
+    // Gemini Live (the default engine). The page speaks the Live API protocol
+    // to the loopback relay, which holds the API key; see the README and
+    // jarvis/browser.py::LiveSocketRelay for why the page cannot talk to Google
+    // directly (ephemeral tokens are minted fine but rejected by the socket).
+    this.gemini = null;
+    this.geminiFailure = "";
+    this.geminiTools = { control: [], share: [] };
+    this.geminiReady = false;
+    this.geminiUserTranscript = "";
+    // Screen sharing: the model asks, this page streams the frames it captures.
+    this.displayStream = null;
+    this.displayVideo = null;
+    this.screenTimer = null;
+    this.screenSharing = false;
+    this.screenShareButton = null;
+    // Per-path voice readiness from /api/live/config: which credential each
+    // way of running live voice still needs. Lets a failed start say what is
+    // missing instead of leaving it in the console.
+    this.voicePaths = [];
       // Names of the actions the voice agent may call directly, from
       // /api/live/config. Each runs locally through /api/tool/execute.
       this.directTools = [];
@@ -3898,10 +3927,11 @@
         });
       }
 
-      // Check if URL specifies #live=true or live query param
-      const hash = window.location.hash;
+      // Check if URL specifies #live=true or live query param. The fragment is
+      // read at startup (`autoStartLiveVoice`), because the token handling above
+      // has already rewritten the URL by the time this runs.
       const query = new URLSearchParams(window.location.search);
-      if (hash.includes("live=true") || query.get("live") === "true") {
+      if (autoStartLiveVoice || query.get("live") === "true") {
         const startOnInteract = () => {
           this.start();
           window.removeEventListener("pointerdown", startOnInteract);
@@ -3922,6 +3952,21 @@
     }
 
     async start() {
+      if (this.active || this.starting) return;
+      // Starting is asynchronous (config fetch, then microphone permission), and
+      // two callers race for it on every auto-start: the `#live=true` timer and
+      // the user's first click. Without this, both got past the `active` check
+      // before either set it and the page opened *two* sessions - two microphones
+      // streaming to the relay, two sets of Google-side minutes spent.
+      this.starting = true;
+      try {
+        return await this.startSession();
+      } finally {
+        this.starting = false;
+      }
+    }
+
+    async startSession() {
       if (this.active) return;
       unlockAudioEngine();
 
@@ -3947,15 +3992,62 @@
           if (liveCfg.tools && Array.isArray(liveCfg.tools) && liveCfg.tools.length > 0) {
             this.tools = liveCfg.tools;
           }
+          if (liveCfg.provider) {
+            this.provider = String(liveCfg.provider);
+          }
+          if (liveCfg.gemini && typeof liveCfg.gemini === "object") {
+            this.gemini = liveCfg.gemini;
+            this.geminiReady = Boolean(liveCfg.gemini.ready);
+            this.geminiTools = {
+              control: Array.isArray(liveCfg.gemini.control_tools) ? liveCfg.gemini.control_tools.map(String) : [],
+              share: Array.isArray(liveCfg.gemini.screen_share_tools) ? liveCfg.gemini.screen_share_tools.map(String) : [],
+            };
+            if (liveCfg.gemini.model) this.modelName = String(liveCfg.gemini.model);
+          }
           if (liveCfg.fish_agent_id) {
             this.fishAgentId = String(liveCfg.fish_agent_id);
           }
           if (Array.isArray(liveCfg.direct_tools)) {
             this.directTools = liveCfg.direct_tools.map(String);
           }
+          if (Array.isArray(liveCfg.voice_paths)) {
+            this.voicePaths = liveCfg.voice_paths;
+          }
         }
       } catch (e) {
         console.warn("Could not load /api/live/config, using default config:", e);
+      }
+
+      // Gemini Live is the engine the config selects unless it says otherwise
+      // (`live_voice.provider`). It owns ASR, turn-taking and synthesis, and its
+      // tools run locally: the delegation tools through /api/live/execute,
+      // /api/interrupt and /api/state, everything else through /api/tool/execute.
+      if (this.provider === "gemini") {
+        if (await this.startGeminiSession()) {
+          this.active = true;
+          this.muted = false;
+          api("/api/live/state", { active: true }).catch(() => {});
+          this.startVisualizerLoop();
+          return;
+        }
+        const geminiReason = this.geminiFailure || "the Gemini Live session did not start";
+        console.warn("[LiveVoice] Gemini Live unavailable:", geminiReason);
+        if (!this.fishAgentId && !this.wsUrl) {
+          // Nothing else is configured: say what is missing rather than opening
+          // a socket to a placeholder and retrying it forever.
+          const blockers = this.describeVoicePaths();
+          const detail = blockers ? `${geminiReason}  ${blockers}` : geminiReason;
+          toast(detail, "error");
+          if (elements.voiceCaption) {
+            elements.voiceCaption.textContent = geminiReason;
+            elements.voiceCaption.title = detail;
+            elements.voiceCaption.className = "voice-caption is-warning";
+          }
+          if (elements.stageVoiceText) elements.stageVoiceText.textContent = geminiReason;
+          this.setState("error");
+          return;
+        }
+        toast("Gemini Live unavailable - falling back", "warning");
       }
 
       // Prefer the configured Fish Audio Agents voice agent: it owns the speech
@@ -3976,9 +4068,15 @@
           // Nothing to fall back to. Say why, and stop - rather than opening a
           // socket to a placeholder endpoint and retrying it forever.
           const message = `Live voice is unavailable. ${reason}`;
-          toast("Live voice unavailable - see the caption", "error");
+          // The caption is a single ellipsised line, so the full reason and
+          // every path's remedy go on the tooltip and in the toast while the
+          // caption keeps only the headline.
+          const blockers = this.describeVoicePaths();
+          const detail = blockers ? `${message}  ${blockers}` : message;
+          toast(detail, "error");
           if (elements.voiceCaption) {
             elements.voiceCaption.textContent = message;
+            elements.voiceCaption.title = detail;
             elements.voiceCaption.className = "voice-caption is-warning";
           }
           if (elements.stageVoiceText) elements.stageVoiceText.textContent = message;
@@ -4029,10 +4127,526 @@
       this.startVisualizerLoop();
     }
 
+    /// Start the Gemini Live session through the loopback relay.
+    ///
+    /// The page holds no Gemini credential: /api/voice/session answers with the
+    /// relay's own loopback URL, and the relay authenticates to Google with the
+    /// key from the vault. Everything below is just the Live API's own protocol:
+    /// 16kHz PCM in as `realtimeInput.audio`, 24kHz PCM out as
+    /// `serverContent.modelTurn.parts[].inlineData`, tool calls answered as
+    /// `toolResponse`, and barge-in as `serverContent.interrupted`.
+    async startGeminiSession() {
+      this.geminiFailure = "";
+      let session;
+      try {
+        session = await api("/api/voice/session", { provider: "gemini" });
+      } catch (err) {
+        this.geminiFailure = err.message || String(err);
+        return false;
+      }
+      if (!session || !session.ok || !session.ws_url) {
+        this.geminiFailure =
+          (session && (session.error || session.remedy)) ||
+          "the server did not return a live voice session";
+        return false;
+      }
+      this.geminiSession = session;
+      if (session.model) this.modelName = String(session.model);
+
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error("Microphone access is not supported in this browser.");
+        }
+        this.audioStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            sampleRate: 16000,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            googEchoCancellation: true,
+            googAutoGainControl: true,
+            googNoiseSuppression: true,
+            googHighpassFilter: true,
+          },
+        });
+      } catch (err) {
+        this.geminiFailure = "microphone: " + (err.message || "permission required");
+        console.warn("Microphone access notice:", err);
+        toast("Microphone access: " + (err.message || "Permission required"), "warning");
+        this.stop();
+        return false;
+      }
+
+      this.provider = "gemini";
+      this.reconnectAttempts = 0;
+      this.setupAudioNodes();
+      this.connectGeminiSocket();
+      if (elements.stageVoiceText) elements.stageVoiceText.textContent = "GEMINI LIVE ACTIVE";
+      if (elements.voiceCaption) {
+        elements.voiceCaption.textContent = `Listening… Speak naturally with Jarvis (${this.modelName})`;
+        elements.voiceCaption.className = "voice-caption";
+      }
+      const notice = (this.gemini && this.gemini.google_search && this.gemini.google_search.notice) || "";
+      if (notice) toast(notice, "warning");
+      return true;
+    }
+
+    connectGeminiSocket() {
+      const base = this.geminiSession && this.geminiSession.ws_url;
+      if (!base) {
+        this.geminiFailure = "no live voice relay is running";
+        this.reportGeminiFailure(this.geminiFailure);
+        return;
+      }
+      try {
+        // The relay authenticates with the same token that guards the HTTP API;
+        // a browser cannot put a header on a WebSocket, hence the query string.
+        this.ws = new WebSocket(`${base}?token=${encodeURIComponent(token)}`);
+        // The relay decodes the Live endpoint's binary frames before forwarding
+        // them, but a WebSocket that is never told otherwise still hands a
+        // binary frame to onmessage as a Blob - and JSON.parse(blob) throws.
+        this.ws.binaryType = "arraybuffer";
+        this.ws.onopen = () => {
+          this.wsConnected = true;
+          this.reconnectAttempts = 0;
+          this.setState("listening");
+          console.info(`[LiveVoice] Gemini relay connected (${this.modelName})`);
+        };
+        this.ws.onmessage = (event) => this.handleGeminiMessage(event.data);
+        this.ws.onerror = (err) => console.warn("[LiveVoice] Gemini relay error:", err);
+        this.ws.onclose = (ev) => {
+          this.wsConnected = false;
+          if (!this.active || this.provider !== "gemini") return;
+          console.warn("[LiveVoice] Gemini session closed:", ev.code, ev.reason);
+          if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            const message = `Lost the Gemini Live session after ${MAX_RECONNECT_ATTEMPTS} attempts.`;
+            this.reportGeminiFailure(message);
+            this.stop();
+            return;
+          }
+          this.reconnectAttempts += 1;
+          const delay = 1000 * 2 ** (this.reconnectAttempts - 1);
+          console.info(
+            `[LiveVoice] Reconnecting the Gemini session in ${delay}ms ` +
+            `(attempt ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`
+          );
+          setTimeout(() => {
+            if (this.active && this.provider === "gemini" &&
+                (!this.ws || this.ws.readyState === WebSocket.CLOSED)) {
+              this.connectGeminiSocket();
+            }
+          }, delay);
+        };
+      } catch (err) {
+        this.reportGeminiFailure(`could not open the live voice relay: ${err.message}`);
+      }
+    }
+
+    reportGeminiFailure(message, remedy = "") {
+      this.geminiFailure = message;
+      const blockers = this.describeVoicePaths();
+      // The remedy is the actionable half of a relay notice ("run python
+      // run.py --check --live-check"); it used to reach only the console.
+      const detail = [message, remedy, blockers].filter(Boolean).join("  ");
+      toast(detail, "error");
+      if (elements.voiceCaption) {
+        elements.voiceCaption.textContent = message;
+        elements.voiceCaption.title = detail;
+        elements.voiceCaption.className = "voice-caption is-warning";
+      }
+      this.setState("error");
+    }
+
+    handleGeminiMessage(raw) {
+      if (!this.active || !raw) return;
+      if (typeof raw !== "string") {
+        // Never parse a binary frame directly: JSON.parse("[object Blob]") and
+        // JSON.parse(arrayBuffer) both throw, and the catch below would drop a
+        // real model message - setup, transcripts, audio - without a trace.
+        if (typeof Blob !== "undefined" && raw instanceof Blob) {
+          raw.text().then((text) => this.handleGeminiMessage(text));
+          return;
+        }
+        try {
+          raw = new TextDecoder().decode(raw);
+        } catch (_) {
+          return;
+        }
+      }
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch (_) {
+        return;
+      }
+
+      // 1. The relay's own messages: why a session did not start, and whether
+      //    Google Search grounding survived the handshake.
+      if (data.jarvisNotice) {
+        const notice = data.jarvisNotice || {};
+        const detail = [notice.message, notice.remedy].filter(Boolean).join("  ");
+        console.warn("[LiveVoice] Relay notice:", detail);
+        this.reportGeminiFailure(
+          notice.message || "the live voice session stopped",
+          notice.remedy || "",
+        );
+        return;
+      }
+      if (data.jarvisStatus) {
+        const status = data.jarvisStatus || {};
+        if (this.gemini && this.gemini.google_search) {
+          this.gemini.google_search.active = Boolean(status.grounding);
+        }
+        if (status.notice) toast(status.notice, "warning");
+        return;
+      }
+      if (data.setupComplete || data.setup_complete) {
+        this.setState("listening");
+        addActivity("system", `🎙️ Gemini Live session ready (${this.modelName})`);
+        return;
+      }
+      if (data.goAway) {
+        toast("Gemini is reconnecting this session", "warning");
+        return;
+      }
+
+      // 2. Spoken audio, transcripts, barge-in.
+      const serverContent = data.serverContent || data.server_content;
+      if (serverContent) {
+        if (serverContent.interrupted) {
+          // The server ended the model's turn because the user spoke: drop what
+          // is queued so Jarvis goes quiet immediately.
+          this.clearPlayback();
+          this.setState("listening");
+        }
+
+        const modelTurn = serverContent.modelTurn || serverContent.model_turn || {};
+        for (const part of modelTurn.parts || []) {
+          if (!part || typeof part !== "object") continue;
+          const inline = part.inlineData || part.inline_data;
+          if (inline && inline.data) {
+            this.setState("speaking");
+            this.enqueueAudioChunk(inline.data);
+          }
+          if (part.text) this.appendGeminiSpeech(part.text);
+        }
+
+        const output = serverContent.outputTranscription || serverContent.output_transcription;
+        if (output && output.text) this.appendGeminiSpeech(output.text);
+
+        const input = serverContent.inputTranscription || serverContent.input_transcription;
+        if (input && input.text) {
+          this.geminiUserTranscript += input.text;
+          if (elements.voiceCaption) {
+            elements.voiceCaption.textContent = this.geminiUserTranscript;
+            elements.voiceCaption.className = "voice-caption is-user";
+          }
+        }
+
+        if (serverContent.groundingMetadata || serverContent.grounding_metadata) {
+          addActivity("info", "🔎 Voice AI Agent used Google Search");
+        }
+
+        if (serverContent.turnComplete || serverContent.turn_complete) {
+          const spoken = this.currentAiTranscript.trim();
+          if (spoken) {
+            addMessage("assistant", spoken);
+            metrics.assistantMessages += 1;
+          }
+          const heard = this.geminiUserTranscript.trim();
+          if (heard) {
+            addMessage("user", heard);
+            metrics.userMessages += 1;
+          }
+          this.currentAiTranscript = "";
+          this.geminiUserTranscript = "";
+          updateHud();
+          if (!this.isAiSpeaking()) this.setState(this.muted ? "muted" : "listening");
+        }
+        return;
+      }
+
+      // 3. Tool calls.
+      const toolCall = data.toolCall || data.tool_call;
+      if (toolCall) {
+        this.runGeminiToolCalls(toolCall.functionCalls || toolCall.function_calls || []);
+        return;
+      }
+      if (data.toolCallCancellation || data.tool_call_cancellation) {
+        console.info("[LiveVoice] Gemini cancelled a tool call");
+      }
+    }
+
+    appendGeminiSpeech(text) {
+      if (!text) return;
+      this.currentAiTranscript += text;
+      this.setState("speaking");
+      if (elements.voiceCaption) {
+        elements.voiceCaption.textContent = this.currentAiTranscript;
+        elements.voiceCaption.className = "voice-caption is-ai";
+      }
+    }
+
+    sendGeminiText(text) {
+      if (!text || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      this.ws.send(JSON.stringify({ realtimeInput: { text: String(text) } }));
+    }
+
+    async runGeminiToolCalls(calls) {
+      const responses = [];
+      for (const call of calls) {
+        const id = call && call.id ? String(call.id) : "";
+        const name = call && call.name ? String(call.name) : "";
+        const args = (call && call.args) || {};
+        if (!name) continue;
+        if (id && this.handledCallIds.has(id)) continue;
+        if (id) {
+          this.handledCallIds.add(id);
+          if (this.handledCallIds.size > 100) {
+            this.handledCallIds.delete(this.handledCallIds.values().next().value);
+          }
+        }
+        let result;
+        try {
+          result = await this.runGeminiToolCall(name, args);
+        } catch (err) {
+          result = { ok: false, error: err.message || String(err) };
+        }
+        responses.push({ id, name, response: { result } });
+      }
+      if (responses.length && this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ toolResponse: { functionResponses: responses } }));
+      }
+    }
+
+    /// Route one Live API tool call to whoever can actually answer it.
+    ///
+    /// Screen sharing is answered in the page, because the frames come from
+    /// getDisplayMedia. The delegation tools keep their existing handlers, and
+    /// everything else - including click_target and friends, which resolve a
+    /// control by name against a live element list on the Jarvis side - is a
+    /// direct tool posted to /api/tool/execute.
+    async runGeminiToolCall(name, args) {
+      console.info(`[LiveVoice] ⚡ Tool Call: ${name}`, args);
+      if (name === "share_screen") return await this.startScreenShare((args && args.reason) || "");
+      if (name === "stop_screen_share") return this.stopScreenShare();
+      addActivity("task", `🎙️ Voice AI Agent called ${name}`);
+      if (this.geminiTools.control.includes(name)) return await this.executeToolCall(name, args || {});
+      return await this.executeDirectTool(name, args || {});
+    }
+
+    // -- screen sharing ---------------------------------------------------- #
+
+    /// Start streaming the screen at about one frame a second.
+    ///
+    /// Continuous frames are the requirement, not a nicety: a single still was
+    /// answered with "I cannot see any image" on a real session, while frames
+    /// arriving about once a second were described correctly.
+    async startScreenShare(reason) {
+      const cfg = (this.gemini && this.gemini.screen_share) || {};
+      if (cfg.enabled === false) {
+        return {
+          ok: false,
+          error: "screen sharing is switched off in Jarvis (live_voice.screen_share)",
+        };
+      }
+      if (this.screenSharing && this.displayStream) {
+        return { ok: true, result: "screen sharing is already on; frames are arriving" };
+      }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        return { ok: false, error: "this browser cannot capture the screen" };
+      }
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: 1 },
+          audio: false,
+        });
+      } catch (err) {
+        // Chrome needs a user gesture for this, and a socket message is not one.
+        // Say what is missing and give the user a button; never describe a
+        // screen that is not being shared.
+        const refused = err && err.name === "NotAllowedError";
+        this.offerScreenShareButton(refused ? "no screen was selected yet" : (err && err.message) || "");
+        return {
+          ok: false,
+          error: refused
+            ? "the browser needs the user to approve screen sharing first (no screen is selected yet)"
+            : `screen capture failed: ${(err && err.message) || "unknown error"}`,
+        };
+      }
+      this.attachScreenStream(stream);
+      addActivity("task", `🎙️ Voice AI Agent started screen sharing${reason ? `: ${reason}` : ""}`);
+      toast("🖥️ Screen sharing on - Jarvis can see your screen", "info");
+      return {
+        ok: true,
+        result: "screen sharing is ON; frames arrive about once a second. Call stop_screen_share when you are done.",
+      };
+    }
+
+    attachScreenStream(stream) {
+      this.displayStream = stream;
+      this.screenSharing = true;
+      const track = stream.getVideoTracks()[0];
+      if (track) {
+        track.onended = () => {
+          // Chrome's own "Stop sharing" bar ends the track underneath us.
+          this.stopScreenShare();
+          addActivity("warn", "🖥️ Screen sharing ended by the user");
+          toast("Screen sharing stopped", "warning");
+        };
+      }
+      const video = document.createElement("video");
+      video.autoplay = true;
+      video.muted = true;
+      video.playsInline = true;
+      video.style.display = "none";
+      video.srcObject = stream;
+      document.body.appendChild(video);
+      this.displayVideo = video;
+      video.play().catch(() => {});
+
+      const cfg = (this.gemini && this.gemini.screen_share) || {};
+      const intervalMs = Math.max(300, Math.round((cfg.interval || 1) * 1000));
+      clearInterval(this.screenTimer);
+      this.screenTimer = setInterval(() => this.sendScreenFrame(), intervalMs);
+      this.sendScreenFrame();
+      this.removeScreenShareButton();
+    }
+
+    sendScreenFrame() {
+      if (!this.screenSharing || !this.displayVideo) return;
+      const video = this.displayVideo;
+      if (!video.videoWidth || !video.videoHeight) return;
+      const cfg = (this.gemini && this.gemini.screen_share) || {};
+      const maxDim = cfg.max_dim || 1024;
+      const scale = Math.min(1, maxDim / Math.max(video.videoWidth, video.videoHeight));
+      const canvas = this.screenCanvas || (this.screenCanvas = document.createElement("canvas"));
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      try {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      } catch (_) {
+        return;
+      }
+      let dataUrl = "";
+      try {
+        dataUrl = canvas.toDataURL("image/jpeg", (cfg.quality || 60) / 100);
+      } catch (_) {
+        return;
+      }
+      const comma = dataUrl.indexOf(",");
+      if (comma < 0) return;
+      if (this.ws && this.ws.readyState === WebSocket.OPEN && this.provider === "gemini") {
+        this.ws.send(JSON.stringify({
+          realtimeInput: {
+            video: { mimeType: "image/jpeg", data: dataUrl.slice(comma + 1) },
+          },
+        }));
+      }
+    }
+
+    stopScreenShare() {
+      clearInterval(this.screenTimer);
+      this.screenTimer = null;
+      this.screenSharing = false;
+      if (this.displayStream) {
+        this.displayStream.getTracks().forEach((t) => {
+          try { t.stop(); } catch (_) {}
+        });
+        this.displayStream = null;
+      }
+      if (this.displayVideo) {
+        try {
+          this.displayVideo.srcObject = null;
+          this.displayVideo.remove();
+        } catch (_) {}
+        this.displayVideo = null;
+      }
+      this.removeScreenShareButton();
+      return { ok: true, result: "screen sharing is OFF; you are no longer receiving the screen" };
+    }
+
+    /// The user-approval path for screen capture. Shown when the browser refused
+    /// getDisplayMedia for want of a gesture, which a tool call cannot provide.
+    offerScreenShareButton(detail) {
+      if (this.screenShareButton || !document.body) return;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "🖥️ SHARE SCREEN";
+      button.title = detail
+        ? `Jarvis asked to look at your screen (${detail})`
+        : "Let Jarvis see your screen";
+      button.style.cssText =
+        "position:fixed;right:18px;bottom:104px;z-index:9999;padding:10px 14px;" +
+        "border-radius:999px;border:1px solid rgba(120,200,255,.5);" +
+        "background:rgba(6,18,32,.94);color:#cfefff;cursor:pointer;" +
+        "font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em";
+      button.addEventListener("click", async () => {
+        this.removeScreenShareButton();
+        try {
+          const stream = await navigator.mediaDevices.getDisplayMedia({
+            video: { frameRate: 1 },
+            audio: false,
+          });
+          this.attachScreenStream(stream);
+          // The model only knows about sharing when it asks; after the user
+          // approves it by hand, it has to be told.
+          this.sendGeminiText("Screen sharing is now on; the user approved it. Frames are arriving about once a second.");
+        } catch (_) {
+          toast("Screen sharing was not approved", "warning");
+        }
+      });
+      document.body.appendChild(button);
+      this.screenShareButton = button;
+      toast("Jarvis needs to see your screen - press SHARE SCREEN", "warning");
+    }
+
+    removeScreenShareButton() {
+      if (!this.screenShareButton) return;
+      try { this.screenShareButton.remove(); } catch (_) {}
+      this.screenShareButton = null;
+    }
+
+    /// Stop playback without touching the session (used for server-side
+    /// barge-in, where the Live API has already ended the model's turn).
+    clearPlayback() {
+      this.activeSources.forEach((s) => {
+        try { s.stop(); } catch (_) {}
+      });
+      this.activeSources = [];
+      if (this.audioCtx) this.nextPlayTime = this.audioCtx.currentTime;
+      this.echoGuardUntil = Date.now() + 220;
+    }
+
+    /// Send one microphone frame in whichever protocol the active engine speaks.
+    sendMicFrame(base64Audio) {
+      if (!base64Audio || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (this.provider === "gemini") {
+        this.ws.send(JSON.stringify({
+          realtimeInput: {
+            audio: { mimeType: "audio/pcm;rate=16000", data: base64Audio },
+          },
+        }));
+        return;
+      }
+      this.ws.send(JSON.stringify({
+        type: "input_audio_buffer.append",
+        audio: base64Audio,
+      }));
+    }
+
     setupAudioNodes() {
       try {
         const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
-        this.audioCtx = new AudioCtxClass({ sampleRate: 24000 });
+        // Gemini Live takes 16kHz PCM in; an OpenAI-Realtime relay takes 24kHz.
+        // One context, created for the engine that is actually running, keeps
+        // the capture honest instead of resampling a 24kHz stream by hand.
+        const captureRate = this.provider === "gemini" ? 16000 : 24000;
+        this.audioCtx = new AudioCtxClass({ sampleRate: captureRate });
         if (this.audioCtx.state === "suspended") {
           this.audioCtx.resume().catch(() => {});
         }
@@ -4075,12 +4689,7 @@
           for (let i = 0; i < bytes.length; i++) {
             binary += String.fromCharCode(bytes[i]);
           }
-          const base64Audio = btoa(binary);
-
-          this.ws.send(JSON.stringify({
-            type: "input_audio_buffer.append",
-            audio: base64Audio,
-          }));
+          this.sendMicFrame(btoa(binary));
         };
 
         this.micSource.connect(this.processorNode);
@@ -4781,6 +5390,11 @@
 
       if (this.fishSession) {
         try { this.fishSession.interrupt(); } catch (_) {}
+      } else if (this.provider === "gemini") {
+        // The Live API ends the model's turn on its own when it hears the user
+        // (automatic activity detection), so there is no cancel to send and
+        // nothing to fake: stopping playback is the whole client side of it.
+        this.clearPlayback();
       } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ type: "response.cancel" }));
       }
@@ -4808,6 +5422,11 @@
       if (this.fishSession) {
         try { this.fishSession.setMicMuted(this.muted); } catch (_) {}
       }
+      if (this.provider === "gemini" && this.muted && this.ws && this.ws.readyState === WebSocket.OPEN) {
+        // Muted audio is just silence to the API's voice detection, so say the
+        // stream ended instead of letting a turn hang on it.
+        this.ws.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+      }
       if (this.muted) {
         this.setState("muted");
         if (elements.voiceMuteIcon) elements.voiceMuteIcon.textContent = "🔇";
@@ -4824,6 +5443,11 @@
     stop() {
       this.active = false;
       api("/api/live/state", { active: false }).catch(() => {});
+      // Release the screen before anything else: a display track that outlives
+      // the session would keep a "sharing your screen" indicator on screen.
+      if (this.screenSharing || this.displayStream || this.screenShareButton) {
+        this.stopScreenShare();
+      }
       clearTimeout(this.wsWatchdog);
       this.wsWatchdog = null;
       this.voiceFallbackWarned = false;
@@ -4861,9 +5485,22 @@
       document.body.removeAttribute("data-voice-mode");
       if (elements.liveVoiceToggle) elements.liveVoiceToggle.classList.remove("is-active");
       if (elements.liveVoiceOverlay) elements.liveVoiceOverlay.hidden = true;
-      if (elements.stageVoiceText) elements.stageVoiceText.textContent = "LIVE VOICE (gpt-realtime)";
+      if (elements.stageVoiceText) elements.stageVoiceText.textContent = "LIVE VOICE";
       this.setState("idle");
       toast("Live Voice Mode closed", "info");
+    }
+
+    /// What the server reports each voice path is missing. Only paths that can
+    /// hold a conversation are named: local offline speech is not a session, so
+    /// listing it as a blocker would be noise.
+    describeVoicePaths() {
+      const blocked = (this.voicePaths || []).filter(
+        (path) => path && !path.ready && path.key !== "local"
+      );
+      if (!blocked.length) return "";
+      return blocked
+        .map((path) => `${path.label}: ${path.detail}${path.remedy ? " — " + path.remedy : ""}`)
+        .join("   •   ");
     }
 
     setState(stateName) {

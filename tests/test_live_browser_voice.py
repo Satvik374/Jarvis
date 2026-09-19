@@ -318,6 +318,257 @@ class TestLiveBrowserVoice(unittest.TestCase):
         # loopback port; its only outcome was "Origin not allowed".
         self.assertNotIn("agentId: this.fishAgentId", app)
 
+    def test_the_page_surfaces_the_voice_diagnosis(self):
+        """A failed start must state what is missing, not just "error".
+
+        The server works out which credential each voice path needs; if the page
+        drops that, the user is back to reading the browser console.
+        """
+        from jarvis.browser import STATIC_DIR
+
+        app = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertIn("voice_paths", app)
+        self.assertIn("describeVoicePaths", app)
+        # Local offline speech is not a session, so it must not be listed among
+        # the reasons a live session could not start.
+        self.assertIn('path.key !== "local"', app)
+
+    def test_live_auto_start_survives_the_token_being_stripped(self):
+        """`#live=true&token=...` must still start a session.
+
+        This is the URL `run.py --live` opens, and it never started anything:
+        the token handling reads its fragment, then clears the whole hash with
+        `history.replaceState`, so `live=true` was gone before the voice
+        controller looked for it. Caught by driving the real page.
+        """
+        from jarvis.browser import STATIC_DIR
+
+        app = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        # Captured before the fragment is cleared...
+        self.assertIn("const autoStartLiveVoice", app)
+        self.assertLess(
+            app.index("const autoStartLiveVoice"),
+            app.index('history.replaceState(null, "", location.pathname + location.search)'),
+        )
+        # ...and it is what decides the auto-start, not a re-read of the URL.
+        self.assertIn("if (autoStartLiveVoice || query.get(\"live\") === \"true\")", app)
+        self.assertNotIn('hash.includes("live=true")', app)
+
+    def test_auto_start_cannot_open_two_sessions(self):
+        """The auto-start timer and the user's first click race for `start()`.
+
+        Both used to get past `if (this.active) return` before either set it, so
+        the page opened two relay sessions and streamed the microphone to both.
+        """
+        from jarvis.browser import STATIC_DIR
+
+        app = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertIn("if (this.active || this.starting) return;", app)
+        self.assertIn("this.starting = true;", app)
+        self.assertIn("this.starting = false;", app)
+
+    def test_a_session_that_hears_you_and_says_nothing_is_reported(self):
+        """The failure the UI cannot show: LISTENING, audio sent, no answer.
+
+        A spent Live allowance produces exactly this, and from the page it is
+        indistinguishable from a working session that has not been spoken to
+        yet - so the relay has to be the one to tell them apart.
+        """
+        import base64
+        import json
+        import struct
+
+        from jarvis.browser import _audible, _silent_session_notice
+
+        silence = json.dumps({"realtimeInput": {"audio": {
+            "data": base64.b64encode(b"\x00\x00" * 4000).decode()}}})
+        speech = json.dumps({"realtimeInput": {"audio": {
+            "data": base64.b64encode(struct.pack("<h", 9000) * 4000).decode()}}})
+
+        self.assertEqual(_audible(silence), 0, "silence must not count as the user speaking")
+        self.assertEqual(_audible(speech), 1)
+        self.assertEqual(_audible("not json at all"), 0)
+        self.assertEqual(_audible(json.dumps({"realtimeInput": {"text": "hi"}})), 0)
+
+        # Speech in, nothing out.
+        notice = _silent_session_notice(audible_frames=20, model_messages=0)
+        self.assertIn("no answer", notice)
+        self.assertIn("quota", notice)
+        # A quiet user is not a fault, and an answered session needs nothing.
+        self.assertEqual(_silent_session_notice(audible_frames=2, model_messages=0), "")
+        self.assertEqual(_silent_session_notice(audible_frames=40, model_messages=1), "")
+
+    def test_the_relay_notice_reaches_the_user_with_its_remedy(self):
+        """A notice the user cannot act on is just another console line."""
+        from jarvis.browser import STATIC_DIR
+
+        app = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertIn('reportGeminiFailure(message, remedy = "")', app)
+        self.assertIn("notice.remedy || \"\"", app)
+        # The remedy has to be part of what is shown, not only logged.
+        self.assertIn("const detail = [message, remedy, blockers].filter(Boolean).join", app)
+
+    def test_voice_key_remedies_name_a_command_that_exists(self):
+        """A remedy the user cannot run is worse than no remedy.
+
+        Both the relay's no-key notice and `--live-check` told people to run
+        `python run.py --secret set ...`, which is not a flag this program has -
+        the vault is written from the console (`:secret set`).
+        """
+        from jarvis.browser import STATIC_DIR
+
+        root = STATIC_DIR.parents[1]
+        for name in ("jarvis/browser.py", "run.py"):
+            text = (root / name).read_text(encoding="utf-8")
+            self.assertNotIn("run.py --secret", text, name)
+            self.assertIn(":secret set", text, name)
+
+    def test_live_config_reports_which_voice_paths_can_start(self):
+        """The page cannot explain a blocked start without this on the wire."""
+        from http import HTTPStatus
+
+        from jarvis.browser import BrowserRequestHandler
+        from jarvis.config import Config
+
+        cfg = Config()
+        handler = object.__new__(BrowserRequestHandler)
+        handler._require_api_access = lambda require_origin=False: True
+        responses: list = []
+        handler._json = lambda status, body: responses.append((status, body))
+
+        with patch("jarvis.config.load_config", return_value=cfg):
+            handler._handle_live_config()
+
+        self.assertEqual(responses[0][0], HTTPStatus.OK)
+        body = responses[0][1]
+        self.assertIn("voice_paths", body)
+        self.assertIn("voice_ready", body)
+        reported = {path["key"] for path in body["voice_paths"]}
+        self.assertEqual(
+            reported,
+            {"fish", "gemini_api_key", "gemini_vertex", "relay", "local"},
+        )
+        for path in body["voice_paths"]:
+            self.assertIn("label", path)
+            self.assertIn("ready", path)
+            self.assertIn("detail", path)
+
+    def test_live_config_shows_a_remembered_credit_failure(self):
+        """Readiness has to reflect a 402 the process already saw."""
+        from http import HTTPStatus
+
+        from jarvis.browser import BrowserRequestHandler
+        from jarvis.config import Config
+        from jarvis.live import readiness
+
+        self.addCleanup(readiness.clear_failures)
+        cfg = Config()
+        cfg.live_voice.fish_agent_id = "agent-under-test"
+        readiness.remember_failure(
+            "fish", 'Fish Audio API error (402): {"message":"Out of API credit"}'
+        )
+        handler = object.__new__(BrowserRequestHandler)
+        handler._require_api_access = lambda require_origin=False: True
+        responses: list = []
+        handler._json = lambda status, body: responses.append((status, body))
+
+        with patch("jarvis.config.load_config", return_value=cfg):
+            handler._handle_live_config()
+
+        self.assertEqual(responses[0][0], HTTPStatus.OK)
+        fish = next(p for p in responses[0][1]["voice_paths"] if p["key"] == "fish")
+        self.assertFalse(fish["ready"])
+        self.assertIn("402", fish["detail"])
+        self.assertTrue(fish["account_gated"])
+
+    def test_the_session_endpoint_remembers_an_out_of_credit_failure(self):
+        """Retrying a 402 can never succeed, so it must not be retried blindly."""
+        from http import HTTPStatus
+
+        from jarvis.browser import BrowserRequestHandler
+        from jarvis.config import Config
+        from jarvis.live import fish_agents, readiness
+
+        self.addCleanup(readiness.clear_failures)
+        readiness.clear_failures()
+        cfg = Config()
+        cfg.live_voice.fish_agent_id = "agent-under-test"
+        # This is Fish's own billing behaviour, so pin the engine: with a Gemini
+        # key present, `auto` would (correctly) route the session to the relay
+        # and this test would be asserting about a path it never reaches.
+        cfg.live_voice.provider = "fish"
+        handler = object.__new__(BrowserRequestHandler)
+        handler._require_api_access = lambda require_origin=False: True
+        responses: list = []
+        handler._json = lambda status, body: responses.append((status, body))
+
+        with patch("jarvis.config.load_config", return_value=cfg), patch.object(
+            fish_agents, "resolve_api_key", return_value="fish-key"
+        ), patch.object(
+            fish_agents,
+            "create_session",
+            side_effect=fish_agents.FishAPIError(
+                'Fish Audio API error (402): Out of API credit', status=402
+            ),
+        ):
+            handler._handle_voice_session({})
+
+        # The upstream status still reaches the page verbatim.
+        self.assertEqual(responses[0][0], HTTPStatus.PAYMENT_REQUIRED)
+        self.assertEqual(responses[0][1]["code"], "credit")
+        # And the failure is remembered for the next readiness report.
+        self.assertIn("402", readiness.remembered_failure("fish"))
+
+    def test_a_successful_session_clears_a_remembered_credit_failure(self):
+        """Topping up must be able to un-stick a process that gave up earlier."""
+        from jarvis.browser import BrowserRequestHandler
+        from jarvis.config import Config
+        from jarvis.live import fish_agents, readiness
+
+        self.addCleanup(readiness.clear_failures)
+        readiness.remember_failure("fish", "402 out of credit")
+        cfg = Config()
+        cfg.live_voice.fish_agent_id = "agent-under-test"
+        cfg.live_voice.provider = "fish"
+        handler = object.__new__(BrowserRequestHandler)
+        handler._require_api_access = lambda require_origin=False: True
+        handler._json = lambda status, body: None
+
+        with patch("jarvis.config.load_config", return_value=cfg), patch.object(
+            fish_agents, "resolve_api_key", return_value="fish-key"
+        ), patch.object(
+            fish_agents, "create_session", return_value={"token": "tok"}
+        ):
+            handler._handle_voice_session({})
+
+        self.assertEqual(readiness.remembered_failure("fish"), "")
+
+    def test_the_relay_reports_the_model_it_will_actually_open(self):
+        """The page shows `session.model`, so a stale name must not reach it.
+
+        `live_voice.model` was reported verbatim, which meant a retired name
+        left in `.env` was displayed as the running model - while the relay was
+        in fact opening its replacement.
+        """
+        from jarvis.browser import LiveSocketRelay
+        from jarvis.config import Config
+        from jarvis.live import gemini_live
+
+        relay = LiveSocketRelay(bridge=MagicMock(), origin="http://127.0.0.1:1")
+        cfg = Config()
+        cfg.live_voice.model = "gemini-2.0-flash-exp"
+
+        before = relay.describe(cfg)
+        self.assertEqual(before["model"], gemini_live.RETIRED_MODELS["gemini-2.0-flash-exp"])
+        # `ready` is false with no port, but the model still has to be the truth.
+        cfg.live_voice.model = gemini_live.DEFAULT_MODEL
+        self.assertEqual(relay.describe(cfg)["model"], gemini_live.DEFAULT_MODEL)
+
+        # After a session, the model that answered is the one reported - the
+        # configured one may have been refused and fallen through.
+        relay.model = "gemini-2.5-flash-native-audio-latest"
+        self.assertEqual(relay.describe(cfg)["model"], "gemini-2.5-flash-native-audio-latest")
+
     def test_api_live_execute_delegates_task_to_main_agent(self):
         """POST /api/live/execute must submit the task to the bridge."""
         from jarvis.browser import BrowserRequestHandler

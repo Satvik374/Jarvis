@@ -1,0 +1,14 @@
+{
+  "provider": "kokoro",
+  "lang": "en",
+  "speed": 1.0,
+  "lines": [],
+  "bgm": {
+    "mode": "generate",
+    "query": "restrained minimal electronic underscore",
+    "prompt": "restrained minimal electronic underscore, low sustained drone, sparse pulsing percussion, cold and purposeful, no melodic uplift, no orchestral swell, steady tension that stays under a voice, 100 BPM, dark technical atmosphere",
+    "blob": "local agentic desktop assistant, UI automation, element list, developer tool",
+    "archetype": "demo-loop",
+    "arc": "Hook Mechanism Proof Constraint Lockup"
+  }
+}

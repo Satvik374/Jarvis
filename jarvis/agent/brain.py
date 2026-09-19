@@ -5,7 +5,8 @@ reply (a JSON action string, per prompts.py). Four backends ship:
 
   * ``ollama``   - local, default. Talks to the Ollama server (localhost:11434).
   * ``llamacpp`` - local, via a llama.cpp / llama-cpp-python OpenAI server.
-  * ``openai``   - any OpenAI-compatible endpoint (LM Studio, vLLM, OpenRouter...).
+  * ``openai``   - any OpenAI-compatible endpoint (LM Studio, vLLM, ...).
+  * ``openrouter``- OpenRouter: any hosted model, including the free `:free` ones.
   * ``anthropic``- Claude API, useful as the strong-vision reference brain.
 
 All backends share one interface so the rest of the app never branches on which
@@ -110,6 +111,60 @@ class Brain:
 _TRANSIENT_MARKS = ("429", "502", "503", "timed out", "timeout", "max retries",
                     "connection", "temporarily", "overloaded", "exhausted",
                     "recitation", "refresh access token", "empty content")
+
+# Fragments that mean "this model cannot take an image". The call is retried
+# once without the screenshot instead of failing the task: a text-only model
+# (deepseek/deepseek-v4-flash-0731:free, for instance) answers a vision request
+# with "No endpoints found that support image input", and losing the whole task
+# to a 404 is a bad way to learn that.
+_NO_VISION_MARKS = ("image", "modalit", "multimodal", "vision")
+
+# Status -> the one-line remedy worth printing next to the provider's own words.
+_PROVIDER_HINTS = {
+    401: "the API key is missing or invalid",
+    402: "the account has no credit left for this model",
+    403: "this key is not allowed to use that model",
+    404: "no provider serves this model id (or not for this input type)",
+    429: "rate limited - free models allow only a few requests per minute",
+}
+
+
+def provider_error_message(response: Any) -> str:
+    """The provider's own error text, not requests' generic status line.
+
+    OpenRouter answers with ``{"error": {"message": ...}}``. ``raise_for_status``
+    reports "404 Client Error ... for url", which cannot tell a retired model
+    slug from a model that simply takes no images - the two mistakes a new model
+    id actually makes.
+    """
+    try:
+        body = response.json()
+    except Exception:
+        body = None
+    detail = ""
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            detail = str(err.get("message") or err.get("type") or "")
+        elif err:
+            detail = str(err)
+        detail = detail or str(body.get("message") or body.get("detail") or "")
+    if not detail:
+        detail = str(getattr(response, "text", "") or "").strip()[:400]
+    return detail
+
+
+def provider_error(url: str, response: Any, model: str) -> str:
+    """A BrainError message for a request the provider rejected."""
+    status = getattr(response, "status_code", "?")
+    detail = provider_error_message(response)
+    message = f"provider rejected model '{model}' ({status}) at {url}"
+    if detail:
+        message += f": {detail}"
+    hint = _PROVIDER_HINTS.get(status)
+    if hint:
+        message += f" - {hint}"
+    return message
 
 
 def complete_with_retry(brain: "Brain", system: str, messages: list[dict],
@@ -332,6 +387,37 @@ def _dtype_kwarg(dtype) -> dict:
 # --------------------------------------------------------------------------- #
 
 class OpenAICompatBrain(Brain):
+    def _env_api_key(self) -> str:
+        """The API key this backend's environment actually provides.
+
+        Order matters, and it is not the order the variables are named in:
+        `load_config` mirrors a resolved OpenRouter key into ``OPENAI_API_KEY``
+        (a compatibility shim for the older code paths), so for an OpenRouter
+        backend the generic OpenAI name has to be consulted *last*. Otherwise a
+        stale mirrored key silently shadows the ``OPENROUTER_API_KEY`` the user
+        just set, and every request goes out with credentials they did not
+        choose - which reads as "my new key does not work".
+        """
+        backend = str(getattr(self.cfg, "backend", "") or "").lower()
+        base_url = str(getattr(self.cfg, "base_url", "") or "")
+        openrouter = backend == "openrouter" or "openrouter.ai" in base_url
+        configured = str(getattr(self.cfg, "api_key_env", "") or "").strip()
+        names: list[str] = []
+        if openrouter:
+            names.append("OPENROUTER_API_KEY")
+            # A name the operator chose for *this* backend still comes first;
+            # the generic default does not, because the mirror writes into it.
+            if configured and configured != "OPENAI_API_KEY":
+                names.append(configured)
+        else:
+            names.append(configured or "OPENAI_API_KEY")
+        names += ["OPENROUTER_API_KEY", "OPENAI_API_KEY"]
+        seen: list[str] = []
+        for name in names:
+            if name and name not in seen:
+                seen.append(name)
+        return next((os.environ.get(name, "") for name in seen if os.environ.get(name)), "")
+
     def complete(self, system, messages, image=None) -> str:
         msgs: list[dict] = [{"role": "system", "content": system}]
         for m in _coalesce_roles(messages):
@@ -346,7 +432,7 @@ class OpenAICompatBrain(Brain):
             ]
 
         headers = {"Content-Type": "application/json"}
-        key = getattr(self.cfg, "api_key", "") or os.environ.get(self.cfg.api_key_env, "") or os.environ.get("OPENROUTER_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+        key = getattr(self.cfg, "api_key", "") or self._env_api_key()
         if not key:
             try:
                 from ..security import get_secret
@@ -381,10 +467,12 @@ class OpenAICompatBrain(Brain):
         except Exception as exc:
             raise BrainError(f"cannot reach endpoint {url}: {exc}") from exc
 
-        # Graceful fallback if model does not support images (e.g. OpenRouter text-only models)
-        if not r.ok and imgs and self.cfg.use_vision:
-            err_text = r.text
-            if "image" in err_text.lower() or "Filter by Image Support" in err_text:
+        # Graceful fallback if the model does not accept images (OpenRouter's
+        # text-only models, e.g. deepseek/deepseek-v4-flash-0731:free). Vision is
+        # switched off for good so only the first call pays for finding out.
+        if not getattr(r, "ok", True) and imgs and self.cfg.use_vision:
+            err_text = provider_error_message(r).lower()
+            if any(mark in err_text for mark in _NO_VISION_MARKS) or "filter by image support" in err_text:
                 self.cfg.use_vision = False
                 for m in msgs:
                     if isinstance(m.get("content"), list):
@@ -401,7 +489,8 @@ class OpenAICompatBrain(Brain):
                 except Exception as exc:
                     raise BrainError(f"cannot reach endpoint {url}: {exc}") from exc
 
-        r.raise_for_status()
+        if not getattr(r, "ok", True):
+            raise BrainError(provider_error(url, r, self.cfg.model))
         data = r.json()
         choice = data["choices"][0]
         content = choice["message"].get("content")

@@ -68,6 +68,48 @@ ollama pull ornith:9b
 # ollama pull qwen2.5:3b-instruct
 ```
 
+### 2b. Or use a hosted brain on OpenRouter (the shipped default)
+
+`config.yaml` ships pointing the brain at [OpenRouter](https://openrouter.ai),
+so no local model is needed:
+
+```yaml
+brain:
+  backend: openrouter
+  model: deepseek/deepseek-v4-flash-0731:free
+  base_url: https://openrouter.ai/api/v1
+  use_vision: false            # this model takes text only
+```
+
+Put the key in `.env` (`OPENROUTER_API_KEY=sk-or-...`) or in the Credential
+Vault, then confirm that the key **and** the model id actually work:
+
+```bash
+:secret set OPENROUTER_API_KEY sk-or-...   # vault, from inside the console
+python run.py --check                      # asks OpenRouter, does not trust config.yaml
+```
+
+`--check` prints what the provider says about the key (free tier or paid, credit
+used) and about the slug (context size, accepted input types, free or paid), and
+warns when a text-only model is being handed screenshots. That matters because
+`deepseek/deepseek-v4-flash-0731:free` is text-only: with vision off, grounding
+still comes from the numbered UI-Automation element list, so clicks stay exact
+and nothing is guessed. Point `model` at a vision model
+(`deepseek/deepseek-v4-flash-vision-exp`, `google/gemini-3.6-flash`) and set
+`use_vision: true` to send the screenshot as well.
+
+Switch backend or model for a single run without editing any file:
+
+```bash
+python run.py --backend openrouter --model deepseek/deepseek-v4-pro-0813 "..."
+python run.py --backend ollama --model ornith:9b "..."
+```
+
+`JARVIS_BACKEND` / `JARVIS_MODEL` in `.env` override `config.yaml` (the legacy
+`BACKEND` / `MODEL_ID` names count too), so a stale pair left there silently
+wins over the YAML - `python run.py --check` prints the backend that is really in
+use rather than the one you meant to set.
+
 ### 3. Run it
 ```bash
 python run.py                       # interactive console
@@ -249,7 +291,95 @@ transcription/TTS.
 > matching a denylist (format, del /, shutdown, …) are refused; file writes are
 > sandboxed to your home directory.
 
-### Fish Audio Agents (hosted voice agent)
+### Gemini Live voice (the live voice engine)
+
+Live voice runs on **Gemini Live** by default: the browser streams the
+microphone to Google, plays the reply as it arrives, and answers the model's
+tool calls locally - so "open notepad" on a voice turn reaches the same registry
+the main agent uses. Nothing else about the browser UI changes; the live button
+and `python run.py --live` start this engine.
+
+```
+browser page ──16 kHz PCM in──▶ loopback relay ──▶ Gemini Live
+      ▲                              │
+      └──24 kHz PCM out, transcripts, tool calls, notices──┘
+```
+
+**Why a loopback relay instead of talking to Google directly.** Google's
+documented way for a page to open a Live session is an ephemeral token
+(`auth_tokens`). Those mint fine here, but the Live socket rejects every
+documented transport for them on this account (`1008 ... unregistered callers`
+for `?access_token=` on v1alpha and v1beta, and for `Authorization: Token`). So
+`jarvis.browser.LiveSocketRelay` holds the real key and the page connects to
+`ws://127.0.0.1:<port>/live?token=<browser token>`: same origin, the same token
+that guards the HTTP API, and no key in the page. The relay also refuses a
+`setup` message from the page - the session is the server's to configure, or a
+page could hand itself tools it does not have.
+
+Configuration (`config.yaml` → `live_voice`):
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `provider` | `gemini` | `gemini` \| `fish` \| `relay` \| `auto` |
+| `model` | `gemini-3.8-live` | A retired name is rewritten to its replacement instead of costing a failed handshake first |
+| `voice_name` | `Algenib` | Any prebuilt voice (`Aoede`, `Puck`, `Charon`, `Kore`, …) |
+| `media_resolution` | `medium` | Sent inside `generationConfig`, where the API defines it |
+| `google_search` | `auto` | Tries grounding; if the key has no grounding quota, retries without it and says so in the UI |
+| `context_window_compression` | `true` | Sliding window, so a long conversation does not die at the context limit |
+| `screen_share` | `true` | Authorises the model-initiated screen share below |
+| `backend` | `api_key` | `gcloud` uses Vertex ADC instead of an AI Studio key |
+
+`auto` is the honest default for web search because a *refused search tool* and
+a *spent Live allowance* answer with the same generic `1011 ... You exceeded your
+current quota`; nothing in the text distinguishes them. Since the first takes
+the whole session down with it, the relay retries once without the tool, keeps
+the session, and tells the page - the retry, not the message, is what tells the
+two apart. The downgrade is remembered so it is only paid once per key.
+
+**Screen sharing, requested by the voice agent.** The model is told it may ask
+to look; a `share_screen` call opens `getDisplayMedia` (the browser asks your
+permission the first time) and streams about one frame a second until
+`stop_screen_share`. This is a stream and not a snapshot because a single still
+frame is not perceived at all - the API answered "I cannot see any image" - so
+`share_screen` means "keep sending", not "send one". Frames leave this machine:
+`live_voice.screen_share: false` is the switch that refuses it, and the model is
+told it was refused rather than left describing a screen it never received.
+
+#### Checking it against the real API
+
+`.env` overrides `config.yaml`, and the live-voice variables are the usual reason
+live mode runs a different model or voice than the file says. `GET
+/api/live/config` therefore reports the **effective** model and voice, and
+`voice_paths` says which credential each path still needs. The probes here drive
+the real thing rather than a mock:
+
+```bash
+python run.py --check --live-check                     # real session, no browser
+python run.py --check --live-check --live-audio me.wav # send your own recording
+python _relay_probe.py --wav jarvis_probe_say.wav      # relay alone, no browser
+python _gemini_probe.py --seconds 40                   # the real page, fake mic
+python _mic_probe.py                                   # what the mic delivers
+```
+
+`--live-check` is the one that answers "is live voice working on this machine":
+it opens a real session, streams a phrase as 16 kHz PCM the way the page streams
+your microphone, ends the turn, and reports what came back. It also prints the
+**effective** model, voice and engine and names the environment variables that
+overrode `config.yaml` - because `JARVIS_LIVE_MODEL` and friends outrank the
+file, and a stale one there is the usual reason live voice runs something other
+than what the file says. Three outcomes, three remedies:
+
+| Outcome | What it means |
+| --- | --- |
+| answered | key, model, session and audio all work - a silent browser is the page's side |
+| handshake refused | a bad key, or a model name this key cannot open |
+| accepted, then silence | an allowance state: the Live quota of the key is spent, and every model behaves the same |
+
+`_relay_probe.py` is the one to reach for first: it speaks the page's half of
+the protocol directly, so a silent model is distinguishable from a broken relay
+in about thirty seconds.
+
+### Fish Audio Agents (the alternative hosted voice agent)
 
 [Fish Agents](https://docs.fish.audio/agents) is a hosted real-time voice
 agent: Fish runs the speech recognition, turn-taking and synthesis, and your
@@ -342,14 +472,17 @@ Then point Jarvis at the agent and open browser voice mode:
 python run.py --browser
 ```
 
-Once `fish_agent_id` is set, **live voice mode uses Fish**: `LiveVoiceController`
+Set `live_voice.provider: fish` (plus `fish_agent_id`) to run the hosted agent
+instead of Gemini Live. `LiveVoiceController` then
 mints a session through `POST /api/voice/session` (which calls Fish's
 `POST /v1/agent/sessions` **server-side**, so the API key never reaches the
 browser) and starts `@fishaudio/agent-client` with the three client-tool
 handlers. Transcripts, agent mode, tool activity and barge-in are mirrored into
 the normal console UI; `stop()` ends the session. If the agent is unset, the SDK
 is missing, or session creation fails, live mode falls back to the
-`live_voice.ws_url` OpenAI-Realtime path instead of failing.
+`live_voice.ws_url` OpenAI-Realtime path instead of failing - and if that is
+unset too, it says which credential is missing instead of opening a socket to
+nothing (see *Which voice path will actually start* below).
 
 Tool calls land in the event feed ("Voice AI Agent called execute_task") and, if
 nothing happens, `GET /v1/agent/sessions/{id}` replays the session's
@@ -367,6 +500,48 @@ or printed with `python -m jarvis.live.prompts`.
 > access is granted on the account (https://fish.audio/app/agents). Sessions
 > bill against the account's API credit, and running out returns
 > `402 Out of API credit` when a session is created.
+
+### Which voice path will actually start
+
+`provider` decides the engine, and there are four ways live voice can run. An
+explicit `provider` wins outright - ask for Fish and you get Fish even with a
+Gemini key present - while `auto` takes the best usable path in this order:
+`gemini_api_key`, `gemini_vertex`, `fish`, `relay`. Rather than reporting a
+WebSocket close code when none of them work, `GET /api/live/config` returns a
+`voice_paths` list - one entry per path, each with `ready`, the reason it is
+blocked, and the remedy - plus a single `voice_ready` verdict. The page prints
+that when a start fails.
+
+| Path | Needs |
+| --- | --- |
+| `fish` | `live_voice.fish_agent_id` and a funded Fish Audio account |
+| `gemini_api_key` | a Gemini key in `JARVIS_LIVE_API_KEY` (**free tier**) |
+| `gemini_vertex` | `gcloud auth application-default login` |
+| `relay` | `live_voice.ws_url`, for your own OpenAI-Realtime relay |
+| `local` | the Kokoro model in `models/tts/` - speech only, not a session |
+
+A key stored in the Credential Vault is used **regardless of the configured
+backend**, because a stored key is the free tier whereas `backend: gcloud`
+routes to Vertex, whose quota is spent against the project. That combination - a
+usable key in the vault plus `backend: gcloud` - is what made live voice look
+broken while it was merely pointed at the wrong bill.
+
+A `402` is a billing state, not a hiccup: it is remembered by the server so a
+second start does not spend another API call to relearn it, and any successful
+session clears the memory. A retired model name in `live_voice.model` (or in a
+gitignored `.env`) is rewritten to its replacement with a warning, rather than
+failing the handshake first.
+
+The Live setup payload sends `responseModalities` and `speechConfig` inside
+`generationConfig`, because that is where the API defines them. At the top level
+of `setup` the server refuses the whole handshake (`1007 ... Unknown name
+"responseModalities" at 'setup': Cannot find field`) and no session opens at
+all - so this is worth checking first whenever live voice connects to nothing,
+regardless of which credentials are configured. `jarvis/live/gemini_live.py`
+builds that message once for every transport that speaks it (the terminal
+supervisor and the browser relay), with the fields the API actually accepts
+documented next to them - the module is the place to look before changing the
+setup.
 
 #### When the agent talks instead of acting
 
@@ -618,7 +793,7 @@ tools: read_file, write_file
 |------|--------------|
 | `jarvis/tools/schema.py` | **The action space** — single source of truth. The app, dataset, and prompts all read it. |
 | `jarvis/perception/` | Screenshot (`screen.py`), UI-tree/OCR element detection (`elements.py`), numbered-mark overlay (`annotate.py`). |
-| `jarvis/agent/brain.py` | Pluggable LLM backends: **ollama** (default), llamacpp/openai-compatible, anthropic. |
+| `jarvis/agent/brain.py` | Pluggable LLM backends: **openrouter** (shipped default), ollama, any OpenAI-compatible endpoint, gemini/Vertex, Azure Foundry, anthropic, codex. |
 | `jarvis/agent/prompts.py` | System prompt + tolerant parser for the model's JSON action. |
 | `jarvis/agent/loop.py` | The perceive→think→act loop. |
 | `jarvis/agent/trajectory.py` | Logs every real run as training data (`dataset/data/trajectories/`). |

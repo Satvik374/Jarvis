@@ -98,7 +98,19 @@ def build_live_voice_system_prompt() -> str:
         "call 'get_task_status' and summarize the active status concisely aloud.\n\n"
         "Rule 7: EXECUTIVE VOICE TONE & BREVITY\n"
         "   - Keep spoken turns concise, natural, and punchy. Avoid robotic boilerplate like 'As an AI model...' or 'Task completed successfully'.\n"
-        "   - Never recite raw markdown tables, URLs, or long blocks of code verbatim unless explicitly asked."
+        "   - Never recite raw markdown tables, URLs, or long blocks of code verbatim unless explicitly asked.\n\n"
+        "Rule 8: SEEING THE SCREEN (CALL 'share_screen' WHENEVER YOU NEED TO LOOK)\n"
+        "   - You do not receive the screen by default. If you need to know what is on the user's "
+        "screen - which window is in front, what a page shows, whether an action worked, or where a "
+        "control is - call 'share_screen'. Frames then arrive about once a second and you can describe "
+        "what you see and act on it.\n"
+        "   - Call 'stop_screen_share' as soon as you are done looking; the user can also end the share "
+        "from their browser at any time, and you must not claim to see the screen after that.\n"
+        "   - The element list from 'look_at_screen' is more precise than the pixels. Prefer it for "
+        "deciding what to click, and use the shared screen to understand context: what app is open, "
+        "what state it is in, what just changed.\n"
+        "   - A share the user has not approved yet returns an error saying so. Say plainly that you "
+        "need screen sharing approved, and continue without it - never describe a screen you cannot see."
     )
 
 
@@ -195,9 +207,52 @@ def get_direct_voice_tools() -> list[dict[str, Any]]:
 def get_live_voice_tools() -> list[dict[str, Any]]:
     """Return the OpenAI Realtime tool specifications for the Voice AI Agent.
 
-    The three control tools plus every directly callable action.
+    The three control tools, every directly callable action, the resolving
+    screen tools, and screen sharing.
     """
-    return get_control_voice_tools() + get_direct_voice_tools()
+    return get_control_voice_tools() + get_direct_voice_tools() + get_screen_share_voice_tools()
+
+
+def get_screen_share_voice_tools() -> list[dict[str, Any]]:
+    """Tools the *page* executes: sharing the user's screen with the model.
+
+    These are deliberately not Jarvis actions from ``schema.py``: the video
+    frames come from the browser (``getDisplayMedia``), so the tool is answered
+    by the page. The relay declares them in the Live session exactly like the
+    other tools, which is what lets the model ask to look at the screen on its
+    own initiative.
+    """
+    return [
+        {
+            "type": "function",
+            "name": "share_screen",
+            "description": (
+                "Start seeing the user's screen. Call this whenever you need to look at it: "
+                "what window is in front, what a page or dialog shows, whether an action worked, "
+                "or anything where the element list alone is not enough. Frames then arrive about "
+                "once a second until you call stop_screen_share. The user may have to approve "
+                "sharing the first time, and you must not describe a screen you have not received."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Short reason you need to look, e.g. 'check the save dialog', shown to the user.",
+                    }
+                },
+            },
+        },
+        {
+            "type": "function",
+            "name": "stop_screen_share",
+            "description": (
+                "Stop seeing the user's screen once you have finished looking, so nothing more is "
+                "shared."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    ]
 
 
 def get_control_voice_tools() -> list[dict[str, Any]]:

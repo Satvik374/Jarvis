@@ -11,7 +11,7 @@ import pytest
 
 from jarvis.config import Config, VoiceConfig
 from jarvis.live import fish_agents
-from jarvis.live.prompts import get_live_voice_tools
+from jarvis.live.prompts import get_live_voice_tools, get_screen_share_voice_tools
 
 
 class MockHTTPResponse:
@@ -32,10 +32,31 @@ def _respond(payload):
     return patch("urllib.request.urlopen", return_value=MockHTTPResponse(json.dumps(payload)))
 
 
+def _fish_cfg() -> Config:
+    """A config pinned to the Fish engine.
+
+    Live voice now defaults to Gemini Live, and these tests are about Fish's own
+    endpoint behaviour, so the engine is named explicitly rather than left to
+    whichever credential this machine happens to hold.
+    """
+    cfg = Config()
+    cfg.live_voice.provider = "fish"
+    return cfg
+
+
 def test_client_tool_names_match_live_voice_tools():
-    """Declared client tools must mirror the OpenAI Realtime tool names."""
+    """Declared client tools must mirror the OpenAI Realtime tool names.
+
+    Screen sharing is the one exception: its frames come from the page's own
+    ``getDisplayMedia``, so only the Gemini Live transport offers it. Fish's
+    hosted agent cannot answer it, and declaring a tool nobody answers would
+    have the agent ask to see a screen it never receives.
+    """
     declared = [tool["name"] for tool in fish_agents.client_tool_declarations()]
-    expected = [tool["name"] for tool in get_live_voice_tools()]
+    page_only = {tool["name"] for tool in get_screen_share_voice_tools()}
+    expected = [
+        tool["name"] for tool in get_live_voice_tools() if tool["name"] not in page_only
+    ]
     assert declared == expected
 
 
@@ -212,7 +233,7 @@ def test_voice_session_endpoint_needs_a_configured_agent(monkeypatch):
     monkeypatch.delenv("JARVIS_FISH_AGENT_ID", raising=False)
     monkeypatch.delenv("FISH_AGENT_ID", raising=False)
     handler, responses = _handler_with_recorder()
-    with patch("jarvis.config.load_config", return_value=Config()):
+    with patch("jarvis.config.load_config", return_value=_fish_cfg()):
         handler._handle_voice_session({})
 
     assert len(responses) == 1
@@ -226,7 +247,7 @@ def test_voice_session_endpoint_mints_session_server_side(monkeypatch):
 
     monkeypatch.delenv("JARVIS_FISH_AGENT_ID", raising=False)
     monkeypatch.delenv("FISH_AGENT_ID", raising=False)
-    cfg = Config()
+    cfg = _fish_cfg()
     cfg.live_voice.fish_agent_id = "agent_from_config"
     handler, responses = _handler_with_recorder()
 
@@ -248,7 +269,7 @@ def test_voice_session_endpoint_reports_upstream_failure(monkeypatch):
     from http import HTTPStatus
 
     monkeypatch.delenv("JARVIS_FISH_AGENT_ID", raising=False)
-    cfg = Config()
+    cfg = _fish_cfg()
     cfg.live_voice.fish_agent_id = "agent_x"
     handler, responses = _handler_with_recorder()
 
@@ -268,7 +289,7 @@ def test_session_endpoint_passes_the_credit_status_through():
     """"Out of API credit" is not a bad gateway - the page acts on the difference."""
     from http import HTTPStatus
 
-    cfg = Config()
+    cfg = _fish_cfg()
     cfg.live_voice.fish_agent_id = "agent_x"
     handler, responses = _handler_with_recorder()
     error = fish_agents.FishAPIError(
@@ -289,7 +310,7 @@ def test_session_endpoint_passes_the_credit_status_through():
 def test_session_endpoint_keeps_502_for_a_transport_failure():
     from http import HTTPStatus
 
-    cfg = Config()
+    cfg = _fish_cfg()
     cfg.live_voice.fish_agent_id = "agent_x"
     handler, responses = _handler_with_recorder()
     error = fish_agents.FishAPIError("Fish Audio API request failed: timed out")

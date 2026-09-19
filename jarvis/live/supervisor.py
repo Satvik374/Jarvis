@@ -18,6 +18,7 @@ Architecture:
 from __future__ import annotations
 
 import collections
+import io
 import queue
 import sys
 import threading
@@ -96,11 +97,25 @@ class LiveVoiceSupervisor:
         self._min_narration_interval = 3.5  # seconds between mid-task voice updates
         self._narration_history: collections.deque[str] = collections.deque(maxlen=15)
 
+        # Screen sharing. The live model asks to look (`share_screen`); from then
+        # until `stop_screen_share` the supervisor grabs the desktop about once a
+        # second and streams the frames through the session it already has. A
+        # single still frame is not perceived at all, so this is a stream.
+        self._screen_share_stop = threading.Event()
+        self._screen_share_thread: threading.Thread | None = None
+        self._screen_share_reason = ""
+        self._screen_share_frames = 0
+
         self._is_running = False
 
     @property
     def is_task_running(self) -> bool:
         return self._is_task_running
+
+    @property
+    def is_sharing_screen(self) -> bool:
+        thread = self._screen_share_thread
+        return bool(thread is not None and thread.is_alive())
 
     @property
     def current_task(self) -> str:
@@ -124,6 +139,9 @@ class LiveVoiceSupervisor:
     def stop(self) -> None:
         """Stop all live streams and abort active task."""
         self._is_running = False
+        # Before anything is torn down: screen frames are expensive to produce
+        # and must not outlive the session that carries them.
+        self.stop_screen_share()
         self.cancel_active_task()
         with self._task_lock:
             worker = self._active_task_thread
@@ -550,7 +568,13 @@ class LiveVoiceSupervisor:
         args = args if isinstance(args, dict) else {}
         log.info(f"🎙️ [Communicating Agent Tool Call]: {name}({args})")
 
-        if name == "run_jarvis_task":
+        if name == "share_screen":
+            return self.start_screen_share(str(args.get("reason", "") or ""))
+
+        elif name == "stop_screen_share":
+            return self.stop_screen_share()
+
+        elif name == "run_jarvis_task":
             task = args.get("task", "")
             return self.launch_task(task)
 
@@ -576,6 +600,96 @@ class LiveVoiceSupervisor:
             return {"status": "answered", "answer": ans}
 
         return {"status": "unknown_tool", "tool": name}
+
+    # ------------------------------------------------------------------ #
+    # Screen sharing
+    # ------------------------------------------------------------------ #
+
+    def start_screen_share(self, reason: str = "") -> dict[str, Any]:
+        """Stream the desktop to the live model until it stops asking.
+
+        Returns a tool response the model speaks from, so a refused or already
+        running share is something it can say out loud instead of assuming it is
+        looking at a screen it never received.
+        """
+        if not getattr(self.cfg.live_voice, "screen_share", True):
+            return {
+                "status": "disabled",
+                "message": "Screen sharing is switched off (live_voice.screen_share).",
+            }
+        if self.is_sharing_screen:
+            return {
+                "status": "already_sharing",
+                "reason": self._screen_share_reason,
+                "frames": self._screen_share_frames,
+            }
+
+        interval = float(getattr(self.cfg.live_voice, "screen_share_interval", 1.0) or 1.0)
+        self._screen_share_reason = reason
+        self._screen_share_frames = 0
+        self._screen_share_stop.clear()
+        self._screen_share_thread = threading.Thread(
+            target=self._stream_screen_frames,
+            name="live-screen-share",
+            daemon=True,
+        )
+        self._screen_share_thread.start()
+        log.info(f"🖥️ [Screen Share] Streaming the desktop to the Communicating Agent ({interval:.1f}s/frame).")
+        return {
+            "status": "sharing",
+            "reason": reason,
+            "interval_seconds": interval,
+            "note": (
+                "Frames start arriving now and continue about once a second. Say what you "
+                "see from the frames themselves, and call stop_screen_share when done."
+            ),
+        }
+
+    def stop_screen_share(self) -> dict[str, Any]:
+        """End the frame stream. Safe to call when nothing is being shared."""
+        was_sharing = self.is_sharing_screen
+        self._screen_share_stop.set()
+        thread = self._screen_share_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        frames = self._screen_share_frames
+        self._screen_share_thread = None
+        if was_sharing:
+            log.info(f"🖥️ [Screen Share] Stopped after {frames} frame(s).")
+        return {"status": "stopped", "frames": frames}
+
+    def _stream_screen_frames(self) -> None:
+        """Capture, downscale and send one frame per interval until stopped."""
+        interval = max(0.25, float(getattr(self.cfg.live_voice, "screen_share_interval", 1.0) or 1.0))
+        max_dim = int(getattr(self.cfg.live_voice, "screen_share_max_dim", 1024) or 1024)
+        quality = int(getattr(self.cfg.live_voice, "screen_share_quality", 60) or 60)
+        try:
+            from ..perception.live_vision import get_live_vision
+
+            vision = get_live_vision()
+        except Exception as exc:  # pragma: no cover - capture stack unavailable
+            log.warn(f"[Screen Share] Screen capture is unavailable: {exc}")
+            return
+
+        while not self._screen_share_stop.is_set():
+            if not self.client.is_connected:
+                log.warn("[Screen Share] The live session ended; stopping the frame stream.")
+                break
+            try:
+                image = vision.capture_screen()
+                # Downscale before encoding: a full-resolution desktop is sent
+                # about once a second and would otherwise spend the session's
+                # bandwidth on detail no screen check needs.
+                image.thumbnail((max_dim, max_dim))
+                buffer = io.BytesIO()
+                image.save(buffer, format="JPEG", quality=quality)
+                self.client.send_video_frame(buffer.getvalue())
+                self._screen_share_frames += 1
+            except Exception as exc:
+                log.warn(f"[Screen Share] Dropped a frame: {exc}")
+            self._screen_share_stop.wait(interval)
+
+        self._screen_share_thread = None
 
     def _on_live_interrupted(self) -> None:
         """User spoke while Communicating Agent was speaking (Barge-in)."""

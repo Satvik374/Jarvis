@@ -1,0 +1,320 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Orbitron";
+      src: url("assets/fonts/Orbitron-Variable.woff2") format("woff2");
+      font-weight: 400 900;
+      font-style: normal;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-500.woff2") format("woff2");
+      font-weight: 500;
+      font-style: normal;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Outfit";
+      src: url("assets/fonts/Outfit-400.woff2") format("woff2");
+      font-weight: 400;
+      font-style: normal;
+      font-display: block;
+    }
+
+    #root {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      color: #e5f8ff;
+    }
+
+    .f04-plate {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 1920px;
+      height: 935px;
+      display: block;
+      object-fit: cover;
+    }
+    .f04-field {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 1920px;
+      height: 935px;
+      pointer-events: none;
+    }
+    .f04-mark {
+      position: absolute;
+      pointer-events: none;
+    }
+    .f04-box {
+      position: absolute;
+      inset: 0;
+      border: 1px solid rgba(0, 240, 255, 0.45);
+    }
+    .f04-chip {
+      position: absolute;
+      left: 0;
+      top: -15px;
+      background: #00f0ff;
+      color: #02070d;
+      font-family: "JetBrains Mono", monospace;
+      font-weight: 500;
+      font-size: 11px;
+      line-height: 1;
+      padding: 2px 4px;
+    }
+
+    /* ---- the numerals: the constraint as a graphic primitive ----
+       Each numeral is a managed flex stack (numeral → track → unit): the
+       layout engine reserves the space, so the leading slop of a 340px
+       numeral can never read as a collision with its own unit label. */
+    .f04-group {
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 18px;
+    }
+    .f04-group-four {
+      left: 300px;
+      top: 400px;
+    }
+    .f04-group-eight {
+      left: 1160px;
+      top: 230px;
+    }
+    .f04-num {
+      font-family: "Orbitron", sans-serif;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: -0.04em;
+      color: #e5f8ff;
+      transform-origin: center bottom;
+    }
+    .f04-num.f04-four {
+      font-size: 170px;
+    }
+    .f04-num.f04-eight {
+      font-size: 340px;
+    }
+    .f04-track {
+      height: 2px;
+      background: #00f0ff;
+      transform-origin: left center;
+    }
+    .f04-unit {
+      font-family: "JetBrains Mono", monospace;
+      font-weight: 500;
+      font-size: 15px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: #b4c7d0;
+      white-space: nowrap;
+    }
+
+    /* ---- the three negations ---- */
+    .f04-row {
+      position: absolute;
+      left: 300px;
+      font-family: "JetBrains Mono", monospace;
+      font-weight: 500;
+      font-size: 17px;
+      letter-spacing: 0.06em;
+      color: #e5f8ff;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+    }
+    .f04-row svg {
+      margin-right: 14px;
+    }
+    .f04-row path {
+      opacity: 0;
+    }
+    .f04-hair {
+      position: absolute;
+      left: 300px;
+      top: 668px;
+      width: 1260px;
+      height: 1px;
+      background: #262828;
+      transform-origin: left center;
+    }
+  </style>
+
+  <div id="root" data-composition-id="04-four-gigabytes" data-width="1920" data-height="1080">
+    <img
+      id="f04-plate"
+      class="clip f04-plate"
+      src="assets/som-ui-home-clean-raw.png"
+      alt=""
+      data-start="0"
+      data-duration="8.896"
+      data-track-index="0"
+    />
+    <div class="f04-field"></div>
+
+    <div class="f04-group f04-group-four">
+      <div class="f04-num f04-four">0</div>
+      <div class="f04-track f04-track-four"></div>
+      <div class="f04-unit f04-unit-four">GB VRAM</div>
+    </div>
+    <div class="f04-group f04-group-eight">
+      <div class="f04-num f04-eight">0</div>
+      <div class="f04-track f04-track-eight"></div>
+      <div class="f04-unit f04-unit-eight">GB RAM</div>
+    </div>
+
+    <div class="f04-row f04-row-1">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M3 8.4 L6.4 11.6 L13 4.8" fill="none" stroke="#00f0ff" stroke-width="2" stroke-dasharray="16" stroke-dashoffset="16" />
+      </svg>
+      <span>no API key</span>
+    </div>
+    <div class="f04-row f04-row-2">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M3 8.4 L6.4 11.6 L13 4.8" fill="none" stroke="#00f0ff" stroke-width="2" stroke-dasharray="16" stroke-dashoffset="16" />
+      </svg>
+      <span>no cloud round trip</span>
+    </div>
+    <div class="f04-row f04-row-3">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M3 8.4 L6.4 11.6 L13 4.8" fill="none" stroke="#00f0ff" stroke-width="2" stroke-dasharray="16" stroke-dashoffset="16" />
+      </svg>
+      <span>nothing leaves this machine</span>
+    </div>
+    <div class="f04-hair"></div>
+  </div>
+
+  <script>
+    (function () {
+      const FID = "04-four-gigabytes";
+      const root = document.getElementById("root");
+
+      /* The settled mark field, carried from frame 3 at exact geometry. */
+      const MARKS = [
+        [0, 32, 16, 205, 51], [1, 79, 17, 185, 40], [2, 79, 38, 205, 49], [3, 1454, 17, 1540, 50],
+        [4, 1549, 17, 1590, 50], [5, 1599, 17, 1640, 50], [6, 1649, 17, 1690, 50], [7, 1699, 17, 1740, 50],
+        [8, 1776, 28, 1813, 39], [9, 1856, 17, 1888, 50], [10, 32, 82, 380, 888], [11, 43, 91, 105, 126],
+        [12, 108, 94, 171, 123], [13, 174, 94, 237, 123], [14, 240, 91, 303, 126], [15, 306, 91, 369, 126],
+        [16, 47, 144, 137, 155], [17, 343, 146, 365, 155], [18, 33, 175, 379, 887], [19, 47, 193, 70, 202],
+        [20, 110, 192, 142, 201], [21, 110, 204, 251, 216], [22, 110, 236, 131, 246], [23, 110, 248, 323, 261],
+        [24, 110, 292, 323, 305], [25, 110, 336, 296, 349], [26, 110, 380, 323, 393], [27, 110, 424, 323, 437],
+        [28, 110, 468, 323, 481], [29, 110, 512, 312, 538], [30, 391, 82, 1365, 888], [31, 731, 832, 745, 847],
+        [32, 774, 814, 858, 825], [33, 774, 852, 866, 865], [34, 986, 101, 1038, 124], [35, 1042, 102, 1119, 125],
+        [36, 1123, 102, 1182, 125], [37, 1186, 102, 1270, 125], [38, 1274, 102, 1345, 125],
+        [39, 1212, 138, 1276, 158], [40, 1284, 138, 1351, 158],
+      ];
+      const field = document.querySelector(".f04-field");
+      MARKS.forEach((m) => {
+        const x0 = m[1];
+        const y0 = m[2];
+        const w = m[3] - x0;
+        const h = m[4] - y0;
+        const wrap = document.createElement("div");
+        wrap.className = "f04-mark";
+        wrap.style.left = x0 + "px";
+        wrap.style.top = y0 + "px";
+        wrap.style.width = w + "px";
+        wrap.style.height = h + "px";
+        if (w >= 16 && h >= 10 && w * h <= 60000) {
+          const box = document.createElement("div");
+          box.className = "f04-box";
+          wrap.appendChild(box);
+        }
+        const chip = document.createElement("div");
+        chip.className = "f04-chip";
+        chip.textContent = String(m[0]);
+        wrap.appendChild(chip);
+        field.appendChild(wrap);
+      });
+
+      const four = document.querySelector(".f04-four");
+      const eight = document.querySelector(".f04-eight");
+      const t4 = document.querySelector(".f04-track-four");
+      const t8 = document.querySelector(".f04-track-eight");
+      t4.style.width = "112px";
+      t8.style.width = "212px";
+      document.querySelector(".f04-hair").style.top = "668px";
+      document.querySelector(".f04-row-1").style.top = "698px";
+      document.querySelector(".f04-row-2").style.top = "740px";
+      document.querySelector(".f04-row-3").style.top = "782px";
+      // the carried field arrives at frame 3's out value, not at full strength
+      gsap.set(".f04-field", { opacity: 0.55 });
+      gsap.set(".f04-chip", { opacity: 0.55 });
+
+      const tl = gsap.timeline({ paused: true });
+
+      // ---- Scene 1 (0.0-2.2s): the plate recedes; 4 counts up and grows ----
+      tl.fromTo(".f04-plate", { opacity: 0.55 }, { opacity: 0.28, duration: 0.6, ease: "power1.out" }, 0);
+      tl.fromTo(".f04-field", { opacity: 0.55 }, { opacity: 0.28, duration: 0.6, ease: "power1.out" }, 0);
+      // the mark numbers had done their job by frame 3 — they fade with the ramp
+      tl.fromTo(".f04-chip", { opacity: 0.55 }, { opacity: 0, duration: 0.5, ease: "power1.out" }, 0);
+      // ...and leave the render tree, so no invisible ink text is left measured
+      tl.set(".f04-chip", { display: "none" }, 0.56);
+
+      const c4 = { v: 0 };
+      tl.to(
+        c4,
+        {
+          v: 4,
+          duration: 1.6,
+          ease: "power2.out",
+          onUpdate: () => {
+            four.textContent = String(Math.round(c4.v));
+            const s = 0.8 + 0.2 * (c4.v / 4);
+            four.style.transform = "scale(" + s + ")";
+          },
+        },
+        0.15,
+      );
+      tl.fromTo(t4, { scaleX: 0 }, { scaleX: 1, duration: 1.7, ease: "power2.out" }, 0.3);
+      tl.fromTo(".f04-unit-four", { opacity: 0 }, { opacity: 1, duration: 0.4 }, 0.7);
+
+      // ---- Scene 2 (2.2-4.4s): 8 counts up — the same ratio, drawn ----
+      const c8 = { v: 0 };
+      tl.to(
+        c8,
+        {
+          v: 8,
+          duration: 1.9,
+          ease: "power2.out",
+          onUpdate: () => {
+            eight.textContent = String(Math.round(c8.v));
+            const s = 0.8 + 0.2 * (c8.v / 8);
+            eight.style.transform = "scale(" + s + ")";
+          },
+        },
+        2.2,
+      );
+      tl.fromTo(t8, { scaleX: 0 }, { scaleX: 1, duration: 1.9, ease: "power2.out" }, 2.4);
+      tl.fromTo(".f04-unit-eight", { opacity: 0 }, { opacity: 1, duration: 0.4 }, 2.8);
+
+      // ---- Scene 3 (4.4-7.4s): the three negations, one per spoken cue ----
+      [
+        { row: ".f04-row-1", at: 4.5, check: 4.95 },
+        { row: ".f04-row-2", at: 5.7, check: 6.15 },
+        { row: ".f04-row-3", at: 6.9, check: 7.35 },
+      ].forEach((spec) => {
+        tl.fromTo(spec.row, { opacity: 0, x: -10 }, { opacity: 1, x: 0, duration: 0.36, ease: "power3.out" }, spec.at);
+        tl.fromTo(
+          spec.row + " path",
+          { opacity: 1, strokeDashoffset: 16 },
+          { opacity: 1, strokeDashoffset: 0, duration: 0.3, ease: "power2.out" },
+          spec.check,
+        );
+      });
+
+      // ---- Scene 4 (7.5-8.896s): lock the pair and hold still ----
+      tl.fromTo(".f04-hair", { scaleX: 0, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.6, ease: "power3.out" }, 7.5);
+
+      window.__timelines[FID] = tl;
+    })();
+  </script>
+</template>

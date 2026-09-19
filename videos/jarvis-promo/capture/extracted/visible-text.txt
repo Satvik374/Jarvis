@@ -1,0 +1,99 @@
+=== THE BRIEF (videos/jarvis-promo/BRIEF.md) ===
+
+workflow: product-launch-video
+flow: automation
+storyboard: yes
+message: "A tiny local model can drive your whole desktop, because it never has to guess a pixel."
+destination: youtube
+aspect: 1920x1080
+language: en
+length: 45s
+angle: mechanism-as-hook
+audience: developers and technically-minded desktop users who are sceptical of AI-agent claims
+narration: yes
+
+Concept: "Set of Marks" — the video is narrated from Jarvis's own point of view: we
+watch the screen the way it watches the screen. Every frame is a real desktop
+wearing numbered Set-of-Marks badges over genuine UI Automation controls, with the
+cursor arriving at an exact pixel centre.
+
+The angle is mechanism-as-hook: the mechanism IS the hook, not a slide about the
+mechanism. The one thing the video must communicate — "a tiny local model can drive
+your whole desktop, because it never has to guess a pixel" — is the same sentence as
+the product's architecture.
+
+Sell, don't tour: a promo with a thesis, not a feature walkthrough.
+Tone: precise, terminal-flavoured, confident, zero mysticism.
+
+Opening hook: a cursor lands dead-centre on a button nobody could have guessed —
+because element 41 said so.
+
+
+=== THE PRODUCT'S OWN POSITIONING (README.md, verbatim excerpts) ===
+
+# JARVIS — a local, agentic desktop assistant
+
+A Jarvis-style AI that controls your Windows computer: it takes a screenshot,
+reads what's on screen, **thinks**, and **acts** — moving the mouse, clicking by
+coordinate, typing, launching apps, running commands, and working with files —
+looping until your task is done. It runs a **small local model** (via Ollama) so
+it fits a modest machine (built and tuned for an RTX 2050 / 4 GB VRAM / 8 GB RAM).
+
+  perceive  ──▶  think  ──▶  act  ──▶  observe result  ──▶  (repeat)
+ screenshot     local LLM    mouse /      feed back to
+ + UI tree      picks one    keyboard /   the model
+                action       apps / OS
+
+## Why this design (read this — it's the important part)
+
+**Agentic screen control needs *grounding*: knowing the exact pixel to click.**
+Asking a tiny model to guess a pixel from raw screenshot bytes is unreliable
+below ~7B vision models — and a 7B vision model won't fit in 4 GB of VRAM.
+
+So Jarvis does the grounding with **classical tools, not the model**:
+
+- Windows **UI Automation** (and optional OCR) detect the real on-screen
+  controls and their exact bounding boxes.
+- Each control is labelled with a number ("Set-of-Marks"):
+
+  [0] Button   "Save"                 @ (512,40)
+  [1] Edit     "File name:"           @ (300,80)
+  [2] MenuItem "File"                 @ (20,30)
+
+- The model only has to answer *"click element 0"*. A 1.5–3B **text** model
+  does that reliably.
+
+This is what makes accurate desktop control possible on your hardware, and it's
+why the fine-tune targets a small text model rather than a giant vision one.
+
+
+=== A REAL CAPTURED ELEMENT LIST (Jarvis observing its own interface) ===
+
+Active window: JARVIS // NEURAL INTERFACE
+41 controls (product region only):
+
+[0]  Text       "JARVIS"
+[1]  Text       "LOCAL INTELLIGENCE"
+[2]  Hyperlink  "Jarvis home"
+[3]  Button     "Open command palette"
+[4]  Button     "Open sessions sidebar"
+[5]  Button     "Open terminal transcript"
+[6]  Button     "Toggle Live Voice Mode"
+[7]  Button     "Audio output"
+[8]  Text       "LINKED"
+[9]  Button     "End Jarvis session"
+[10] TabItem    "STREAM"
+[11] TabItem    "VITALS"
+[12] TabItem    "CMDS"
+[13] TabItem    "SKILLS"
+[14] TabItem    "LOGS"
+[15] Text       "PROCESS STREAM"
+[16] Text       "LIVE"
+[17] Text       "SYSTEM"
+[18] Text       "Terminal backend connected"
+[19] Text       "INFO"
+[20] Text       "Proactive Background Daemon started."
+[21] Text       "Registered global hotkey: ctrl+alt+j"
+
+(The full lists are capture/assets/elements-ui-home-clean.txt and
+capture/assets/observe-ui-home-clean.json — those hold all 41 with coordinates.)

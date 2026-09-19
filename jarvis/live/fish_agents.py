@@ -66,10 +66,17 @@ class FishAPIError(RuntimeError):
     def hint(self) -> str:
         """What the user should actually do about it."""
         if self.status == 402:
+            # Name a remedy that exists. Pointing at live_voice.ws_url sent the
+            # user to configure a relay this project does not ship, so an
+            # exhausted account produced two dead ends in a row. The Gemini Live
+            # paths below run on the same machine and need no Fish balance.
             return (
-                "The Fish Audio account is out of API credit, so no voice session "
-                "can be started. Top up at https://fish.audio/app/ , or point live "
-                "voice at your own relay with live_voice.ws_url."
+                "The Fish Audio account is out of API credit, so no hosted voice "
+                "session can be started. Top up at https://fish.audio/app/ , or "
+                "use a built-in Gemini Live path instead: store a free AI Studio "
+                "key as JARVIS_LIVE_API_KEY, or run "
+                "`gcloud auth application-default login` for the Vertex path. "
+                "Both are detected automatically once present."
             )
         if self.status == 403:
             return (

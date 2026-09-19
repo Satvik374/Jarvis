@@ -1,6 +1,7 @@
 """Comprehensive test suite for Gemini 3.1 Flash Live Voice integration and Supervisor."""
 
 import base64
+import io
 import json
 import os
 import queue
@@ -45,8 +46,8 @@ class LiveVoiceConfigTests(unittest.TestCase):
     def test_01_default_live_voice_config(self):
         cfg = Config()
         self.assertIsNotNone(cfg.live_voice)
-        self.assertEqual(cfg.live_voice.model, "gemini-3.1-flash-live-preview")
-        self.assertEqual(cfg.live_voice.voice_name, "Aoede")
+        self.assertEqual(cfg.live_voice.model, "gemini-3.8-live")
+        self.assertEqual(cfg.live_voice.voice_name, "Algenib")
         self.assertEqual(cfg.live_voice.location, "us-central1")
         self.assertEqual(cfg.live_voice.backend, "api_key")
         self.assertTrue(cfg.live_voice.narrate_steps)
@@ -257,15 +258,25 @@ class GeminiLiveClientTests(unittest.TestCase):
         model_uri = setup["setup"]["model"]
         self.assertEqual(model_uri, "projects/test-proj-123/locations/us-central1/publishers/google/models/gemini-3.1-flash-live")
 
-        self.assertEqual(setup["setup"]["responseModalities"], ["AUDIO"])
-        speech_cfg = setup["setup"]["speechConfig"]
+        # `responseModalities` and `speechConfig` belong to generationConfig.
+        # At the top level of `setup` the server rejects the handshake with
+        # 1007 "Unknown name responseModalities at 'setup'", so no session is
+        # ever opened - which is exactly what used to happen.
+        generation = setup["setup"]["generationConfig"]
+        self.assertEqual(generation["responseModalities"], ["AUDIO"])
+        speech_cfg = generation["speechConfig"]
         self.assertEqual(speech_cfg["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], "Aoede")
+        # Pin the regression: neither field may reappear at the setup level.
+        self.assertNotIn("responseModalities", setup["setup"])
+        self.assertNotIn("speechConfig", setup["setup"])
         self.assertEqual(setup["setup"]["inputAudioTranscription"], {})
         self.assertEqual(setup["setup"]["outputAudioTranscription"], {})
 
-        # Verify tool declarations
+        # Verify tool declarations. Grounding is offered first (it is the entry
+        # dropped when an account refuses search), so the declarations are found
+        # by key rather than by position.
         tools = setup["setup"]["tools"]
-        declarations = tools[0]["functionDeclarations"]
+        declarations = next(t["functionDeclarations"] for t in tools if "functionDeclarations" in t)
         tool_names = [d["name"] for d in declarations]
         self.assertIn("run_jarvis_task", tool_names)
         self.assertIn("cancel_task", tool_names)
@@ -478,6 +489,108 @@ class LiveVoiceSupervisorTests(unittest.TestCase):
             # 3. ask_task_status tool call
             r3 = supervisor._on_live_tool_call("ask_task_status", {}, "id_3")
             self.assertIn("running", r3)
+
+
+def _fake_vision():
+    """A screen-capture stand-in: one small frame per call, no desktop needed."""
+    from PIL import Image
+
+    engine = MagicMock()
+    engine.capture_screen.return_value = Image.new("RGB", (64, 48), color=(40, 60, 90))
+    return engine
+
+
+class ScreenShareTests(unittest.TestCase):
+    """The supervisor answers share_screen itself, by streaming real frames.
+
+    A single still frame is not perceived by the Live model at all, so the model
+    is only ever looking if frames keep arriving - a one-shot capture would look
+    like a working tool while the model described a screen it never saw.
+    """
+
+    def setUp(self):
+        cfg = Config()
+        cfg.live_voice.screen_share_interval = 0.25
+        cfg.data.collect_trajectories = False
+        self.supervisor = LiveVoiceSupervisor(cfg=cfg, agent=MagicMock())
+        # No socket: the frames are the subject, not the transport.
+        self.client = MagicMock()
+        self.client.is_connected = True
+        self.supervisor.client = self.client
+        self.enterContext(
+            patch("jarvis.perception.live_vision.get_live_vision", return_value=_fake_vision())
+        )
+        self.addCleanup(self.supervisor.stop_screen_share)
+
+    def test_frames_start_and_stop_on_the_models_request(self):
+        started = self.supervisor._on_live_tool_call("share_screen", {"reason": "check"}, "c1")
+        self.assertEqual(started["status"], "sharing")
+        # The model is told what to expect, so it does not narrate a screen it
+        # has not received yet.
+        self.assertIn("once a second", started["note"])
+
+        deadline = time.time() + 5
+        while self.client.send_video_frame.call_count < 2 and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertGreaterEqual(self.client.send_video_frame.call_count, 2)
+        # Real JPEG bytes, and each frame is a drawable image rather than empty.
+        frame = self.client.send_video_frame.call_args[0][0]
+        self.assertIsInstance(frame, bytes)
+        self.assertEqual(frame[:2], b"\xff\xd8")
+
+        stopped = self.supervisor._on_live_tool_call("stop_screen_share", {}, "c2")
+        self.assertEqual(stopped["status"], "stopped")
+        self.assertFalse(self.supervisor.is_sharing_screen)
+        after = self.client.send_video_frame.call_count
+        time.sleep(0.6)
+        self.assertEqual(self.client.send_video_frame.call_count, after)
+
+    def test_a_second_request_does_not_open_a_second_stream(self):
+        self.supervisor.start_screen_share("first")
+        self.addCleanup(self.supervisor.stop_screen_share)
+        again = self.supervisor.start_screen_share("again")
+        self.assertEqual(again["status"], "already_sharing")
+        self.assertEqual(again["reason"], "first")
+
+    def test_the_setting_can_refuse_it_outright(self):
+        self.supervisor.cfg.live_voice.screen_share = False
+        result = self.supervisor.start_screen_share("look")
+        self.assertEqual(result["status"], "disabled")
+        self.assertFalse(self.supervisor.is_sharing_screen)
+        self.client.send_video_frame.assert_not_called()
+
+    def test_the_frames_are_downscaled_before_they_are_encoded(self):
+        """A full desktop sent once a second spends the session on detail no
+        screen check needs; the configured bound has to be applied."""
+        from PIL import Image
+
+        big = Image.new("RGB", (4000, 2000), color=(10, 20, 30))
+        engine = MagicMock()
+        engine.capture_screen.return_value = big
+        self.supervisor.cfg.live_voice.screen_share_max_dim = 256
+        sent: list = []
+        self.client.send_video_frame.side_effect = lambda data: sent.append(data)
+
+        with patch("jarvis.perception.live_vision.get_live_vision", return_value=engine):
+            self.supervisor.start_screen_share("look")
+            deadline = time.time() + 5
+            while not sent and time.time() < deadline:
+                time.sleep(0.05)
+            self.supervisor.stop_screen_share()
+
+        self.assertTrue(sent)
+        decoded = Image.open(io.BytesIO(sent[0]))
+        self.assertLessEqual(max(decoded.size), 256)
+
+    def test_stopping_the_supervisor_stops_the_frames(self):
+        """Frames must not outlive the session that carries them."""
+        self.supervisor.start_screen_share("look")
+        self.assertTrue(self.supervisor.is_sharing_screen)
+        with patch.object(self.supervisor, "cancel_active_task"), \
+             patch.object(self.supervisor.client, "stop"), \
+             patch.object(self.supervisor.audio_stream, "stop"):
+            self.supervisor.stop()
+        self.assertFalse(self.supervisor.is_sharing_screen)
 
 
 if __name__ == "__main__":

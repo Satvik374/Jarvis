@@ -1,0 +1,52 @@
+{
+  "tts_provider": null,
+  "voice_id": null,
+  "bgm": {
+    "path": "assets/bgm/track.wav",
+    "volume": 0.12,
+    "mode": "detached-seed-loop",
+    "duration_s": null
+  },
+  "bgm_pending": true,
+  "bgm_provider": "musicgen",
+  "bgm_pid": 29664,
+  "bgm_log": "C:\\Users\\Administrator\\Downloads\\My projects\\Folders\\Claude Fable 5\\Jarvis\\videos\\jarvis-promo\\assets\\bgm\\bgm-1789812884421.log",
+  "bgm_mode": "detached-seed-loop",
+  "bgm_target_duration_s": 36.011,
+  "bgm_seed_duration_s": 28,
+  "bgm_loop_count": 2,
+  "voices": [
+    {
+      "frame": 1,
+      "path": "assets/voice/01.wav",
+      "duration_s": 6.315,
+      "words": []
+    },
+    {
+      "frame": 2,
+      "path": "assets/voice/02.wav",
+      "duration_s": 11.413,
+      "words": []
+    },
+    {
+      "frame": 3,
+      "path": "assets/voice/03.wav",
+      "duration_s": 6.4,
+      "words": []
+    },
+    {
+      "frame": 4,
+      "path": "assets/voice/04.wav",
+      "duration_s": 8.896,
+      "words": []
+    },
+    {
+      "frame": 5,
+      "path": "assets/voice/05.wav",
+      "duration_s": 2.987,
+      "words": []
+    }
+  ],
+  "sfx": [],
+  "total_duration_s": 36.011
+}

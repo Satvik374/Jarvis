@@ -1,0 +1,337 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Orbitron";
+      src: url("assets/fonts/Orbitron-Variable.woff2") format("woff2");
+      font-weight: 400 900;
+      font-style: normal;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-500.woff2") format("woff2");
+      font-weight: 500;
+      font-style: normal;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Outfit";
+      src: url("assets/fonts/Outfit-400.woff2") format("woff2");
+      font-weight: 400;
+      font-style: normal;
+      font-display: block;
+    }
+
+    #root {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      color: #e5f8ff;
+    }
+
+    .f02-plate {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 1920px;
+      height: 935px;
+      display: block;
+      object-fit: cover;
+    }
+
+    /* ---- the mark layer: real UI-Automation geometry, drawn live ---- */
+    .f02-mark {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .f02-box {
+      position: absolute;
+      inset: 0;
+      border: 1px solid rgba(0, 240, 255, 0.45);
+    }
+    .f02-chip {
+      position: absolute;
+      left: 0;
+      top: -15px;
+      background: #00f0ff;
+      color: #02070d;
+      font-family: "JetBrains Mono", monospace;
+      font-weight: 500;
+      font-size: 11px;
+      line-height: 1;
+      letter-spacing: 0.04em;
+      padding: 2px 4px;
+    }
+    .f02-mark.f02-hot .f02-box {
+      border-color: #00f0ff;
+      background: rgba(0, 240, 255, 0.12);
+    }
+
+    /* ---- the mono readout: one persistent line, bottom-left ---- */
+    .f02-rule {
+      position: absolute;
+      left: 60px;
+      top: 792px;
+      width: 36px;
+      height: 2px;
+      background: #00f0ff;
+    }
+    .f02-line {
+      position: absolute;
+      left: 60px;
+      top: 806px;
+      font-family: "JetBrains Mono", monospace;
+      font-weight: 500;
+      font-size: 15px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #b4c7d0;
+      white-space: nowrap;
+    }
+    .f02-caret {
+      display: inline-block;
+      width: 8px;
+      color: #00f0ff;
+      opacity: 0;
+    }
+
+    /* ---- the element list: real captured control names, dimmed texture ---- */
+    .f02-list {
+      position: absolute;
+      left: 60px;
+      top: 556px;
+      width: 340px;
+      font-family: "JetBrains Mono", monospace;
+      font-weight: 500;
+      font-size: 12px;
+      line-height: 20px;
+      letter-spacing: 0.02em;
+      color: #8ba8b7;
+    }
+    .f02-row {
+      opacity: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  </style>
+
+  <div id="root" data-composition-id="02-never-guess-a-pixel" data-width="1920" data-height="1080">
+    <img
+      id="f02-plate"
+      class="clip f02-plate"
+      src="assets/som-ui-home-clean-raw.png"
+      alt=""
+      data-start="0"
+      data-duration="11.413"
+      data-track-index="0"
+    />
+
+    <div class="f02-list"></div>
+    <div class="f02-rule"></div>
+    <div class="f02-line">
+      <span class="f02-line-text">observe · 41 controls</span><span class="f02-caret"></span>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const FID = "02-never-guess-a-pixel";
+      /* Real UI Automation geometry, read from observe-ui-home-clean.json:
+         [id, x0, y0, x1, y1, interactive] in plate space (1920x935, 1:1). */
+      const MARKS = [
+        [0, 32, 16, 205, 51, 1], [1, 79, 17, 185, 40, 1], [2, 79, 38, 205, 49, 1], [3, 1454, 17, 1540, 50, 1],
+        [4, 1549, 17, 1590, 50, 1], [5, 1599, 17, 1640, 50, 1], [6, 1649, 17, 1690, 50, 1], [7, 1699, 17, 1740, 50, 1],
+        [8, 1776, 28, 1813, 39, 1], [9, 1856, 17, 1888, 50, 1], [10, 32, 82, 380, 888, 1], [11, 43, 91, 105, 126, 1],
+        [12, 108, 94, 171, 123, 1], [13, 174, 94, 237, 123, 1], [14, 240, 91, 303, 126, 1], [15, 306, 91, 369, 126, 1],
+        [16, 47, 144, 137, 155, 1], [17, 343, 146, 365, 155, 1], [18, 33, 175, 379, 887, 1], [19, 47, 193, 70, 202, 1],
+        [20, 110, 192, 142, 201, 1], [21, 110, 204, 251, 216, 1], [22, 110, 236, 131, 246, 1], [23, 110, 248, 323, 261, 1],
+        [24, 110, 292, 323, 305, 1], [25, 110, 336, 296, 349, 1], [26, 110, 380, 323, 393, 1], [27, 110, 424, 323, 437, 1],
+        [28, 110, 468, 323, 481, 1], [29, 110, 512, 312, 538, 1], [30, 391, 82, 1365, 888, 1], [31, 731, 832, 745, 847, 1],
+        [32, 774, 814, 858, 825, 1], [33, 774, 852, 866, 865, 1], [34, 986, 101, 1038, 124, 1], [35, 1042, 102, 1119, 125, 1],
+        [36, 1123, 102, 1182, 125, 1], [37, 1186, 102, 1270, 125, 1], [38, 1274, 102, 1345, 125, 1],
+        [39, 1212, 138, 1276, 158, 1], [40, 1284, 138, 1351, 158, 1],
+      ];
+      /* Arrival groups, paced to the voiceover windows (see the shot sequence). */
+      const GROUPS = {
+        A: { ids: [16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29], start: 2.6, step: 0.175 },
+        B: { ids: [11, 12, 13, 14, 15, 31, 32, 33], start: 4.9, step: 0.21 },
+        C: { ids: [4, 5, 6, 7, 8, 9], start: 6.55, step: 0.19 },
+        D: { ids: [34, 35, 36, 37, 38, 39, 40], start: 7.7, step: 0.185 },
+        E: { ids: [0, 1, 2, 10, 18, 30], start: 8.6, step: 0.16 },
+      };
+      const CARRIED = 3; // badge [3] continues from frame 1 — never re-animated
+
+      const root = document.getElementById("root");
+      const startOf = {};
+      Object.keys(GROUPS).forEach((k) => {
+        GROUPS[k].ids.forEach((id, i) => {
+          startOf[id] = GROUPS[k].start + i * GROUPS[k].step;
+        });
+      });
+
+      const marks = {};
+      MARKS.forEach((m) => {
+        const id = m[0];
+        const x0 = m[1];
+        const y0 = m[2];
+        const x1 = m[3];
+        const y1 = m[4];
+        const w = x1 - x0;
+        const h = y1 - y0;
+        const wrap = document.createElement("div");
+        wrap.className = "f02-mark";
+        wrap.style.left = x0 + "px";
+        wrap.style.top = y0 + "px";
+        wrap.style.width = w + "px";
+        wrap.style.height = h + "px";
+        const boxed = w >= 16 && h >= 10 && w * h <= 60000;
+        if (boxed) {
+          const box = document.createElement("div");
+          box.className = "f02-box";
+          wrap.appendChild(box);
+        }
+        const chip = document.createElement("div");
+        chip.className = "f02-chip";
+        chip.textContent = String(id);
+        wrap.appendChild(chip);
+        root.appendChild(wrap);
+        marks[id] = wrap;
+        // Carried mark from the previous frame: seated, no animation.
+        if (id === CARRIED) marks[id].style.opacity = "1";
+      });
+
+      const rows = [
+        "Registered global hotkey: alt+v",
+        "Floating Mini HUD & Global Hotkeys",
+        "CURRENT STATE",
+        "Awaiting directive",
+        "PULSE",
+        "RESET",
+        "QUANTUM",
+        "WIREFRAME",
+        "ORBIT",
+        "HOLOGRAM",
+        "BLOB",
+      ];
+      const listEl = document.querySelector(".f02-list");
+      const rowEls = rows.map((t) => {
+        const d = document.createElement("div");
+        d.className = "f02-row";
+        d.textContent = t;
+        listEl.appendChild(d);
+        return d;
+      });
+
+      const tl = gsap.timeline({ paused: true });
+
+      // ---- Scene 1 (0.0-1.9s): the plate settles dim; the carried mark holds ----
+      tl.fromTo(".f02-plate", { opacity: 1 }, { opacity: 0.88, duration: 0.4, ease: "power1.out" }, 0);
+
+      // ---- Scene 2 (1.9-4.9s): the line backspaces and retypes; first marks land ----
+      const LINE2 = [
+        { t: 0.0, text: "observe · 41 controls" },
+        { t: 0.4, text: "observe · 41 contro" },
+        { t: 0.62, text: "obse" },
+        { t: 0.78, text: "" },
+        { t: 0.95, text: "a bigger m" },
+        { t: 1.15, text: "a bigger model · not" },
+        { t: 1.45, text: "a bigger model · not the trick" },
+      ];
+      const lineEl = document.querySelector(".f02-line-text");
+      const caret = document.querySelector(".f02-caret");
+      const dLine = { t: 0 };
+      tl.to(
+        dLine,
+        {
+          t: 1.5,
+          duration: 1.5,
+          ease: "none",
+          onUpdate: () => {
+            let s = "";
+            for (let i = LINE2.length - 1; i >= 0; i--) {
+              if (dLine.t >= LINE2[i].t) {
+                s = LINE2[i].text;
+                break;
+              }
+            }
+            lineEl.textContent = s;
+          },
+        },
+        1.9,
+      );
+      const bl = { p: 0 };
+      tl.to(
+        bl,
+        {
+          p: Math.PI * 2 * 5,
+          duration: 2.4,
+          ease: "none",
+          onUpdate: () => {
+            caret.style.opacity = Math.sin(bl.p) > 0 ? "1" : "0";
+          },
+        },
+        1.9,
+      );
+
+      // ---- Scenes 2-5: the marks cascade in waves, each into its own slot ----
+      Object.keys(GROUPS).forEach((k) => {
+        GROUPS[k].ids.forEach((id) => {
+          const el = marks[id];
+          if (!el) return;
+          tl.fromTo(
+            el,
+            { opacity: 0, scale: 1.12, x: -7 },
+            { opacity: 1, scale: 1, x: 0, duration: 0.34, ease: "power3.out" },
+            startOf[id],
+          );
+        });
+      });
+
+      // ---- the element list seats in lockstep behind the wave ----
+      rowEls.forEach((el, i) => {
+        tl.fromTo(el, { opacity: 0, x: -6 }, { opacity: 1, x: 0, duration: 0.3, ease: "power3.out" }, 4.2 + i * 0.13);
+      });
+
+      // ---- Scene 5 (8.6-11.413s): the reading lands, one mark is picked out ----
+      const LINE5 = [
+        { t: 0.0, text: "a bigger model · not the trick" },
+        { t: 0.38, text: "a bigger model · not the tri" },
+        { t: 0.6, text: "" },
+        { t: 0.8, text: "the model" },
+        { t: 1.1, text: "the model returns · one" },
+        { t: 1.45, text: "the model returns · one integer" },
+      ];
+      const dLine5 = { t: 0 };
+      tl.to(
+        dLine5,
+        {
+          t: 1.5,
+          duration: 1.5,
+          ease: "none",
+          onUpdate: () => {
+            let s = "";
+            for (let i = LINE5.length - 1; i >= 0; i--) {
+              if (dLine5.t >= LINE5[i].t) {
+                s = LINE5[i].text;
+                break;
+              }
+            }
+            lineEl.textContent = s;
+          },
+        },
+        8.6,
+      );
+      tl.set(caret, { opacity: 0 }, 10.4);
+      // exactly one mark is picked out in accent — the wordmark the video ends on
+      tl.set(marks[1], { attr: { class: "f02-mark f02-hot" } }, 9.9);
+      tl.fromTo(marks[1], { scale: 1 }, { scale: 1.06, duration: 0.3, ease: "power3.out" }, 9.9);
+      tl.to(marks[1], { scale: 1, duration: 0.35, ease: "power2.out" }, 10.2);
+
+      window.__timelines[FID] = tl;
+    })();
+  </script>
+</template>

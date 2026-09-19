@@ -8,6 +8,7 @@ No web framework or internet connection is required.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import codecs
 from collections import deque
@@ -32,8 +33,11 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 import webbrowser
 
+import websockets
+
 from .browser_worker import EVENT_PREFIX
 from .config import ROOT
+from .utils import logging as log
 
 
 HOST = "127.0.0.1"
@@ -805,6 +809,537 @@ class TerminalBridge:
         self._attachments.clear()
 
 
+class LiveSocketRelay:
+    """Live voice for the browser, with the Gemini API key kept on this machine.
+
+    Why the page does not simply open the socket itself
+    --------------------------------------------------
+    A Live API key is long-lived, so putting it in a page that is served from a
+    loopback port is a needless widening of the blast radius. Google's documented
+    answer for browsers is an ephemeral token, and that was tried first: the token
+    mints fine, but the Live socket rejects every documented transport for it -
+    ``1008 ... unregistered callers`` with ``?access_token=`` on v1alpha and
+    v1beta, and with ``Authorization: Token``. Until that changes, the page talks
+    to this relay instead and the relay talks to Google.
+
+    What that buys, beyond hiding the key
+    -------------------------------------
+    * The session is configured by the server, so a page cannot restate the
+      system prompt, invent tools, or widen its own capabilities.
+    * The Google Search downgrade needs the account's behaviour, which only this
+      side can observe: a refused search tool and a spent Live allowance produce
+      the *same* generic quota error, so the relay retries the identical setup
+      without the search tool to find out which one it was, and tells the page.
+    * A session the server ended (goAway, model fallback) is retried here, so the
+      page keeps one socket open rather than reimplementing the policy.
+
+    Audio still originates and is played in the browser tab; the hop through
+    loopback is the only difference from talking to Google directly.
+    """
+
+    #: How long to wait for setupComplete before treating the handshake as dead.
+    SETUP_TIMEOUT = 25.0
+
+    #: Page messages buffered while the upstream session is being established.
+    #: The page starts the microphone as soon as it opens the socket, so dropping
+    #: the first seconds of speech would be the alternative.
+    _PENDING_LIMIT = 400
+
+    def __init__(self, bridge: TerminalBridge, origin: str = "", host: str = HOST):
+        self.bridge = bridge
+        self.origin = origin
+        self.host = host
+        self.port = 0
+        self.sessions = 0
+        self.last_error = ""
+        self.notice = ""
+        #: Set once a handshake proved Google Search grounding is refused for
+        #: this key, so later sessions do not spend a handshake relearning it.
+        self.grounding_blocked = ""
+        self.grounding_active = False
+        #: The model that actually answered `setupComplete`, once one has. The
+        #: page shows this, and the configured name is not always the one that
+        #: ran: a retired name in .env is mapped to its replacement, and a
+        #: refused model falls through to the next candidate.
+        self.model = ""
+        self._server: Any = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._started = threading.Event()
+
+    # -- lifecycle --------------------------------------------------------- #
+
+    @property
+    def url(self) -> str:
+        return f"ws://{self.host}:{self.port}/live" if self.port else ""
+
+    def start(self) -> bool:
+        """Serve the relay on an ephemeral loopback port."""
+        if self.port:
+            return True
+
+        def _thread_target() -> None:
+            loop = asyncio.new_event_loop()
+            self._loop = loop
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self._serve())
+            except Exception as exc:  # pragma: no cover - startup failure
+                log.warn(f"Live voice relay could not start: {exc}")
+                self.last_error = str(exc)
+                self._started.set()
+            finally:
+                loop.close()
+
+        self._thread = threading.Thread(
+            target=_thread_target, daemon=True, name="jarvis-live-relay"
+        )
+        self._thread.start()
+        if not self._started.wait(timeout=5.0):
+            return False
+        return bool(self.port)
+
+    def stop(self) -> None:
+        if self._loop is None or not self.port:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop)
+        except Exception:
+            pass
+        self.port = 0
+
+    async def _serve(self) -> None:
+        async with websockets.serve(self._handler, self.host, 0, max_size=None) as server:
+            self._server = server
+            self.port = int(server.sockets[0].getsockname()[1])
+            self._started.set()
+            await asyncio.Future()
+
+    async def _shutdown(self) -> None:
+        server = self._server
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+
+    # -- auth -------------------------------------------------------------- #
+
+    def _request_ok(self, ws: Any) -> bool:
+        """Only our own page may use this socket.
+
+        The token is the same one that guards the HTTP API, and it arrives in the
+        query string because a browser cannot set WebSocket headers. ``Origin``
+        is checked the way the HTTP handler checks it: absent is tolerated (a
+        non-browser client), present must match the interface's own origin.
+        """
+        request = getattr(ws, "request", None)
+        target = str(getattr(request, "path", "/") or "/")
+        parsed = urlparse(target)
+        if parsed.path.rstrip("/") != "/live":
+            return False
+        supplied = (parse_qs(parsed.query).get("token") or [""])[0]
+        try:
+            if not supplied or not hmac.compare_digest(
+                supplied.encode("ascii"), self.bridge.token.encode("ascii")
+            ):
+                return False
+        except UnicodeEncodeError:
+            return False
+        origin = (getattr(request, "headers", None) or {}).get("Origin")
+        if origin and self.origin and origin != self.origin:
+            return False
+        return True
+
+    # -- describe ---------------------------------------------------------- #
+
+    def describe(self, cfg: Any = None) -> dict[str, Any]:
+        """The live-voice block the page reads from ``/api/live/config``."""
+        live = getattr(cfg, "live_voice", None)
+        from .live import gemini_live, readiness
+
+        key = readiness.gemini_api_key(cfg) if cfg is not None else ""
+        mode = str(getattr(live, "google_search", "auto") or "auto")
+        notice = self.notice or self.grounding_blocked
+        return {
+            "ready": bool(self.port and key),
+            "ws_url": self.url,
+            # Before a session opens this is the model it *will* open, which is
+            # not the configured one once a model has been measured ignoring
+            # audio for this key - the page shows this name to the user.
+            "model": self.model
+            or (
+                gemini_live.preferred_model(live, key)
+                if live is not None
+                else gemini_live.DEFAULT_MODEL
+            ),
+            "voice": getattr(live, "voice_name", "") or gemini_live.DEFAULT_VOICE,
+            "media_resolution": gemini_live.media_resolution(
+                getattr(live, "media_resolution", "medium")
+            ),
+            "sample_rate_in": gemini_live.PCM_IN_RATE,
+            "sample_rate_out": gemini_live.PCM_OUT_RATE,
+            "google_search": {
+                "mode": mode,
+                "active": bool(self.grounding_active),
+                "notice": notice,
+            },
+            "screen_share": {
+                "enabled": bool(getattr(live, "screen_share", True)),
+                "interval": float(getattr(live, "screen_share_interval", 1.0) or 1.0),
+                "max_dim": int(getattr(live, "screen_share_max_dim", 1024) or 1024),
+                "quality": int(getattr(live, "screen_share_quality", 60) or 60),
+            },
+            "sessions": self.sessions,
+            "error": self.last_error,
+            "notice": notice,
+        }
+
+    # -- the session ------------------------------------------------------- #
+
+    async def _handler(self, client: Any) -> None:
+        if not self._request_ok(client):
+            await client.close(code=1008, reason="unauthorized")
+            return
+        self.sessions += 1
+        try:
+            await self._relay(client)
+        except Exception as exc:  # pragma: no cover - transport failure
+            log.debug(f"Live voice relay session ended: {exc}")
+        finally:
+            try:
+                await client.close()
+            except Exception:
+                pass
+
+    async def _relay(self, client: Any) -> None:
+        from .config import load_config
+        from .live import gemini_live, readiness
+
+        cfg = load_config()
+        live = cfg.live_voice
+        key = readiness.gemini_api_key(cfg)
+        if not key:
+            await self._notice(
+                client,
+                "no_key",
+                "Live voice needs a Gemini API key.",
+                remedy=(
+                    "create a free key at https://aistudio.google.com/apikey, then set "
+                    "JARVIS_LIVE_API_KEY in .env or store it with ':secret set "
+                    "JARVIS_LIVE_API_KEY <key>' in the Jarvis console"
+                ),
+            )
+            return
+
+        # Grounding is offered once per key, not once per session: the downgrade
+        # is remembered so a user whose plan has no search grounding does not pay
+        # a rejected handshake every time they press the button.
+        grounding = gemini_live.grounding_wanted(live)
+        if grounding and self.grounding_blocked:
+            grounding = False
+
+        candidates = gemini_live.hearing_candidates(live, key)
+        pending: deque[Any] = deque(maxlen=self._PENDING_LIMIT)
+        # Model and attempt are counted separately on purpose. Dropping the
+        # search tool is a retry of the *same* model, so it must not also walk
+        # down the model list - that turned one refused tool into a session on a
+        # different model than the one that was configured.
+        model_idx = 0
+        attempts = 0
+        max_attempts = len(candidates) + 3
+
+        while attempts < max_attempts:
+            attempts += 1
+            model = candidates[model_idx % len(candidates)]
+            upstream_uri = f"{gemini_live.GEMINI_LIVE_WS}?key={key}"
+            try:
+                async with websockets.connect(
+                    upstream_uri,
+                    open_timeout=15.0,
+                    ping_interval=None,
+                    ping_timeout=None,
+                    max_size=None,
+                ) as upstream:
+                    setup = gemini_live.build_setup(
+                        live,
+                        model=model,
+                        system_instruction=self._system_prompt(),
+                        google_search=grounding,
+                    )
+                    await upstream.send(json.dumps(setup))
+                    try:
+                        first = json.loads(
+                            await asyncio.wait_for(upstream.recv(), timeout=self.SETUP_TIMEOUT)
+                        )
+                    except asyncio.TimeoutError:
+                        await self._notice(client, "timeout", "Gemini Live did not answer the handshake.")
+                        return
+
+                    if not ("setupComplete" in first or "setup_complete" in first):
+                        # The server rejected the setup. Quota is ambiguous (see
+                        # the class docstring); a model error means the next
+                        # candidate is worth trying.
+                        reason = json.dumps(first)[:300]
+                        refusal = gemini_live.quota_refusal(reason)
+                        if grounding and refusal:
+                            grounding = False
+                            self.grounding_blocked = reason
+                            self.notice = (
+                                "Google Search grounding was refused for this key (it needs "
+                                "grounding quota, usually a paid plan), so live voice is running "
+                                "without web search."
+                            )
+                            readiness.remember_failure("gemini_grounding", self.notice)
+                            log.warn(f"Gemini Live refused the search tool for {model}; retrying without it.")
+                            continue
+                        if refusal:
+                            readiness.remember_failure("gemini", f"Gemini Live refused the session: {reason}")
+                            await self._notice(
+                                client,
+                                "quota",
+                                "Gemini Live refused the session: the API key's Live quota is spent.",
+                                remedy="check the plan and billing on the key's Google Cloud / AI Studio project",
+                            )
+                            return
+                        log.warn(f"Gemini Live rejected the setup for {model}: {reason}")
+                        model_idx += 1
+                        continue
+
+                    self.grounding_active = bool(grounding)
+                    self.model = model
+                    self.last_error = ""
+                    await self._status(client, grounding=bool(grounding), notice=self.notice)
+                    deaf = await self._pump(client, upstream, pending, live, model, grounding)
+                    if deaf:
+                        # The handshake was accepted and the model then ignored
+                        # the microphone entirely. Silence looks exactly like a
+                        # user who has not spoken, so nothing else in this
+                        # session will ever report it - walking down the model
+                        # list is what makes voice work at all. See
+                        # ``gemini_live._AUDIO_DEAF`` for what was measured.
+                        gemini_live.mark_audio_deaf(
+                            model,
+                            "accepted the live session and ignored audio input",
+                            key=key,
+                        )
+                        following = candidates[(model_idx + 1) % len(candidates)]
+                        log.warn(
+                            f"Gemini Live: {model} accepted the session and heard nothing; "
+                            f"switching to {following}"
+                        )
+                        await self._notice(
+                            client,
+                            "model_deaf",
+                            f"{model} accepted the live session but did not hear your "
+                            f"microphone, so the session was moved to {following}.",
+                            remedy=(
+                                "set live_voice.model in config.yaml to a live model that "
+                                "accepts audio input"
+                            ),
+                        )
+                        model_idx += 1
+                        continue
+                    return
+            except websockets.exceptions.ConnectionClosed as exc:
+                reason = str(exc)
+                if grounding and gemini_live.quota_refusal(reason):
+                    grounding = False
+                    self.grounding_blocked = reason
+                    self.notice = (
+                        "Google Search grounding was refused for this key, so live voice is "
+                        "running without web search."
+                    )
+                    readiness.remember_failure("gemini_grounding", self.notice)
+                    log.warn(f"Gemini Live refused the search tool for {model}; retrying without it.")
+                    continue
+                if gemini_live.quota_refusal(reason):
+                    readiness.remember_failure("gemini", f"Gemini Live quota refused: {reason}")
+                    await self._notice(client, "quota", "Gemini Live quota refused the session.",
+                                       remedy="check the plan and billing for this API key")
+                    return
+                self.last_error = reason
+                log.warn(f"Gemini Live connection failed ({model}): {reason}")
+                model_idx += 1
+                continue
+            except Exception as exc:
+                self.last_error = str(exc)
+                log.warn(f"Gemini Live relay could not open a session: {exc}")
+                model_idx += 1
+                await asyncio.sleep(0.3)
+                continue
+
+        readiness.remember_failure("gemini", self.last_error or "no live model accepted the session")
+        await self._notice(
+            client,
+            "unavailable",
+            "No Gemini Live session could be opened.",
+            remedy=self.last_error or "try another live model in config.yaml",
+        )
+
+    async def _pump(
+        self,
+        client: Any,
+        upstream: Any,
+        pending: deque[Any],
+        live: Any,
+        model: str,
+        grounding: bool,
+    ) -> bool:
+        """Relay the conversation until either end closes.
+
+        Returns True when the session was ended by the silence watchdog - the
+        model was sent audible audio and produced nothing - so the caller can
+        try the next model instead of leaving the user with a dead session.
+        """
+        log.ok(f"Live voice session open on {model}{'' if grounding else ' (without Google Search)'}")
+
+        # The page cannot tell "the user has not spoken" from "the model is not
+        # answering", and the second one looks like a healthy session. Both
+        # numbers below are counted to tell them apart when this session ends.
+        audible_frames = 0
+        model_messages = 0
+        last_audible_at = 0.0
+
+        async def page_to_upstream() -> None:
+            nonlocal audible_frames, last_audible_at
+            while True:
+                raw = await client.recv()
+                try:
+                    message = json.loads(raw)
+                except Exception:
+                    continue
+                audible = _audible(raw)
+                if audible:
+                    last_audible_at = asyncio.get_event_loop().time()
+                if audible_frames < _AUDIBLE_FRAME_LIMIT:
+                    audible_frames += audible
+                if isinstance(message, dict) and "setup" in message:
+                    # The session is the server's to configure; a page that could
+                    # restate it could also give itself tools it does not have.
+                    await self._notice(
+                        client, "setup_refused",
+                        "The live session configuration comes from the server, not the page.",
+                    )
+                    continue
+                await upstream.send(raw)
+
+        async def upstream_to_page() -> None:
+            nonlocal model_messages
+            while True:
+                raw = await upstream.recv()
+                # The Live endpoint packs its JSON into *binary* frames, so
+                # ``recv()`` hands back ``bytes``. Forwarding those to the page
+                # unchanged makes every message arrive there as a Blob, and
+                # ``JSON.parse(blob)`` throws - which the page catches and
+                # ignores, dropping the setup, the transcripts and the audio of
+                # an otherwise working session. Everything upstream sends is
+                # JSON, so it is decoded here and the page only ever sees text.
+                if isinstance(raw, (bytes, bytearray)):
+                    try:
+                        raw = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        log.debug("Live voice relay: undecodable frame from upstream")
+                        continue
+                try:
+                    message = json.loads(raw)
+                except Exception:
+                    continue
+                if isinstance(message, dict) and (
+                    message.get("serverContent") or message.get("server_content")
+                    or message.get("toolCall") or message.get("tool_call")
+                ):
+                    model_messages += 1
+                go_away = message.get("goAway") or message.get("go_away")
+                if isinstance(go_away, dict):
+                    await self._notice(
+                        client, "go_away",
+                        "Gemini will close this session shortly; it will continue on a new one.",
+                    )
+                await client.send(raw)
+
+        async def ignore_watchdog() -> None:
+            """End a session that was spoken to, then went quiet, and said nothing.
+
+            The quiet gap is what makes this a verdict rather than a guess. The
+            model only ends a turn - and so only transcribes or answers - after
+            the user stops, so a microphone that never stops (a looping test
+            clip, an open line, background noise) produces exactly the same
+            silence from a *working* model as from one that ignores audio. Once
+            the user has paused and the model is still blank, there is nothing
+            left to wait for.
+            """
+            while True:
+                await asyncio.sleep(_SILENCE_WATCHDOG_SECONDS)
+                quiet_for = asyncio.get_event_loop().time() - last_audible_at
+                if (
+                    audible_frames >= _AUDIBLE_FRAME_LIMIT
+                    and not model_messages
+                    and last_audible_at
+                    and quiet_for >= _QUIET_BEFORE_VERDICT_SECONDS
+                ):
+                    return
+
+        watchdog = asyncio.create_task(ignore_watchdog())
+        tasks = [
+            asyncio.create_task(page_to_upstream()),
+            asyncio.create_task(upstream_to_page()),
+            watchdog,
+        ]
+        # Anything the page sent while the handshake was in flight is delivered
+        # now, so the first words of a sentence are not lost.
+        while pending:
+            try:
+                await upstream.send(pending.popleft())
+            except Exception:
+                break
+        try:
+            done, waiting = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+        deaf = watchdog in done
+        silent = "" if deaf else _silent_session_notice(audible_frames, model_messages)
+        if silent:
+            log.warn(
+                f"Live voice: {audible_frames} frames of audible audio reached {model} "
+                "and the model produced no output at all."
+            )
+            await self._notice(client, "no_model_output", silent, remedy=(
+                "run: python run.py --check --live-check"
+            ))
+        for task in done:
+            if task is watchdog:
+                continue
+            exc = task.exception()
+            if exc:
+                self.last_error = str(exc)
+                log.debug(f"Live voice relay ended: {exc}")
+        return deaf
+
+    @staticmethod
+    def _system_prompt() -> str:
+        from .live import prompts
+
+        try:
+            return prompts.build_live_voice_system_prompt()
+        except Exception:
+            return "You are Jarvis, a concise voice assistant."
+
+    async def _notice(self, client: Any, code: str, message: str, remedy: str = "") -> None:
+        """Tell the page why the session is not running, in words it can show."""
+        log.warn(message)
+        await self._send(client, {"jarvisNotice": {"code": code, "message": message, "remedy": remedy}})
+
+    async def _status(self, client: Any, *, grounding: bool, notice: str = "") -> None:
+        await self._send(client, {"jarvisStatus": {"grounding": bool(grounding), "notice": notice}})
+
+    @staticmethod
+    async def _send(client: Any, payload: dict[str, Any]) -> None:
+        try:
+            await client.send(json.dumps(payload))
+        except Exception:
+            pass
+
+
 class BrowserHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -819,6 +1354,10 @@ class BrowserHTTPServer(ThreadingHTTPServer):
         super().__init__(server_address, BrowserRequestHandler)
         host, port = self.server_address[:2]
         self.origin = f"http://{host}:{port}"
+        #: The loopback WebSocket relay that holds the Gemini key while the page
+        #: streams its microphone. Attached by run_browser; a server built
+        #: directly in a test simply has no relay, and the page is told so.
+        self.live_relay: LiveSocketRelay | None = None
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         # Browsers and PowerShell's HTTP client routinely reset idle keep-alive
@@ -1185,7 +1724,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         if not self._require_api_access():
             return
         from .config import load_config
-        from .live import direct_tools
+        from .live import direct_tools, readiness
         from .live.prompts import build_live_voice_system_prompt, get_live_voice_tools
         cfg = load_config()
         ws_url = (
@@ -1205,10 +1744,21 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             or os.environ.get("FISH_AGENT_ID")
             or ""
         ).strip()
+        provider = readiness.resolve_provider(cfg)
+        # Which voice paths can actually authenticate right now, and what each
+        # one is missing. Sent with the config so the page can explain a failed
+        # start without the user opening the browser console.
+        voice_status = readiness.summary(readiness.describe(cfg), provider)
         self._json(
             HTTPStatus.OK,
             {
                 "ok": True,
+                "provider": provider,
+                # `getattr(self, "server", None)`: the handler is also driven
+                # directly by the tests, with no socket server behind it, and a
+                # missing relay must read as "not running" rather than an
+                # AttributeError in the middle of the config payload.
+                "gemini": _gemini_session_block(cfg, _live_relay(self)),
                 "model": model_name,
                 "ws_url": ws_url,
                 "voice": voice_name,
@@ -1219,6 +1769,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                 # The voice agent's direct tools: names only. The page registers
                 # a handler for each that posts to /api/tool/execute.
                 "direct_tools": [tool["name"] for tool in direct_tools.declarations()],
+                **voice_status,
             },
         )
 
@@ -1308,18 +1859,21 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _handle_voice_session(self, payload: dict[str, Any]) -> None:
-        """Mint a Fish Agents session token for the browser voice session.
+        """Open the browser's live voice session on the engine that is selected.
 
-        Keeps the Fish Audio API key server-side: the browser receives the
-        session response unchanged and passes it to `@fishaudio/agent-client`
-        as ``sessionToken``.
+        For Gemini that means the loopback relay: the page speaks the Live API
+        protocol to ``ws://127.0.0.1:<port>/live`` and never sees a credential.
+        For Fish it mints the hosted agent's session token, as before.
         """
         if not self._require_api_access():
             return
         from .config import load_config
-        from .live import fish_agents
+        from .live import fish_agents, readiness
 
         cfg = load_config()
+        if readiness.resolve_provider(cfg) == "gemini":
+            self._handle_gemini_session(cfg)
+            return
         agent_id = str(
             payload.get("agent_id")
             or getattr(cfg.live_voice, "fish_agent_id", "")
@@ -1347,6 +1901,12 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                 base_url=getattr(cfg.live_voice, "fish_api_base", "") or None,
             )
         except fish_agents.FishAPIError as exc:
+            # A 402 is a billing state, not a hiccup: retrying it can never
+            # succeed. Remember it so readiness reports the truth on the next
+            # page load and a second start does not spend another API call to
+            # relearn the same answer.
+            if exc.status == 402:
+                readiness.remember_failure("fish", str(exc))
             # Pass the upstream status through instead of flattening everything
             # into a 502: "out of credit" and "service is unreachable" need
             # different words, and the page acts on the difference.
@@ -1367,9 +1927,63 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                 {"ok": False, "code": "upstream", "error": str(exc)},
             )
             return
+        # A session that succeeded proves the account can pay, so any earlier
+        # credit failure is stale and must not keep masking a working path.
+        readiness.clear_failures("fish")
         self._json(
             HTTPStatus.OK,
             {"ok": True, "agent_id": agent_id, "session": session},
+        )
+
+    def _handle_gemini_session(self, cfg: Any) -> None:
+        """Hand the page the loopback relay's URL, or say what is missing.
+
+        Nothing is minted and no key is returned: the relay already holds the
+        credential, and the page only needs to know where to connect.
+        """
+        from .live import readiness
+
+        relay = _live_relay(self)
+        if relay is None or not relay.port:
+            self._json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {
+                    "ok": False,
+                    "provider": "gemini",
+                    "error": "the live voice relay is not running",
+                    "remedy": "restart Jarvis with --browser so the relay can start",
+                },
+            )
+            return
+        if not readiness.gemini_api_key(cfg):
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "ok": False,
+                    "provider": "gemini",
+                    "error": "no Gemini API key is configured",
+                    "remedy": (
+                        "create a free key at https://aistudio.google.com/apikey and set "
+                        "JARVIS_LIVE_API_KEY in .env"
+                    ),
+                },
+            )
+            return
+        block = relay.describe(cfg)
+        self._json(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "provider": "gemini",
+                "ws_url": relay.url,
+                "model": block["model"],
+                "voice": block["voice"],
+                "sample_rate_in": block["sample_rate_in"],
+                "sample_rate_out": block["sample_rate_out"],
+                "screen_share": block["screen_share"],
+                "google_search": block["google_search"],
+                "notice": block["notice"],
+            },
         )
 
     def do_POST(self) -> None:
@@ -1540,6 +2154,132 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         )
 
 
+#: How many frames of *audible* microphone audio count as "the user spoke".
+#: Roughly three seconds of speech, and the decoded peak is only measured until
+#: this many have been counted, so a long session does not decode every frame.
+_AUDIBLE_FRAME_LIMIT = 12
+
+#: Peak amplitude (of 32767) that counts as speech rather than room noise.
+_AUDIBLE_PEAK = 500
+
+#: Once the user has spoken and the model has still produced nothing for this
+#: many seconds, the session is moved to the next candidate. It has to cover a
+#: slow cold start and a first turn: transcripts appear at a turn boundary, so a
+#: user talking without pausing produces nothing for as long as they keep going.
+#: ``gemini_live._DEAF_STRIKES`` is what stops one slow session from condemning
+#: a model for the life of the process.
+_SILENCE_WATCHDOG_SECONDS = 8.0
+
+#: How long the microphone has to be quiet before silence from the model means
+#: anything. Nothing is concluded while the user is still talking: the model
+#: answers at a turn boundary, so a continuous stream is silent from a perfectly
+#: working model.
+_QUIET_BEFORE_VERDICT_SECONDS = 4.0
+
+
+def _silent_session_notice(audible_frames: int, model_messages: int) -> str:
+    """What to tell the user about a session that heard them and said nothing.
+
+    The page shows LISTENING for the whole session, so without this a dead
+    session is indistinguishable from a working one - which is exactly what a
+    spent Live allowance produces on the free tier.
+    """
+    if audible_frames >= _AUDIBLE_FRAME_LIMIT and not model_messages:
+        return (
+            "Your voice reached the model and it produced no answer. That is usually a "
+            "spent Live quota on the API key, which looks like a healthy session from here."
+        )
+    return ""
+
+
+def _audible(raw: str) -> int:
+    """1 if this page message carries speech, 0 otherwise.
+
+    Silence detection has to happen here rather than in the page: `isAiSpeaking`
+    already suppresses the microphone while the model talks, so frames arriving
+    with no sound in them mean the user simply has not spoken yet - which is not
+    a fault and must not be reported as one.
+    """
+    try:
+        message = json.loads(raw)
+        inner = (message.get("realtimeInput") or {}).get("audio") or {}
+        data = inner.get("data")
+        if not data:
+            return 0
+        import audioop
+
+        pcm = base64.b64decode(data)
+        return 1 if audioop.max(pcm, 2) >= _AUDIBLE_PEAK else 0
+    except Exception:
+        return 0
+
+
+def _live_relay(handler: Any) -> "LiveSocketRelay | None":
+    """The relay behind a request handler, or ``None`` when there is none.
+
+    ``BrowserRequestHandler`` is driven in tests through ``object.__new__`` with
+    no socket server, so ``self.server`` - normally set by the stdlib - may not
+    exist at all. Reading it defensively keeps one missing attribute from
+    turning a config response into a 500.
+    """
+    server = getattr(handler, "server", None)
+    return getattr(server, "live_relay", None)
+
+
+def _gemini_session_block(cfg: Any, relay: "LiveSocketRelay | None" = None) -> dict[str, Any]:
+    """What the page needs to run the Gemini Live session - or why it cannot.
+
+    ``relay.describe`` covers the live case. Without a relay (a server built
+    directly, or a machine where the relay could not bind) the block still names
+    the model, voice and sample rates, so the page reports the real reason
+    instead of claiming live voice was never configured.
+    """
+    from .live import gemini_live, readiness
+
+    live = getattr(cfg, "live_voice", None)
+    if relay is not None and relay.port:
+        block = relay.describe(cfg)
+    else:
+        block = {
+            "ready": False,
+            "ws_url": "",
+            "model": getattr(live, "model", "") or gemini_live.DEFAULT_MODEL,
+            "voice": getattr(live, "voice_name", "") or gemini_live.DEFAULT_VOICE,
+            "media_resolution": gemini_live.media_resolution(
+                getattr(live, "media_resolution", "medium")
+            ),
+            "sample_rate_in": gemini_live.PCM_IN_RATE,
+            "sample_rate_out": gemini_live.PCM_OUT_RATE,
+            "google_search": {
+                "mode": str(getattr(live, "google_search", "auto") or "auto"),
+                "active": False,
+                "notice": "",
+            },
+            "screen_share": {
+                "enabled": bool(getattr(live, "screen_share", True)),
+                "interval": float(getattr(live, "screen_share_interval", 1.0) or 1.0),
+                "max_dim": int(getattr(live, "screen_share_max_dim", 1024) or 1024),
+                "quality": int(getattr(live, "screen_share_quality", 60) or 60),
+            },
+            "sessions": 0,
+            "error": "the live voice relay is not running",
+            "notice": "",
+        }
+
+    # The page answers three kinds of tool call: the delegation tools it already
+    # handled for Fish, screen sharing (decided in the page, because the frames
+    # come from getDisplayMedia), and everything else, which is a Jarvis action
+    # posted to /api/tool/execute like any other direct tool.
+    block["control_tools"] = ["execute_task", "cancel_task", "get_task_status"]
+    block["screen_share_tools"] = ["share_screen", "stop_screen_share"]
+    if not readiness.gemini_api_key(cfg):
+        block["ready"] = False
+        block["error"] = block.get("error") or "no Gemini API key is configured"
+    if not block.get("ws_url"):
+        block["ready"] = False
+    return block
+
+
 def _port_serves_our_token(host: str, port: int, token: str, timeout: float = 2.5) -> bool:
     """True only when this loopback port answers with *our* session token.
 
@@ -1616,9 +2356,18 @@ def run_browser(
         )
         return 1
 
+    # Live voice's Gemini session runs through this relay, so the API key stays
+    # on the machine while the audio stays in the page. A relay that cannot bind
+    # is not fatal: the page reports exactly that instead of a dead caption.
+    relay = LiveSocketRelay(bridge, origin=server.origin)
+    server.live_relay = relay
+    if not relay.start():
+        log.warn("Live voice relay could not start; browser live voice will report why.")
+
     try:
         bridge.start()
     except Exception as exc:
+        relay.stop()
         server.shutdown()
         server.server_close()
         print(f"Could not start Jarvis terminal runtime: {exc}", file=sys.stderr)
@@ -1649,6 +2398,7 @@ def run_browser(
         print("\nStopping Jarvis browser session...")
         bridge.stop()
     finally:
+        relay.stop()
         server.shutdown()
         server.server_close()
         bridge.stop()

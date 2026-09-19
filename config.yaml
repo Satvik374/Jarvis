@@ -2,16 +2,23 @@
 # Environment variables override these values.
 
 brain:
-  backend: gemini
-  model: gemini-2.5-flash
+  # Backend: gemini | openai | openrouter | ollama | hf | llamacpp | anthropic | codex.
+  # The brain is OpenRouter running a hosted DeepSeek model; the key is read
+  # from OPENROUTER_API_KEY (.env or the Credential Vault), never from here.
+  backend: openrouter
+  model: deepseek/deepseek-v4-flash-0731:free
   location: global
   adapter_path: ""
-  base_url: ""
+  base_url: "https://openrouter.ai/api/v1"
   api_key: ""
   temperature: 0.2
   # Keep the output budget reasonable; backends can override this when needed.
   max_tokens: 16384
-  use_vision: true
+  # deepseek/deepseek-v4-flash-0731 is text-only (OpenRouter reports
+  # input_modalities: [text]), so screenshots are not sent - grounding still
+  # comes from the numbered UI-Automation element list. Point this at a vision
+  # model and set this back to true to use the raw-vision path.
+  use_vision: false
   request_timeout: 120
   conversational: true
 
@@ -47,22 +54,48 @@ voice:
 
 # Voice is opt-in. Use --voice, JARVIS_VOICE=1, or :voice on.
 
-# Real-Time Gemini Flash Live Voice Model (full-duplex bidirectional streaming
-# via Gemini API key / Google Generative Language Live WebSocket).
+# Real-Time Gemini Live Voice Model (full-duplex bidirectional streaming
+# via Gemini API key / Google Generative Language Live WebSocket). This is the
+# live voice engine: the browser streams the microphone to Gemini and plays the
+# reply, through a loopback relay that holds the API key (see the README).
 live_voice:
   enabled: false
-  model: gemini-2.0-flash-exp
+  # gemini (default) | fish | relay | auto
+  provider: gemini
+  # Must name a *live* model. gemini-3.8-live is the model the Google AI Studio
+  # template uses; if the configured key cannot open it, the relay walks the
+  # known-working fallbacks in jarvis/live/gemini_live.py rather than failing.
+  model: gemini-3.8-live
   ws_url: ""                             # Optional OpenAI-compatible /v1/realtime relay
-  voice_name: Aoede                      # Aoede, Puck, Charon, Kore, Fenrir
+  voice_name: Algenib                    # Algenib (default), Aoede, Puck, Charon, Kore
+  # MEDIUM is the template's setting; low | medium | high.
+  media_resolution: medium
+  # Google Search grounding for the voice agent. `auto`: try it, and if the
+  # account has no grounding quota (the handshake answers 1011) retry without it
+  # and say so, instead of losing the whole session to a search tool.
+  google_search: auto                    # auto | on | off
+  # Sliding-window compression keeps a long conversation alive past the point
+  # where the raw context would hit the model's limit.
+  context_window_compression: true
+  context_trigger_tokens: 104857
+  context_sliding_tokens: 52428
+  session_resumption: true
+  # Screen sharing. The voice agent calls share_screen when it needs to look;
+  # the browser then streams about one frame a second through the open session
+  # until it calls stop_screen_share (or you stop the share in Chrome). Frames
+  # leave this machine, so this is the switch that authorises it.
+  screen_share: true
+  screen_share_interval: 1.0
+  screen_share_max_dim: 1024
+  screen_share_quality: 60
   location: us-central1
-  backend: gcloud                        # api_key | gcloud
+  backend: api_key                       # api_key | gcloud
   # Read from JARVIS_LIVE_API_KEY, GEMINI_API_KEY, or Windows Credential Vault.
   # Keep credentials out of this shared project file.
   api_key: ""
-  # Fish Audio Agents voice agent (https://fish.audio/app/agents). When set,
-  # live voice mode runs this hosted agent and its client tools drive the local
-  # main worker agent. Auth uses FISH_AUDIO_API_KEY. Set JARVIS_FISH_AGENT_ID to
-  # override without editing this file.
+  # Fish Audio Agents (https://fish.audio/app/agents) is the alternative engine:
+  # set provider: fish to run the hosted agent instead of Gemini. Auth uses
+  # FISH_AUDIO_API_KEY. JARVIS_FISH_AGENT_ID overrides this without editing here.
   fish_agent_id: "2548d6d42e55487c95d13d432d195d97"
   # The hosted agent's own LLM. It runs the conversation and decides when to
   # call a tool, so this decides whether "open Spotify" actually happens or is

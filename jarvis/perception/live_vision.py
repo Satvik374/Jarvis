@@ -192,9 +192,14 @@ class LiveVisionEngine:
 
         # Build brain if not provided
         if brain is None:
+            # ``Config`` is a dataclass with no ``load`` - the loader is the
+            # module-level ``load_config``. Calling the wrong one raised
+            # AttributeError on every call that omitted a brain, so the whole
+            # default path (``see()``, the ``see`` agent action) was dead while
+            # the tests stayed green: they all pass a mock brain.
             from ..agent.brain import make_brain
-            from ..config import Config
-            cfg = Config.load()
+            from ..config import load_config
+            cfg = load_config()
             brain = make_brain(cfg.brain)
 
         system_instruction = (
