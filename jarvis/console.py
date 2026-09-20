@@ -21,6 +21,7 @@ from .config import load_config, Config
 from .agent.brain import make_brain, BrainError
 from .utils import logging as log
 from .utils import voice
+from .utils.paths import state_root
 from .utils.logging import _c, _c256, _ARC, _COLORS
 from .agent.loop import Agent, _IMG_EXTS
 from . import scheduler
@@ -735,7 +736,7 @@ def repl(cfg: Config | None = None) -> int:
                 pass
 
         sched = scheduler.Scheduler(
-            Path(__file__).resolve().parent.parent / "cron_jobs.json",
+            state_root() / "cron_jobs.json",
             runner=_cron_runner)
         scheduler.set_default(sched)
         sched.start()

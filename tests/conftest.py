@@ -17,7 +17,6 @@ worse, makes the result depend on what that data already contained.
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
 
 import pytest
 
@@ -41,34 +40,38 @@ def _isolated_state(tmp_path_factory):
 
     Set before any test body runs and restored afterwards, so the real user's
     memory, chat log, screenshots, browser profile and live flag are never read
-    or written by the suite. Inner per-test patches still take precedence.
+    or written by the suite. Every location is a plain environment override, so
+    a test that needs its own directory sets one rather than patching a global.
     """
-    # Resolve pytest's temp root first so the patched tempfile.gettempdir below
-    # cannot influence where pytest itself creates directories.
     base = tmp_path_factory.getbasetemp() / "jarvis-isolation"
     base.mkdir(parents=True, exist_ok=True)
-    flag_dir = base / "live-flag"
-    flag_dir.mkdir(parents=True, exist_ok=True)
+    (base / "live-flag").mkdir(parents=True, exist_ok=True)
 
     overrides = {
         "JARVIS_STATE_DIR": str(base),
         "JARVIS_BROWSER_PROFILE": str(base / "browser_profile"),
         "RELAY_STATE_PATH": str(base / "relay_state.json"),
+        "JARVIS_LIVE_FLAG_DIR": str(base / "live-flag"),
     }
     previous = {key: os.environ.get(key) for key in overrides}
     os.environ.update(overrides)
-    _reset_memory_singleton()
+    # Also pin the paths in-process: several tests do
+    # patch.dict(os.environ, {}, clear=True), which would otherwise drop every
+    # override above and send default-constructed stores back to the repository.
+    from jarvis.utils import paths as jarvis_paths
 
-    with patch("jarvis.utils.voice.tempfile.gettempdir", return_value=str(flag_dir)):
-        try:
-            yield base
-        finally:
-            for key, value in previous.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
-            _reset_memory_singleton()
+    jarvis_paths.set_sandbox_root(base)
+    _reset_memory_singleton()
+    try:
+        yield base
+    finally:
+        jarvis_paths.set_sandbox_root(None)
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        _reset_memory_singleton()
 
 
 def _reset_memory_singleton() -> None:

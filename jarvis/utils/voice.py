@@ -24,6 +24,7 @@ import wave
 
 from ..config import VoiceConfig
 from . import logging as log
+from .paths import sandbox_root
 
 _RATE = 16000          # 16 kHz mono int16 - plenty for speech
 _CHUNK = 1600          # 0.1 s per energy reading
@@ -66,7 +67,20 @@ _live_flag_stop = threading.Event()
 
 
 def _live_flag_path() -> Path:
-    return Path(tempfile.gettempdir()) / _LIVE_FLAG_NAME
+    """Where the shared live-mode flag lives.
+
+    ``JARVIS_LIVE_FLAG_DIR`` relocates the directory, mirroring how
+    ``JARVIS_LIVE_AUDIO_STATE`` relocates the measured-model verdict. Callers
+    that must not disturb a real session pointing at their own directory use
+    it, instead of patching a global to move the flag out of the way.
+    """
+    override = os.environ.get("JARVIS_LIVE_FLAG_DIR", "").strip()
+    if override:
+        base = Path(override).expanduser()
+    else:
+        sandbox = sandbox_root()
+        base = sandbox / "live-flag" if sandbox is not None else Path(tempfile.gettempdir())
+    return base / _LIVE_FLAG_NAME
 
 
 def _clear_live_flag(force: bool = False) -> None:

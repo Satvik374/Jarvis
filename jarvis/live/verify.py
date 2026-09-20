@@ -111,13 +111,22 @@ def _probe_audio(audio_path: str | None) -> tuple[bytes, str]:
 
     from ..utils import voice
 
-    target = os.path.join(tempfile.gettempdir(), "jarvis_live_check.wav")
-    if not voice.speak_to_wav(PROBE_PHRASE, target):
-        raise RuntimeError(
-            "could not synthesize the probe phrase; install a TTS engine (kokoro, "
-            "Windows SAPI) or pass --live-audio <your own .wav>"
-        )
-    return _wav_to_pcm16k(target), "synthesized phrase"
+    # A unique name: a fixed one in the shared temp directory let two live
+    # checks running at the same time collide on the same path.
+    handle, target = tempfile.mkstemp(prefix="jarvis-live-check-", suffix=".wav")
+    os.close(handle)
+    try:
+        if not voice.speak_to_wav(PROBE_PHRASE, target):
+            raise RuntimeError(
+                "could not synthesize the probe phrase; install a TTS engine (kokoro, "
+                "Windows SAPI) or pass --live-audio <your own .wav>"
+            )
+        return _wav_to_pcm16k(target), "synthesized phrase"
+    finally:
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
 
 
 def _describe_wire(message: dict[str, Any], report: LiveCheckReport) -> bool:

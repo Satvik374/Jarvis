@@ -17,7 +17,7 @@ class TestLiveBrowserVoice(unittest.TestCase):
     def setUp(self):
         # Never touch the user's shared live flag or physical audio devices.
         directory = self.enterContext(tempfile.TemporaryDirectory())
-        self.enterContext(patch("jarvis.utils.voice.tempfile.gettempdir", return_value=directory))
+        self.enterContext(patch.dict(os.environ, {"JARVIS_LIVE_FLAG_DIR": directory}))
         self.enterContext(patch("jarvis.utils.voice._live_mode_active", False))
         self.enterContext(patch("jarvis.utils.voice.interrupt_speech"))
         self.enterContext(patch("jarvis.utils.voice.configure"))
@@ -627,9 +627,7 @@ class LiveModeFlagTests(unittest.TestCase):
     def setUp(self):
         # Never touch the user's shared live flag or physical audio devices.
         directory = self.enterContext(tempfile.TemporaryDirectory())
-        self.enterContext(
-            patch("jarvis.utils.voice.tempfile.gettempdir", return_value=directory)
-        )
+        self.enterContext(patch.dict(os.environ, {"JARVIS_LIVE_FLAG_DIR": directory}))
         self.enterContext(patch.dict(os.environ, {"JARVIS_LIVE_MODE": "0"}))
         self.flag = pathlib.Path(directory) / "jarvis_live_mode.flag"
         from jarvis.utils import voice

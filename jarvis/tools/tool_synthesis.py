@@ -27,14 +27,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..utils import logging as log
-
-
-def _get_project_root() -> Path:
-    return Path(__file__).resolve().parent.parent.parent
+from ..utils.paths import state_root
 
 
 def get_default_tools_dir() -> Path:
-    return _get_project_root() / "tools_synthesized"
+    return state_root() / "tools_synthesized"
 
 
 @dataclass

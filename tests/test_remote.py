@@ -343,8 +343,11 @@ class RelayProtocolTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # The relay reads this only at import time. Set a per-test temporary
-        # path before loading it so testing never creates project state.
+        # path before loading it so testing never creates project state, and
+        # arrange to put the previous value back: os.environ is process-wide, so
+        # a leaked path would silently redirect the relay for every later test.
         cls._temp = tempfile.TemporaryDirectory()
+        cls._previous_state_path = os.environ.get("RELAY_STATE_PATH")
         os.environ["RELAY_STATE_PATH"] = str(Path(cls._temp.name) / "relay.json")
         from fastapi.testclient import TestClient
         from relay_server.main import app as _relay_app
@@ -353,6 +356,10 @@ class RelayProtocolTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        if cls._previous_state_path is None:
+            os.environ.pop("RELAY_STATE_PATH", None)
+        else:
+            os.environ["RELAY_STATE_PATH"] = cls._previous_state_path
         cls._temp.cleanup()
 
     def test_root_serves_live_relay_dashboard(self):

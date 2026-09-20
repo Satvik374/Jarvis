@@ -13,12 +13,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .config import ROOT
 from .utils import logging as log
+from .utils.paths import state_root
 
 
 def default_sessions_dir() -> Path:
-    d = ROOT / "dataset" / "data" / "sessions"
+    d = state_root() / "dataset" / "data" / "sessions"
     try:
         d.mkdir(parents=True, exist_ok=True)
     except Exception:

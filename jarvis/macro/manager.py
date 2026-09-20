@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..utils import logging as log
+from ..utils.paths import state_root
 
 
 @dataclass
@@ -209,8 +210,7 @@ class MacroManager:
 
     def __init__(self, storage_dir: Optional[Path] = None):
         if storage_dir is None:
-            proj_root = Path(__file__).resolve().parent.parent.parent
-            self.storage_dir = proj_root / "dataset" / "data" / "macros"
+            self.storage_dir = state_root() / "dataset" / "data" / "macros"
         else:
             self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)

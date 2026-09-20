@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from ..utils.paths import state_root
+
 try:  # PyYAML is already a hard dependency (config.yaml); keep the fallback cheap
     import yaml
 except Exception:  # pragma: no cover - only reachable on a broken install
@@ -277,8 +279,7 @@ class SkillManager:
 
     def __init__(self, storage_dir: Path | str | None = None):
         if storage_dir is None:
-            proj_root = Path(__file__).resolve().parent.parent.parent
-            self.storage_dir = proj_root / "dataset" / "data" / "skills"
+            self.storage_dir = state_root() / "dataset" / "data" / "skills"
         else:
             self.storage_dir = Path(storage_dir)
         self._active_slug = ""

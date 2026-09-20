@@ -9,8 +9,9 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from ..config import Config, ROOT
+from ..config import Config
 from ..utils import logging as log
+from ..utils.paths import state_root
 from .events import Event, EventRule, EventType
 from .watchers import (
     BaseWatcher,
@@ -33,7 +34,7 @@ class ProactiveDaemon:
     ):
         self.cfg = cfg or Config()
         self.task_runner = task_runner
-        self.rules_path = Path(rules_path) if rules_path else (ROOT / "dataset" / "data" / "daemon_rules.json")
+        self.rules_path = Path(rules_path) if rules_path else (state_root() / "dataset" / "data" / "daemon_rules.json")
         self._rules: List[EventRule] = []
         self._watchers: List[BaseWatcher] = []
         self._stop_event = threading.Event()

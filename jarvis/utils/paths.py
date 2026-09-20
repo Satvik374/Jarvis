@@ -2,16 +2,17 @@
 
 Every default state location is resolved here rather than recomputed from
 ``__file__`` at each call site, so there is one answer to "where does this go"
-and one way to move it. Two overrides exist:
+and one way to move it.
 
-* ``JARVIS_STATE_DIR`` - relocates the repo-anchored files (the memory store,
-  ``memory.txt``, the chat log, screenshots and trajectories). Unset, the paths
-  are exactly what they always were: the project root.
-* ``JARVIS_BROWSER_PROFILE`` - relocates the persistent browser profile that
-  otherwise lives in the user's home directory.
+Three levels, in order:
 
-They exist so the application can be run against a scratch state directory, and
-so the test suite never reads or writes the real user's state.
+1. an explicit in-process sandbox (:func:`set_sandbox_root`) - used by the test
+   suite, because it survives a test that wipes ``os.environ``;
+2. the environment overrides ``JARVIS_STATE_DIR`` and ``JARVIS_BROWSER_PROFILE``
+   - how a user relocates the application's state;
+3. the historical defaults: the project root, and ``~/.jarvis/browser_profile``.
+
+With neither override set the paths are exactly what they always were.
 """
 
 from __future__ import annotations
@@ -19,21 +20,48 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+_sandbox_root: Path | None = None
+
 
 def project_root() -> Path:
     """The repository/project root, independent of the working directory."""
     return Path(__file__).resolve().parent.parent.parent
 
 
+def set_sandbox_root(path: Path | str | None) -> None:
+    """Force every state location under ``path`` for this process.
+
+    The environment override is not enough on its own: the test suite has sites
+    that do ``patch.dict(os.environ, {}, clear=True)``, and clearing the
+    environment made the state paths fall back to the repository, so a
+    default-constructed store wrote real state. This override lives in the
+    process, so clearing the environment cannot escape it. Pass ``None`` to
+    release it, which restores the environment/default behaviour.
+    """
+    global _sandbox_root
+    _sandbox_root = Path(path).expanduser() if path is not None else None
+
+
+def sandbox_root() -> Path | None:
+    """The forced sandbox root, or ``None`` when no sandbox is active."""
+    return _sandbox_root
+
+
 def state_root() -> Path:
-    """Root for repo-anchored state; ``JARVIS_STATE_DIR`` when set."""
+    """Root for repo-anchored state."""
     override = os.environ.get("JARVIS_STATE_DIR", "").strip()
-    return Path(override).expanduser() if override else project_root()
+    if override:
+        return Path(override).expanduser()
+    if _sandbox_root is not None:
+        return _sandbox_root
+    return project_root()
 
 
 def browser_profile_dir() -> Path:
-    """The persistent browser profile; ``JARVIS_BROWSER_PROFILE`` when set."""
+    """The persistent browser profile."""
     override = os.environ.get("JARVIS_BROWSER_PROFILE", "").strip()
     if override:
         return Path(override).expanduser()
+    if _sandbox_root is not None:
+        return _sandbox_root / "browser_profile"
     return Path.home() / ".jarvis" / "browser_profile"

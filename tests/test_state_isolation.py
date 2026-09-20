@@ -11,11 +11,19 @@ from __future__ import annotations
 
 import inspect
 import os
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
+from jarvis import mcp, sessions
 from jarvis.agent import memory as agent_memory
 from jarvis.browser_engine import driver
+from jarvis.config import Config
+from jarvis.daemon.engine import ProactiveDaemon
+from jarvis.macro.manager import MacroManager
 from jarvis.memory import manager as memory_manager
+from jarvis.skills.manager import SkillManager
+from jarvis.tools.tool_synthesis import get_default_tools_dir
 from jarvis.utils import paths, voice
 
 
@@ -47,6 +55,46 @@ def test_both_memory_paths_resolve_inside_the_isolated_root() -> None:
     assert agent_memory.get_default_memory_path() == root / "memory.txt"
 
 
+def test_every_repo_anchored_default_resolves_inside_the_isolated_root() -> None:
+    """The seam covers the whole family, not only the stores a test happened to
+    touch: a default-constructed store must land in the sandbox too."""
+    root = _isolated_root()
+    assert sessions.default_sessions_dir() == root / "dataset" / "data" / "sessions"
+    assert MacroManager().storage_dir == root / "dataset" / "data" / "macros"
+    assert SkillManager().storage_dir == root / "dataset" / "data" / "skills"
+    assert get_default_tools_dir() == root / "tools_synthesized"
+    assert mcp.get_manager().path == root / "mcp_servers.json"
+    # The daemon is reached through a process-global singleton with no rules
+    # path (the schedule_task action), so its default is what actually gets
+    # written - it must be the sandbox, not the repository's dataset.
+    daemon = ProactiveDaemon(cfg=Config(), task_runner=lambda task: None)
+    assert daemon.rules_path == root / "dataset" / "data" / "daemon_rules.json"
+
+
+def test_the_sandbox_survives_a_test_that_clears_the_environment() -> None:
+    """Several tests wipe ``os.environ`` (``clear=True``).
+
+    That used to drop every override at once and send default-constructed
+    stores back to the repository - the daemon singleton written by the
+    ``schedule_task`` action was the one caught doing it.
+    """
+    root = _isolated_root()
+    with patch.dict(os.environ, {}, clear=True):
+        assert paths.state_root() == root
+        assert paths.browser_profile_dir() == root / "browser_profile"
+        assert voice._live_flag_path().parent == root / "live-flag"
+        daemon = ProactiveDaemon(cfg=Config(), task_runner=lambda task: None)
+        assert daemon.rules_path == root / "dataset" / "data" / "daemon_rules.json"
+
+
+def test_the_console_cron_store_is_redirected() -> None:
+    # Read as text so this guard does not pull the console into the test process.
+    source = (
+        Path(__file__).resolve().parent.parent / "jarvis" / "console.py"
+    ).read_text(encoding="utf-8")
+    assert 'state_root() / "cron_jobs.json"' in source
+
+
 def test_the_browser_profile_is_not_the_users_real_profile() -> None:
     real_profile = Path.home() / ".jarvis" / "browser_profile"
     assert paths.browser_profile_dir() == _isolated_root() / "browser_profile"
@@ -60,10 +108,43 @@ def test_the_browser_worker_anchors_screenshots_to_the_state_root() -> None:
     assert 'Path(__file__).resolve().parent.parent.parent / "dataset"' not in source
 
 
-def test_the_live_voice_flag_is_not_the_machine_global_one() -> None:
+def test_the_live_voice_flag_is_redirected_by_its_own_override() -> None:
     # The shared flag is what made the latency tests fail whenever a real live
     # session was running on the machine.
+    assert voice._live_flag_path().parent == Path(os.environ["JARVIS_LIVE_FLAG_DIR"])
     assert _isolated_root() in voice._live_flag_path().parents
+
+
+def test_the_live_flag_defaults_to_the_shared_temp_directory(monkeypatch) -> None:
+    """With no override and no sandbox, the flag is where it always was."""
+    monkeypatch.delenv("JARVIS_LIVE_FLAG_DIR", raising=False)
+    previous = paths.sandbox_root()
+    paths.set_sandbox_root(None)
+    try:
+        expected = Path(tempfile.gettempdir()) / "jarvis_live_mode.flag"
+        assert voice._live_flag_path() == expected
+    finally:
+        paths.set_sandbox_root(previous)
+
+
+def test_no_test_relocates_the_flag_by_patching_a_global() -> None:
+    """Relocate the flag with its override, never by patching a temp helper.
+
+    Patching the voice module's temp helper into a private directory mutates the
+    standard library module for the whole process, silently dragging unrelated
+    temp files (attachments, pasted images, the live-audio probe) along with it.
+    """
+    # Assembled so this guard does not match its own source text.
+    forbidden = "jarvis.utils.voice.tempfile" + ".gettempdir"
+    offenders = [
+        f"{path.name}:{lineno}"
+        for path in sorted(Path(__file__).parent.glob("*.py"))
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if forbidden in line
+    ]
+    assert not offenders, (
+        f"use JARVIS_LIVE_FLAG_DIR instead of patching tempfile: {offenders}"
+    )
 
 
 def test_the_relay_state_file_is_redirected() -> None:

@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 
 from .utils import logging as log
+from .utils.paths import state_root
 
 PROTOCOL_VERSION = "2024-11-05"
 _RESULT_CAP = 6000            # chars of a tool result fed back to the model
@@ -415,8 +416,7 @@ _MANAGER: Manager | None = None
 def get_manager() -> Manager:
     global _MANAGER
     if _MANAGER is None:
-        root = Path(__file__).resolve().parent.parent
-        _MANAGER = Manager(root / "mcp_servers.json")
+        _MANAGER = Manager(state_root() / "mcp_servers.json")
     return _MANAGER
 
 

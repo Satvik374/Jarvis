@@ -348,9 +348,7 @@ class AsyncSpeechTests(unittest.TestCase):
         # into a false failure. The shared flag is never read, written or
         # cleared here - the gate has its own tests in test_live_browser_voice.
         directory = self.enterContext(tempfile.TemporaryDirectory())
-        self.enterContext(
-            patch("jarvis.utils.voice.tempfile.gettempdir", return_value=directory)
-        )
+        self.enterContext(patch.dict(os.environ, {"JARVIS_LIVE_FLAG_DIR": directory}))
         self.enterContext(patch.dict(os.environ, {"JARVIS_LIVE_MODE": "0"}))
         self.enterContext(patch.object(voice, "_live_mode_active", False))
 
