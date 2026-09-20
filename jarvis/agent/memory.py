@@ -10,11 +10,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..utils import logging as log
+from ..utils.paths import state_root
 
 
 def get_default_memory_path() -> Path:
-    proj_root = Path(__file__).resolve().parent.parent.parent
-    return proj_root / "memory.txt"
+    return state_root() / "memory.txt"
 
 
 def parse_memory_text(text: str) -> tuple[list[str], list[str]]:

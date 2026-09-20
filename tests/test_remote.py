@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import base64
+import importlib.util
 import json
 import tempfile
 import unittest
@@ -327,13 +328,14 @@ class RemoteActionImageTests(unittest.TestCase):
         self.assertFalse(result.clear_image)
         self.assertEqual(result.image_path, "C:/tmp/mobile.jpg")
 
-try:
-    import fastapi  # noqa: F401 - relay-only dependency
-    from relay_server.main import app as _relay_app
-except ImportError:
-    _RELAY_DEPS_AVAILABLE = False
-else:
-    _RELAY_DEPS_AVAILABLE = True
+# Probe for the relay dependencies without importing the app. relay_server.main
+# builds its state store at *import* time from RELAY_STATE_PATH, so importing it
+# while this module is collected would bind it to the project's real
+# relay_state.json before setUpClass can point it at a temporary file.
+_RELAY_DEPS_AVAILABLE = (
+    importlib.util.find_spec("fastapi") is not None
+    and importlib.util.find_spec("relay_server.main") is not None
+)
 
 
 @unittest.skipUnless(_RELAY_DEPS_AVAILABLE, "relay_server dependencies are not installed")
@@ -345,6 +347,8 @@ class RelayProtocolTests(unittest.TestCase):
         cls._temp = tempfile.TemporaryDirectory()
         os.environ["RELAY_STATE_PATH"] = str(Path(cls._temp.name) / "relay.json")
         from fastapi.testclient import TestClient
+        from relay_server.main import app as _relay_app
+
         cls.client = TestClient(_relay_app)
 
     @classmethod

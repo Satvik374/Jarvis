@@ -27,6 +27,7 @@ from ..perception import elements as elem_mod
 from ..perception import annotate as annotate_mod
 from ..tools import registry
 from ..utils import logging as log
+from ..utils.paths import state_root
 from .brain import Brain, BrainError, complete_with_retry
 from .prompts import (build_system_prompt, parse_decision, format_observation,
                       format_decision, _extract_json)
@@ -162,20 +163,20 @@ class Agent:
         self.brain = brain
         self.cfg = cfg
         self.cancel_event = threading.Event()
-        proj_root = Path(__file__).resolve().parent.parent.parent
-        self.memory_path = proj_root / "memory.txt"
+        state_dir = state_root()
+        self.memory_path = state_dir / "memory.txt"
         # Conversational memory: only (user prompt, Jarvis response) pairs,
         # persisted across sessions. Kept separate from the learned-plan
         # memory.txt so thoughts and plans never leak into the chat history.
-        self.chat_path = proj_root / "chat_memory.jsonl"
+        self.chat_path = state_dir / "chat_memory.jsonl"
         # Anchor internal data dirs to the project root so Jarvis writes to the
         # same place no matter which directory the `jarvis` command is run from.
         traj_dir = Path(cfg.data.trajectory_dir)
         if not traj_dir.is_absolute():
-            traj_dir = proj_root / traj_dir
+            traj_dir = state_dir / traj_dir
         self.writer = TrajectoryWriter(
             str(traj_dir), enabled=cfg.data.collect_trajectories)
-        self._shot_dir = proj_root / "dataset" / "data" / "screenshots"
+        self._shot_dir = state_dir / "dataset" / "data" / "screenshots"
         from ..memory.manager import get_memory_manager
         self.memory_mgr = get_memory_manager(memory_path=self.memory_path)
         from ..macro import get_macro_manager, MacroPlayer

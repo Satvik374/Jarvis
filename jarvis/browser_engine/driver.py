@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..config import Config, load_config
 from ..utils import logging as log
+from ..utils.paths import browser_profile_dir, state_root
 
 
 @dataclass
@@ -183,7 +184,7 @@ class _BrowserWorker(threading.Thread):
         self._context = None
         self._page = None
         self._element_map: Dict[str, str] = {}
-        self._shot_dir = Path(__file__).resolve().parent.parent.parent / "dataset" / "data" / "screenshots"
+        self._shot_dir = state_root() / "dataset" / "data" / "screenshots"
         self._shot_dir.mkdir(parents=True, exist_ok=True)
         self.start()
         self._ready_event.wait()
@@ -265,7 +266,7 @@ class _BrowserWorker(threading.Thread):
                 log.warn(f"CDP connection failed ({exc}), falling back to local browser launch.")
 
         # 2. Persistent Context / Local Launch
-        user_data_dir = b_cfg.user_data_dir or str(Path.home() / ".jarvis" / "browser_profile")
+        user_data_dir = b_cfg.user_data_dir or str(browser_profile_dir())
         Path(user_data_dir).mkdir(parents=True, exist_ok=True)
 
         browser_type_name = (b_cfg.browser_type or "chromium").lower()

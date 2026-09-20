@@ -11,21 +11,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..utils import logging as log
+from ..utils.paths import state_root
 from .hybrid_rag import HybridRAG, RAGResult
 from .knowledge_graph import KnowledgeGraph
 from .vector_store import EmbeddingEngine, MemoryRecord, VectorStore
 
 
-def _get_project_root() -> Path:
-    return Path(__file__).resolve().parent.parent.parent
-
-
 def get_default_db_path() -> Path:
-    return _get_project_root() / "jarvis_memory.db"
+    return state_root() / "jarvis_memory.db"
 
 
 def get_default_memory_path() -> Path:
-    return _get_project_root() / "memory.txt"
+    return state_root() / "memory.txt"
 
 
 class MemoryManager:
