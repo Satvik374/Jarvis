@@ -341,6 +341,19 @@ class ScreenshotArchivalTests(unittest.TestCase):
 
 
 class AsyncSpeechTests(unittest.TestCase):
+    def setUp(self):
+        # These tests pin the async dispatcher, not live-mode gating, so keep
+        # them off the machine-global live flag. A real live session running on
+        # this box would otherwise silence speech and turn every one of them
+        # into a false failure. The shared flag is never read, written or
+        # cleared here - the gate has its own tests in test_live_browser_voice.
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(
+            patch("jarvis.utils.voice.tempfile.gettempdir", return_value=directory)
+        )
+        self.enterContext(patch.dict(os.environ, {"JARVIS_LIVE_MODE": "0"}))
+        self.enterContext(patch.object(voice, "_live_mode_active", False))
+
     def tearDown(self):
         voice.reset()
 
@@ -723,6 +736,25 @@ class AsyncSpeechTests(unittest.TestCase):
             order.append("returned")
 
         self.assertEqual(order, ["synth", "play-wait", "returned"])
+
+
+    def test_live_mode_silences_async_dispatch_not_just_sync_playback(self):
+        """Live mode must mute the background path too, or the agent talks over it."""
+        voice.configure(Mock(), VoiceConfig())
+        voice.set_live_mode_active(True)
+        self.addCleanup(voice.set_live_mode_active, False)
+        synthesized = []
+        with (
+            patch.object(
+                voice,
+                "_synthesize_wav",
+                side_effect=lambda *a, **k: synthesized.append(a),
+            ),
+            patch.object(voice, "_play_wav", side_effect=lambda *a, **k: None),
+        ):
+            voice.speak("first")
+            time.sleep(0.2)
+        self.assertEqual(synthesized, [])
 
 
 class CompletionCueTests(unittest.TestCase):
