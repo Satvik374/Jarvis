@@ -33,6 +33,11 @@ class ActionResult:
     image_path: str | None = None
     # Remote UI actions invalidate a previously attached device screenshot.
     clear_image: bool = False
+    # Set by ``stop_session``: the agent asked for the session itself to end.
+    # The loop stops the run on this - it is deliberately not ``finished``,
+    # because a stop is not a completed task and must never be handed to the
+    # verifier as one.
+    stop_session: bool = False
 
 
 class UnknownAction(Exception):
@@ -44,7 +49,7 @@ def execute(name: str, args: dict[str, Any], obs: Observation,
     if name not in ACTIONS_BY_NAME:
         raise UnknownAction(name)
     args = args or {}
-    handler = _HANDLERS.get(name)
+    handler = handler_for(name)
     if handler is None:  # pragma: no cover - schema/registry mismatch guard
         raise UnknownAction(name)
     return handler(args, obs, cfg)
@@ -1663,6 +1668,38 @@ def _h_finish(args, obs, cfg):
                         needs_observe=False, finished=True)
 
 
+def _h_stop_session(args, obs, cfg):
+    """Record that the agent wants this session to end.
+
+    The handler only *asks*: the request lands in ``jarvis.session_control``,
+    and the runtime that owns the session honours it (the console REPL breaks
+    out, the browser worker tells its parent to shut the child down). Doing the
+    shutdown here instead would mean killing the process from inside the agent
+    loop, mid-step, with the current turn's output and trajectory unwritten.
+    """
+    from ..session_control import clean_reason, request_session_stop
+
+    # Normalise before storing *and* before comparing, so "is this my reason?"
+    # is asked of the same form the module keeps.
+    reason = clean_reason(args.get("reason")) or "Stopping this session as requested."
+    record = request_session_stop(reason=reason, source="agent")
+    # A stop already in flight owns the reason the user will read; say so
+    # rather than pretending this call started it.
+    if record.get("reason") != reason:
+        return ActionResult(
+            True,
+            f"This session is already stopping: {record.get('reason')}",
+            needs_observe=False,
+            stop_session=True,
+        )
+    return ActionResult(
+        True,
+        f"Session stop requested - closing down. Last note: {reason}",
+        needs_observe=False,
+        stop_session=True,
+    )
+
+
 def _h_set_theme(args, obs, cfg):
     theme = str(args.get("theme", "arc")).strip().lower()
     return ActionResult(True, f"UI visual theme set to '{theme}'", needs_observe=False)
@@ -1923,94 +1960,67 @@ def _h_ask(args, obs, cfg):
     return ActionResult(True, q, needs_observe=False, finished=True, ask=q)
 
 
-_HANDLERS = {
-    "click": _h_click,
-    "double_click": _h_double_click,
-    "triple_click": _h_triple_click,
-    "right_click": _h_right_click,
-    "move": _h_move,
-    "drag": _h_drag,
-    "scroll": _h_scroll,
-    "mouse_control": _h_mouse_control,
-    "type": _h_type,
-    "press": _h_press,
-    "key_sequence": _h_key_sequence,
-    "open_app": _h_open_app,
-    "focus_window": _h_focus_window,
-    "snap_window": _h_snap_window,
-    "tile_windows": _h_tile_windows,
-    "list_windows": _h_list_windows,
-    "close_window": _h_close_window,
-    "open_url": _h_open_url,
-    "read_url": _h_read_url,
-    "browser_action": _h_browser_action,
-    "http_request": _h_http_request,
-    "python": _h_python,
-    "synthesize_tool": _h_synthesize_tool,
-    "execute_synthesized_tool": _h_execute_synthesized_tool,
-    "list_synthesized_tools": _h_list_synthesized_tools,
-    "session_exec": _h_session_exec,
-    "download_file": _h_download_file,
-    "wait_for": _h_wait_for,
-    "run_command": _h_run_command,
-    "system_status": _h_system_status,
-    "media": _h_media,
-    "notify": _h_notify,
-    "take_screenshot": _h_take_screenshot,
-    "system_diagnostics": _h_system_diagnostics,
-    "net_intel": _h_net_intel,
-    "process_intel": _h_process_intel,
-    "media_intel": _h_media_intel,
-    "web_search": _h_web_search,
-    "extract_web_data": _h_extract_web_data,
-    "schedule_task": _h_schedule_task,
-    "read_file": _h_read_file,
-    "read_document": _h_read_document,
-    "write_file": _h_write_file,
-    "write_files": _h_write_files,
-    "edit_file": _h_edit_file,
-    "agent": _h_agent,
-    "agent_swarm": _h_agent_swarm,
-    "code_task": _h_code_task,
-    "code_intel": _h_code_intel,
-    "db_query": _h_db_query,
-    "git_intel": _h_git_intel,
-    "self_upgrade": _h_self_upgrade,
-    "self_heal": _h_self_heal,
-    "daemon_rule": _h_daemon_rule,
-    "hud_control": _h_hud_control,
-    "make_dir": _h_make_dir,
-    "list_dir": _h_list_dir,
-    "find_files": _h_find_files,
-    "copy_file": _h_copy_file,
-    "move_file": _h_move_file,
-    "delete_file": _h_delete_file,
-    "convert_file": _h_convert_file,
-    "archive_intel": _h_archive_intel,
-    "data_validate": _h_data_validate,
-    "crypto_intel": _h_crypto_intel,
-    "diff_patch": _h_diff_patch,
-    "regex_intel": _h_regex_intel,
-    "api_mock": _h_api_mock,
-    "cron_intel": _h_cron_intel,
-    "clipboard_read": _h_clipboard_read,
-    "clipboard_write": _h_clipboard_write,
-    "remember": _h_remember,
-    "forget": _h_forget,
-    "memory_search": _h_memory_search,
-    "graph_query": _h_graph_query,
-    "voice_control": _h_voice_control,
-    "macro": _h_macro,
-    "skill": _h_skill,
-    "secret": _h_secret,
-    "see": _h_see,
-    "remote_task": _h_remote_task,
-    "connector": _h_connector,
-    "mcp": _h_mcp,
-    "mcp_call": _h_mcp_call,
-    "wait": _h_wait,
-    "observe": _h_observe,
-    "finish": _h_finish,
-    "set_theme": _h_set_theme,
-    "ask": _h_ask,
-}
+# --------------------------------------------------------------------------- #
+# action binding
+# --------------------------------------------------------------------------- #
+# ``schema.py`` owns each action's name, parameters and docs; this module owns
+# the implementation. Naming a handler ``_h_<action>`` *is* the binding, so an
+# action's name is written once instead of twice -- there is no second list to
+# keep in step, and the two halves cannot drift apart unnoticed.
+#
+#   add an action     declare it in schema.py, define _h_<name> here
+#   rename an action  rename the declaration and the handler
+#   remove an action  delete both
+#
+# An action with no handler is absent from the table, so ``execute`` still
+# raises UnknownAction for it exactly as it did when the table was hand-written;
+# tests/test_action_space.py asserts both halves agree.
+
+
+def _bind_handlers() -> dict[str, Any]:
+    """Pair every declared action with its ``_h_<action>`` handler."""
+    table: dict[str, Any] = {}
+    unbound: list[str] = []
+
+    for name in ACTIONS_BY_NAME:
+        handler = globals().get(f"_h_{name}")
+        if callable(handler):
+            table[name] = handler
+        else:
+            unbound.append(name)
+
+    orphaned = sorted(
+        candidate[len("_h_"):]
+        for candidate, value in globals().items()
+        if candidate.startswith("_h_")
+        and callable(value)
+        and candidate[len("_h_"):] not in ACTIONS_BY_NAME
+    )
+
+    if unbound or orphaned:
+        # Reported rather than raised: a mismatch must not change how Jarvis
+        # runs, it must just be impossible to miss. tests/test_action_space.py
+        # is the gate that keeps it from shipping.
+        try:
+            from ..utils import logging as log
+
+            for name in unbound:
+                log.warn(f"action '{name}' is declared in schema.py but has no _h_{name} handler")
+            for name in orphaned:
+                log.warn(f"handler _h_{name} has no action declared in schema.py")
+        except Exception:  # pragma: no cover - reporting must never block import
+            pass
+
+    return table
+
+
+_HANDLERS = _bind_handlers()
+
+
+def handler_for(name: str) -> Any:
+    """The handler bound to ``name``, or ``None`` when nothing is bound.
+
+    The way in for callers and tests that need to ask what implements an action;
+    the table itself stays private so the binding can change shape freely.
+    """
+    return _HANDLERS.get(name)

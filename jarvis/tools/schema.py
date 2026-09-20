@@ -30,6 +30,11 @@ class Param:
     description: str
     required: bool = True
     default: Any = None
+    # Optional numeric bounds. Declared here means the model sees them in the
+    # JSON schema (``minimum`` / ``maximum``) and the handler is expected to
+    # enforce exactly this range - one contract, visible to every consumer.
+    minimum: float | None = None
+    maximum: float | None = None
 
 
 @dataclass(frozen=True)
@@ -63,8 +68,8 @@ ACTIONS: tuple[Action, ...] = (
         "click", "Left-click an element or screen coordinate. Pass 'count' to "
         "click several times in place (e.g. count 2 = double, 3 = triple).",
         _TARGET_PARAMS + (
-            Param("count", "int", "How many clicks (default 1).",
-                  required=False, default=1),
+            Param("count", "int", "How many clicks (1-10, default 1).",
+                  required=False, default=1, minimum=1, maximum=10),
         ), category="pointer",
         examples=({"element": 4}, {"x": 640, "y": 360}, {"element": 4, "count": 3}),
     ),
@@ -102,10 +107,12 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         "scroll", "Scroll the active window. Positive dy scrolls down.",
-        (Param("dy", "int", "Vertical clicks; positive = down, negative = up.",
-               required=False, default=3),
-         Param("dx", "int", "Horizontal clicks; positive = right.",
-               required=False, default=0)),
+        (Param("dy", "int", "Vertical clicks; positive = down, negative = up "
+               "(clamped to -50..50, the safe range for the OS scroll call).",
+               required=False, default=3, minimum=-50, maximum=50),
+         Param("dx", "int", "Horizontal clicks; positive = right "
+               "(clamped to -50..50).",
+               required=False, default=0, minimum=-50, maximum=50)),
         category="pointer", examples=({"dy": 5}, {"dy": -3}),
     ),
     Action(
@@ -117,8 +124,8 @@ ACTIONS: tuple[Action, ...] = (
         "hand right/left to increase/decrease system volume. Always turn it off when the user "
         "asks to stop hand/mouse camera control.",
         (Param("enabled", "bool", "True to start hand control; false to stop."),
-         Param("camera", "int", "Camera index (default 0).",
-               required=False, default=0)),
+         Param("camera", "int", "Camera index 0-9 (default 0).",
+               required=False, default=0, minimum=0, maximum=9)),
         category="pointer",
         examples=({"enabled": True}, {"enabled": False},
                   {"enabled": True, "camera": 1}),
@@ -182,11 +189,16 @@ ACTIONS: tuple[Action, ...] = (
          Param("url", "str", "Target URL (for 'navigate').", required=False),
          Param("target", "str", "Target element index (e.g. 'e1', 'e2'), CSS selector, "
                "or text (for 'click', 'type', 'select', 'hover').", required=False),
-         Param("text", "str", "Text to type (for 'type') or JS expression (for 'eval').", required=False),
+         Param("text", "str", "Text to type (for 'type'), JS expression (for 'eval'), "
+               "or key name (for 'press', e.g. 'Enter').", required=False),
          Param("value", "str", "Value to select (for 'select').", required=False),
          Param("direction", "str", "Scroll direction: 'down', 'up', 'top', 'bottom'.", required=False, default="down"),
          Param("mode", "str", "Extraction mode: 'markdown', 'text', 'html'.", required=False, default="markdown"),
-         Param("headless", "bool", "Optional override to run browser headfully or headlessly.", required=False)),
+         Param("headless", "bool", "Optional override to run browser headfully or headlessly.", required=False),
+         Param("press_enter", "bool", "Press Enter after typing (for 'type'; default false).", required=False, default=False),
+         Param("amount", "int", "Scroll distance in pixels for 'scroll' (default 500).", required=False, default=500),
+         Param("path", "str", "Where to save for action='screenshot' (default: a timestamped file).", required=False),
+         Param("script", "str", "JavaScript to run for action='eval' (alias of 'text').", required=False)),
         category="apps",
         examples=(
             {"action": "navigate", "url": "https://news.ycombinator.com"},
@@ -322,6 +334,7 @@ ACTIONS: tuple[Action, ...] = (
          Param("op", "str", "Operation: 'exec', 'start', 'list', or 'close' (default 'exec').", required=False, default="exec"),
          Param("name", "str", "Session identifier name, e.g. 'dev', 'build', 'py' (default 'default').", required=False, default="default"),
          Param("shell_type", "str", "Shell type for start: 'powershell', 'cmd', 'bash', 'python' (default 'powershell').", required=False, default="powershell"),
+         Param("cwd", "str", "Working directory to start the session in (for op='start').", required=False),
          Param("timeout", "int", "Max seconds to wait for command output (default 30).", required=False, default=30)),
         category="system",
         examples=({"command": "$x = 42", "op": "exec"},
@@ -372,8 +385,8 @@ ACTIONS: tuple[Action, ...] = (
         "never for ordinary desktop, file or settings tasks.",
         (Param("description", "str", "Full requirements: what to build, "
                "features, style, tech preferences."),
-         Param("workdir", "str", "Project folder (default: a new folder "
-               "under ~/JarvisProjects).", required=False)),
+         Param("workdir", "str", "Project folder; when omitted a new folder "
+               "under ~/JarvisProjects is created (default '').", required=False, default="")),
         category="coding",
         examples=({"description": "Build a modern portfolio website with a "
                    "dark theme, hero section, projects grid and contact form"},
@@ -407,7 +420,8 @@ ACTIONS: tuple[Action, ...] = (
          Param("path", "str", "Database file path or connection string (default: Jarvis memory database).", required=False, default=""),
          Param("op", "str", "Operation: 'query', 'schema', 'tables', or 'explain' (default 'query').", required=False, default="query"),
          Param("limit", "int", "Maximum rows to return for SELECT queries (default 100).", required=False, default=100),
-         Param("output_format", "str", "Result format: 'table', 'json', or 'csv' (default 'table').", required=False, default="table")),
+         Param("output_format", "str", "Result format: 'table', 'json', or 'csv' (default 'table').", required=False, default="table"),
+         Param("params", "list", "Positional bind parameters for '?' placeholders in sql.", required=False)),
         category="coding",
         examples=({"op": "schema", "path": "data/app.db"},
                   {"sql": "SELECT * FROM users WHERE active = 1", "path": "app.db", "output_format": "json"},
@@ -421,6 +435,7 @@ ACTIONS: tuple[Action, ...] = (
         "'branches' (list local and remote branches), 'commit' (stage files and create commit).",
         (Param("op", "str", "Operation: 'status', 'log', 'diff', 'branches', or 'commit' (default 'status').", required=False, default="status"),
          Param("path", "str", "Repository path (default: current directory).", required=False, default="."),
+         Param("target", "str", "Pathspec or file to stage for op='commit' (default: all changes).", required=False),
          Param("message", "str", "Commit message for op='commit'.", required=False),
          Param("limit", "int", "Maximum number of commits for op='log' (default 10).", required=False, default=10),
          Param("staged", "bool", "Show staged changes diff for op='diff' (default False).", required=False, default=False)),
@@ -629,7 +644,8 @@ ACTIONS: tuple[Action, ...] = (
          Param("op", "str", "Operation: 'list', 'test', 'create', or 'extract' (default 'list').", required=False, default="list"),
          Param("target", "str", "Destination path or extraction directory.", required=False),
          Param("archive_format", "str", "Archive format for create: 'zip', 'tar.gz', 'tar.bz2', 'tar.xz' (default 'zip').", required=False, default="zip"),
-         Param("level", "int", "Compression level from 0 to 9 (default 6).", required=False, default=6)),
+         Param("level", "int", "Compression level from 0 to 9 (default 6).", required=False, default=6),
+         Param("files", "list", "Specific file paths to pack for op='create' (default: the whole source directory).", required=False)),
         category="files",
         examples=({"path": "~/backup.zip", "op": "list"},
                   {"path": "~/archive.tar.gz", "op": "test"},
@@ -663,7 +679,9 @@ ACTIONS: tuple[Action, ...] = (
          Param("algo", "str", "Hash algorithm: 'sha256', 'sha512', 'md5', 'blake2b' (default 'sha256').", required=False, default="sha256"),
          Param("key", "str", "Secret key for op='hmac'.", required=False),
          Param("expected", "str", "Expected hash digest for op='verify'.", required=False),
-         Param("length", "int", "Token length in bytes/chars for op='token' (default 32).", required=False, default=32)),
+         Param("length", "int", "Token length in bytes/chars for op='token' (default 32).", required=False, default=32),
+         Param("salt", "str", "Hex salt for op='pbkdf2' (a secure one is generated when omitted).", required=False),
+         Param("iterations", "int", "PBKDF2 iteration count for op='pbkdf2' (default 100000, minimum 1000).", required=False, default=100000, minimum=1000)),
         category="security",
         examples=({"op": "hash", "target": "~/download.iso", "algo": "sha256"},
                   {"op": "verify", "target": "~/file.zip", "expected": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
@@ -890,7 +908,13 @@ ACTIONS: tuple[Action, ...] = (
         (Param("fact", "str", "The exact fact, preference, or rule to remember forever."),
          Param("category", "str", "Category or tag, e.g. 'preference', 'fact', "
                "'user_info', 'rule', 'project' (default 'fact').",
-               required=False, default="fact")),
+               required=False, default="fact"),
+         Param("entity", "str", "Subject entity to file the fact under in the "
+               "knowledge graph, e.g. 'user' or a project name.", required=False),
+         Param("relation", "str", "Relation from entity to target_entity, "
+               "e.g. 'prefers', 'works_on'.", required=False),
+         Param("target_entity", "str", "Object entity the relation points at "
+               "(used together with entity and relation).", required=False)),
         category="system",
         examples=({"fact": "User prefers dark mode UI and concise responses", "category": "preference"},
                   {"fact": "Project root is C:/Users/Administrator/Jarvis", "category": "project"}),
@@ -1090,8 +1114,8 @@ ACTIONS: tuple[Action, ...] = (
     # ---- meta ------------------------------------------------------------
     Action(
         "wait", "Pause briefly to let the screen settle after an action.",
-        (Param("seconds", "float", "Seconds to wait (<= 10).",
-               required=False, default=1.0),),
+        (Param("seconds", "float", "Seconds to wait (0-10).",
+               required=False, default=1.0, minimum=0, maximum=10),),
         category="meta", examples=({"seconds": 1.5},),
     ),
     Action(
@@ -1129,6 +1153,23 @@ ACTIONS: tuple[Action, ...] = (
         category="meta", terminal=True,
         examples=({"question": "Which file did you mean, report.docx or report.pdf?"},),
     ),
+    Action(
+        "stop_session", "End this Jarvis session and shut the runtime down. "
+        "This is not 'finish': finish ends the current task and hands the "
+        "session back to the user, while this ends the session itself. Use it "
+        "only when the user asks you to stop, close, quit or shut Jarvis "
+        "down, or when continuing is unsafe - never as a way to end a task "
+        "you could still complete. Because the session closes, 'reason' is "
+        "the last thing the user reads, so state what you did and whether "
+        "anything was left unfinished.",
+        (Param("reason", "str", "Short closing note shown to the user, e.g. "
+               "'Shutting down now; the report was saved first.'",
+               required=False, default=""),),
+        category="meta",
+        examples=(({"reason": "Shutting Jarvis down as requested."},
+                   {"reason": "Stopping before the next step: the operation "
+                              "needs your confirmation."}),)
+    ),
 )
 
 
@@ -1153,6 +1194,10 @@ def to_json_schema() -> list[dict]:
                 "type": _json_type(p.type),
                 "description": p.description,
             }
+            if p.minimum is not None:
+                prop["minimum"] = p.minimum
+            if p.maximum is not None:
+                prop["maximum"] = p.maximum
             if p.type == "list":
                 # Function-declaration schemas require ARRAY parameters to
                 # declare their item shape. Most Jarvis lists contain strings;
@@ -1177,6 +1222,51 @@ def to_json_schema() -> list[dict]:
             "parameters": {"type": "object", "properties": props, "required": required},
         })
     return out
+
+
+def gemini_safe_json_schema() -> list[dict]:
+    """The action schema restricted to what Gemini's functionDeclarations accept.
+
+    Gemini function calling accepts only a subset of OpenAPI Schema: unknown
+    property fields (``minimum``, ``maximum``, ``default``) are rejected with a
+    400 INVALID_ARGUMENT that would take down the recovery path for ALL 89
+    actions at once. Bounds are therefore folded into the description text —
+    the model still sees them, the validator does not. The full JSON view
+    (:func:`to_json_schema`) is unchanged; this only narrows what one transport
+    receives. Keep in step with the accepted-field list in the Gemini docs.
+    """
+    out: list[dict] = []
+    for entry in to_json_schema():
+        props: dict[str, Any] = {}
+        for pname, prop in entry["parameters"]["properties"].items():
+            lo = prop.pop("minimum", None)
+            hi = prop.pop("maximum", None)
+            if lo is not None or hi is not None:
+                lo_s = "-inf" if lo is None else _fmt_num(lo)
+                hi_s = "+inf" if hi is None else _fmt_num(hi)
+                prop["description"] = (
+                    prop.get("description", "") + f" (range {lo_s}..{hi_s})"
+                ).strip()
+            props[pname] = prop
+        out.append({
+            "name": entry["name"],
+            "description": entry["description"],
+            "parameters": {
+                "type": entry["parameters"]["type"],
+                "properties": props,
+                "required": entry["parameters"]["required"],
+            },
+        })
+    return out
+
+
+def _fmt_num(v: Any) -> str:
+    """1.0 -> '1', -50 -> '-50', 0.5 -> '0.5'."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return str(int(f)) if f.is_integer() else f"{f:g}"
 
 
 def _json_type(t: str) -> str:

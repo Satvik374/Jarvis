@@ -31,6 +31,25 @@ So the pixels are never guessed, and the two failure modes that make blind
 clicking dangerous - an ambiguous name and a name that is not on screen - both
 produce a question rather than a confident click on the wrong control.
 
+When the tree cannot name the control
+-------------------------------------
+A control with no accessible name - an icon button, a canvas, a game surface,
+an image - is invisible to UI Automation, so no wording can ever resolve
+against it. On a failed resolution the tool takes a second, pixels-only read
+and scores OCR text boxes the same way: still by name, still refusing when the
+answer is ambiguous, and still clicking a resolved box's centre rather than a
+guessed pixel. The element id is dispatched with the read it came from, because
+ids only mean anything against their own element list.
+
+What happens after the click
+----------------------------
+Every click re-reads the screen and reports what actually changed. Silence is
+reported as silence: a click that left the screen identical is described that
+way rather than as a success, because a return value cannot prove an effect.
+A caller may pass ``retry`` to ask for one deliberate re-click, and that is
+refused for toggle-shaped controls where a second activation would undo the
+first.
+
 What stays excluded
 -------------------
 Anything that still needs the caller to already know a pixel: raw ``click(x, y)``,
@@ -70,6 +89,19 @@ AMBIGUITY_MARGIN = 0.08
 
 _MAX_LISTED = 60
 _PUNCT = re.compile(r"[^\w\s]+")
+
+#: How long to let the UI react before re-reading it to verify a click. Long
+#: enough for a repaint or a dialog to appear, short enough that verifying the
+#: click is not the reason a voice interaction feels slow.
+_SETTLE_SECONDS = 0.25
+
+#: A second activation would UNDO the first for these, so an automatic re-click
+#: is never sent to one: a checkbox toggles back and a selection is re-issued.
+#: The caller can still click them again deliberately.
+_TOGGLE_ROLES = {
+    "checkbox", "radiobutton", "menuitem", "tabitem", "listitem", "treeitem",
+    "combobox", "slider",
+}
 
 
 def _normalize(text: Any) -> str:
@@ -240,12 +272,19 @@ def resolve(observation: Any, target: str, role: str = "") -> tuple[Any | None, 
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict[str, Any] = {"observation": None, "at": 0.0}
 
+#: The pixels-only read, cached on the same clock as the tree. ``False`` is the
+#: tombstone for "read it, there was no text", so a screen with nothing to read
+#: is not re-OCR'd on every failed resolution within the freshness window.
+_OCR_CACHE: dict[str, Any] = {"observation": None, "at": 0.0}
+
 
 def invalidate() -> None:
-    """Drop the cached observation, so the next read sees the new screen."""
+    """Drop the cached observations, so the next read sees the new screen."""
     with _CACHE_LOCK:
         _CACHE["observation"] = None
         _CACHE["at"] = 0.0
+        _OCR_CACHE["observation"] = None
+        _OCR_CACHE["at"] = 0.0
 
 
 def _max_elements(cfg: Any) -> int:
@@ -288,6 +327,152 @@ def _execute(action: str, args: dict[str, Any], observation: Any, cfg: Any) -> A
 
 
 # --------------------------------------------------------------------------
+# Resolution, with a pixels-only second opinion
+# --------------------------------------------------------------------------
+
+def _ocr_observation(cfg: Any) -> Any:
+    """A pixels-only read, for controls the accessibility tree cannot name.
+
+    Deliberately its own function: this is the only part of resolution that
+    touches OCR, so tests can stub it rather than depend on a live screen. The
+    read is cached on the tree's freshness clock, because OCR costs roughly
+    0.7s and one failing action would otherwise pay it twice.
+    """
+    try:
+        if not bool(getattr(cfg.perception, "use_ocr", True)):
+            return None
+    except Exception:
+        pass
+
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        cached = _OCR_CACHE["observation"]
+        if cached is not None and now - _OCR_CACHE["at"] <= _OBSERVATION_MAX_AGE:
+            return cached or None
+
+    try:
+        from ..perception import elements as elem_mod
+
+        observation = elem_mod.ocr_observation(max_elements=_max_elements(cfg))
+    except Exception:
+        observation = None
+
+    with _CACHE_LOCK:
+        _OCR_CACHE["observation"] = observation or False
+        _OCR_CACHE["at"] = time.monotonic()
+    return observation
+
+
+def resolve_target(
+    observation: Any, target: str, role: str = "", cfg: Any = None
+) -> tuple[Any | None, str, Any]:
+    """Resolve a spoken description, falling back to OCR on the pixels.
+
+    Returns ``(element, error, observation)``. The returned observation is the
+    one the element's id belongs to, and MUST be the one handed to the executor:
+    ids only mean anything against the read they came from, so an OCR id pointed
+    at a tree read would resolve to a different control entirely.
+    """
+    element, error = resolve(observation, target, role)
+    if element is not None:
+        return element, "", observation
+
+    ocr_obs = _ocr_observation(cfg)
+    if ocr_obs is not None:
+        element, ocr_error = resolve(ocr_obs, target, role)
+        if element is not None:
+            return element, "", ocr_obs
+        if "ambiguous" in ocr_error:
+            # The pixels agree the name is on screen but not which control owns
+            # it. That is a question to ask, which beats the tree's "nothing
+            # matches" - and it names the right candidates.
+            return None, ocr_error, observation
+        # Otherwise keep the tree's error - it carries better recovery advice -
+        # but say the pixels were checked too, so the model does not retry the
+        # same wording expecting a different answer.
+        error = (
+            f"{error} The pixels were read with OCR as well and hold no closer "
+            f"match, so this is not merely a naming difference."
+        )
+    return None, error, observation
+
+
+def _fingerprint(observation: Any) -> tuple:
+    """A cheap identity for the screen state, to diff before and after a click.
+
+    Roles and names rather than ids: ids are positions in a list and shift when
+    anything appears or disappears, so they would report a change on every read.
+    """
+    names = frozenset(
+        (str(getattr(element, "role", "")), _normalize(getattr(element, "name", "")))
+        for element in list(getattr(observation, "elements", []) or [])
+    )
+    return (str(getattr(observation, "active_window", "") or ""), names)
+
+
+def _observe_change(cfg: Any, before_window: str, before_fp: tuple) -> tuple[str, bool]:
+    """Re-read the screen after a click and describe what changed, if anything.
+
+    Returns ``(note, changed)``. An unchanged screen is reported as unchanged:
+    the runtime cannot prove a click took effect, so it must not imply it did.
+    """
+    time.sleep(_SETTLE_SECONDS)
+    after_window = _active_window()
+    if before_window and after_window and after_window != before_window:
+        return f" Active window changed: {before_window!r} -> {after_window!r}.", True
+
+    after = fresh_observation(cfg)
+    if _fingerprint(after) != before_fp:
+        return " The control list changed, so the click registered.", True
+    return (
+        " Nothing on screen has visibly changed, which is normal for a click that "
+        "focuses a field or sets a toggle - but it is not proof the click took "
+        "effect, so verify with look_at_screen before clicking again.",
+        False,
+    )
+
+
+def _click_args(element: Any, count: int) -> dict[str, Any]:
+    args: dict[str, Any] = {"element": element.id}
+    if count != 1:
+        args["count"] = count
+    return args
+
+
+def _retry_requested(args: dict[str, Any]) -> bool:
+    """Only an explicit ``retry`` enables a second click.
+
+    Default-off on purpose: the runtime cannot tell a click that did nothing from
+    one whose effect is merely not visible yet (a slow page, an async submit),
+    so re-clicking by default would risk activating a control twice.
+    """
+    value = args.get("retry")
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _reclick(cfg: Any, target: str, role: str, count: int,
+            before_window: str, before_fp: tuple) -> str:
+    """One deliberate re-click, resolved again against the new screen."""
+    again = fresh_observation(cfg)
+    element, _error, source = resolve_target(again, target, role, cfg)
+    if element is None:
+        return " It has left the screen since, so it was not clicked again."
+    result = _execute("click", _click_args(element, count), source, cfg)
+    invalidate()
+    if not getattr(result, "ok", False):
+        return f" The second click also failed: {result.message}"
+    _note, changed = _observe_change(cfg, before_window, before_fp)
+    if changed:
+        return " Clicked it a second time and the screen responded."
+    return (
+        " Clicked it a second time and the screen still has not changed, so it is "
+        "probably not the right control - ask the user rather than clicking again."
+    )
+
+
+# --------------------------------------------------------------------------
 # Handlers
 # --------------------------------------------------------------------------
 
@@ -297,7 +482,9 @@ def _h_look_at_screen(args: dict[str, Any], cfg: Any) -> dict[str, Any]:
     query = _normalize(args.get("query"))
 
     if target:
-        element, error = resolve(observation, target, str(args.get("role") or ""))
+        element, error, observation = resolve_target(
+            observation, target, str(args.get("role") or ""), cfg
+        )
         if element is None:
             return {"ok": False, "error": error, "result": ""}
         cx, cy = element.center
@@ -357,20 +544,21 @@ def _h_click_target(args: dict[str, Any], cfg: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         count = 1
 
+    role = str(args.get("role") or "")
     observation = fresh_observation(cfg)
-    element, error = resolve(observation, target, str(args.get("role") or ""))
+    element, error, source = resolve_target(observation, target, role, cfg)
     if element is None:
         return {"ok": False, "error": error, "result": ""}
 
-    before = _active_window()
-    click_args: dict[str, Any] = {"element": element.id}
-    if count != 1:
-        click_args["count"] = count
-    result = _execute("click", click_args, observation, cfg)
+    before_window = _active_window()
+    # Fingerprinted from the TREE read, never from ``source``: verification
+    # re-reads the tree, and a pixels-only read has different roles and names,
+    # so comparing the two would report a change on every single click.
+    before_fp = _fingerprint(observation)
+    result = _execute("click", _click_args(element, count), source, cfg)
 
     # The screen moved: anything resolved from here must be read again.
     invalidate()
-    after = _active_window()
 
     label = ("clicked" if count == 1 else f"clicked {count}x") + f" {_describe(element)}"
     if not getattr(result, "ok", False):
@@ -379,15 +567,29 @@ def _h_click_target(args: dict[str, Any], cfg: Any) -> dict[str, Any]:
             "error": f"{label} but the click failed: {result.message}",
             "result": "",
         }
+
     cx, cy = element.center
-    outcome = f" Active window unchanged ({after or 'unknown'})."
-    if after and before and after != before:
-        outcome = f" Active window changed: {before!r} -> {after!r}."
+    outcome, changed = _observe_change(cfg, before_window, before_fp)
+
+    if not changed and _retry_requested(args):
+        if str(getattr(element, "role", "")).lower() in _TOGGLE_ROLES:
+            outcome += (
+                " A second click was refused: this control toggles, so clicking it "
+                "again would undo the first."
+            )
+        else:
+            outcome += _reclick(cfg, target, role, count, before_window, before_fp)
+
+    invalidate()
+
+    origin = ""
+    if source is not observation:
+        origin = " (resolved from OCR text - the accessibility tree does not name it)"
     return {
         "ok": True,
         "result": (
-            f"{label} - exact centre ({cx},{cy}) from the live element list, not "
-            f"a guessed pixel.{outcome}"
+            f"{label}{origin} - exact centre ({cx},{cy}) from the live element "
+            f"list, not a guessed pixel.{outcome}"
         ),
         "error": "",
     }
@@ -524,8 +726,10 @@ DECLARATIONS: dict[str, dict[str, Any]] = {
             "(role, exact label, exact centre pixel). Only the FOREGROUND window "
             "is readable - call focus_window first if the target is in another "
             "app. Pass 'target' to check what a description would resolve to "
-            "WITHOUT clicking anything. Use this whenever you are unsure a "
-            "control is on screen, or of its exact wording."
+            "WITHOUT clicking anything; that check also reads the pixels with "
+            "OCR, so it answers for controls the accessibility tree cannot name. "
+            "Use this whenever you are unsure a control is on screen, or of its "
+            "exact wording."
         ),
         "arguments": [
             {
@@ -558,9 +762,14 @@ DECLARATIONS: dict[str, dict[str, Any]] = {
         "name": "click_target",
         "description": (
             "Click a control by name, resolved against the live element list so "
-            "the click lands on its exact centre. If the name is ambiguous or "
-            "not on screen, nothing is clicked - you get the candidates to ask "
-            "the user about. Open or focus the window first, then click."
+            "the click lands on its exact centre. If the accessibility tree "
+            "cannot name the control, the pixels are read with OCR as a second "
+            "opinion - so an icon or canvas control can still be clicked by "
+            "describing its visible text. If the name is ambiguous or not on "
+            "screen at all, nothing is clicked and you get the candidates to ask "
+            "the user about. The screen is re-read afterwards and the result "
+            "says whether anything actually changed. Open or focus the window "
+            "first, then click."
         ),
         "arguments": [
             {
@@ -581,6 +790,17 @@ DECLARATIONS: dict[str, dict[str, Any]] = {
                 "required": False,
                 "default": 1,
                 "description": "clicks to send, 2 = double-click, 3 = triple",
+            },
+            {
+                "name": "retry",
+                "type": "bool",
+                "required": False,
+                "default": False,
+                "description": (
+                    "click once more if the screen did not change. Only for a "
+                    "control that is safe to activate twice - never a toggle, a "
+                    "checkbox or a button that submits something"
+                ),
             },
         ],
     },

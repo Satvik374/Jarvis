@@ -16,17 +16,37 @@ class LocalTTSUpgradeTests(unittest.TestCase):
         voice.reset()
 
     def test_default_engine_is_kokoro(self):
-        """VoiceConfig and load_config default to local Kokoro TTS."""
+        """The built-in default is local Kokoro; a config file then the env override it.
+
+        `load_config()` reads the checkout's own `config.yaml` and `.env`, and
+        this project deliberately runs `engine: fish`, so an unqualified
+        `load_config()` can never return the built-in default. What is worth
+        pinning is the precedence order, with every ambient file pinned out.
+        """
         cfg = VoiceConfig()
         self.assertEqual(cfg.engine, "kokoro")
         self.assertEqual(cfg.local_voice, "bm_george")
         self.assertEqual(cfg.local_speed, 1.0)
 
-        with patch.dict(os.environ):
+        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ), patch(
+            "dotenv.load_dotenv"
+        ):
             for k in ("JARVIS_TTS_ENGINE", "JARVIS_LOCAL_VOICE", "JARVIS_LOCAL_SPEED"):
                 os.environ.pop(k, None)
-            loaded = load_config()
-            self.assertEqual(loaded.voice.engine, "kokoro")
+
+            # Nothing set anywhere -> the built-in default.
+            empty = Path(td) / "config.yaml"
+            empty.write_text("", encoding="utf-8")
+            self.assertEqual(load_config(empty).voice.engine, "kokoro")
+
+            # A config file outranks the built-in default...
+            fishy = Path(td) / "fish.yaml"
+            fishy.write_text("voice:\n  engine: fish\n", encoding="utf-8")
+            self.assertEqual(load_config(fishy).voice.engine, "fish")
+
+            # ...and an explicit env var outranks the config file.
+            with patch.dict(os.environ, {"JARVIS_TTS_ENGINE": "local"}):
+                self.assertEqual(load_config(fishy).voice.engine, "kokoro")
 
     def test_local_engine_alias_and_env_overrides(self):
         """'local' alias maps to 'kokoro' and environment variables are respected."""

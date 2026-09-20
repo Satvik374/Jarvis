@@ -1,0 +1,558 @@
+{
+  "generated_by": "scripts/divergence_report.py (read-only static analysis)",
+  "actions_declared": 89,
+  "handlers_found": 89,
+  "total_findings": 73,
+  "by_kind": {
+    "handler-delegation": 20,
+    "undeclared-default": 47,
+    "undeclared-coercion": 1,
+    "whole-args-delegated": 5
+  },
+  "by_action": {
+    "click": 3,
+    "double_click": 3,
+    "triple_click": 3,
+    "right_click": 3,
+    "move": 2,
+    "drag": 6,
+    "browser_action": 7,
+    "run_command": 1,
+    "python": 1,
+    "session_exec": 2,
+    "code_intel": 1,
+    "db_query": 1,
+    "git_intel": 2,
+    "self_heal": 1,
+    "daemon_rule": 4,
+    "hud_control": 1,
+    "download_file": 1,
+    "convert_file": 2,
+    "archive_intel": 1,
+    "crypto_intel": 3,
+    "diff_patch": 1,
+    "extract_web_data": 2,
+    "media_intel": 1,
+    "take_screenshot": 1,
+    "remember": 3,
+    "voice_control": 1,
+    "macro": 2,
+    "skill": 5,
+    "connector": 2,
+    "mcp": 5,
+    "secret": 2
+  },
+  "findings": [
+    {
+      "action": "click",
+      "param": "element",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "click",
+      "param": "x",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "click",
+      "param": "y",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "double_click",
+      "param": "element",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "double_click",
+      "param": "x",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "double_click",
+      "param": "y",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "triple_click",
+      "param": "element",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "triple_click",
+      "param": "x",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "triple_click",
+      "param": "y",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "right_click",
+      "param": "element",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "right_click",
+      "param": "x",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "right_click",
+      "param": "y",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "move",
+      "param": "x",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "move",
+      "param": "y",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "drag",
+      "param": "from_element",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "drag",
+      "param": "x1",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "drag",
+      "param": "y1",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "drag",
+      "param": "to_element",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "drag",
+      "param": "x2",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "drag",
+      "param": "y2",
+      "kind": "handler-delegation",
+      "detail": "not read in the handler body; the handler passes args to a helper, so it may be read there",
+      "line": null
+    },
+    {
+      "action": "browser_action",
+      "param": "url",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "browser_action",
+      "param": "target",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "browser_action",
+      "param": "text",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "browser_action",
+      "param": "value",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "browser_action",
+      "param": "key",
+      "kind": "undeclared-coercion",
+      "detail": "handler touches arg 'key' but it is not declared",
+      "line": null
+    },
+    {
+      "action": "browser_action",
+      "param": "script",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "browser_action",
+      "param": "path",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "run_command",
+      "param": "cwd",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "python",
+      "param": "cwd",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "session_exec",
+      "param": "command",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "session_exec",
+      "param": "cwd",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "code_intel",
+      "param": "query",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "db_query",
+      "param": "sql",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "git_intel",
+      "param": "target",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "git_intel",
+      "param": "message",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "self_heal",
+      "param": "target",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "daemon_rule",
+      "param": "name",
+      "kind": "undeclared-default",
+      "detail": "handler default 'Custom Rule', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "daemon_rule",
+      "param": "trigger",
+      "kind": "undeclared-default",
+      "detail": "handler default 'custom', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "daemon_rule",
+      "param": "target",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "daemon_rule",
+      "param": "rule_id",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "hud_control",
+      "param": "state",
+      "kind": "undeclared-default",
+      "detail": "handler default 'idle', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "download_file",
+      "param": "dest",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "convert_file",
+      "param": "target",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "convert_file",
+      "param": "target_format",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "archive_intel",
+      "param": "target",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "crypto_intel",
+      "param": "key",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "crypto_intel",
+      "param": "expected",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "crypto_intel",
+      "param": "salt",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "diff_patch",
+      "param": "patch_text",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "extract_web_data",
+      "param": "url",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "extract_web_data",
+      "param": "html_content",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "media_intel",
+      "param": "target",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "take_screenshot",
+      "param": "path",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "remember",
+      "param": "entity",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "remember",
+      "param": "relation",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "remember",
+      "param": "target_entity",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "voice_control",
+      "param": "value",
+      "kind": "undeclared-default",
+      "detail": "handler default '0.5', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "macro",
+      "param": "name",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "macro",
+      "param": "description",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "skill",
+      "param": "name",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "skill",
+      "param": "query",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "skill",
+      "param": "body",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "skill",
+      "param": "description",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "skill",
+      "param": "when_to_use",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "connector",
+      "param": "query",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "connector",
+      "param": "target",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "mcp",
+      "param": "op",
+      "kind": "whole-args-delegated",
+      "detail": "handler passes the whole args object to mcp.manage \u2014 the declared params are enforced there, not here",
+      "line": null
+    },
+    {
+      "action": "mcp",
+      "param": "name",
+      "kind": "whole-args-delegated",
+      "detail": "handler passes the whole args object to mcp.manage \u2014 the declared params are enforced there, not here",
+      "line": null
+    },
+    {
+      "action": "mcp",
+      "param": "command",
+      "kind": "whole-args-delegated",
+      "detail": "handler passes the whole args object to mcp.manage \u2014 the declared params are enforced there, not here",
+      "line": null
+    },
+    {
+      "action": "mcp",
+      "param": "args",
+      "kind": "whole-args-delegated",
+      "detail": "handler passes the whole args object to mcp.manage \u2014 the declared params are enforced there, not here",
+      "line": null
+    },
+    {
+      "action": "mcp",
+      "param": "env",
+      "kind": "whole-args-delegated",
+      "detail": "handler passes the whole args object to mcp.manage \u2014 the declared params are enforced there, not here",
+      "line": null
+    },
+    {
+      "action": "secret",
+      "param": "key",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    },
+    {
+      "action": "secret",
+      "param": "value",
+      "kind": "undeclared-default",
+      "detail": "handler default '', declaration leaves default unset",
+      "line": null
+    }
+  ]
+}

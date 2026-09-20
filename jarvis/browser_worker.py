@@ -663,6 +663,23 @@ def install_event_bridge() -> None:
 
     console._command = _browser_command
 
+    # The agent can end its own session. The REPL notices that request on its
+    # next turn, but in browser mode that turn may be a long way off: the REPL
+    # is parked on a blocking read of its input pipe, which only the parent can
+    # write to. Say it out loud instead of waiting, and let the parent close the
+    # child down over stdin - the same path the page's END SESSION button takes.
+    from jarvis.session_control import add_session_stop_listener
+
+    def _announce_session_stop(record: dict[str, Any]) -> None:
+        emit(
+            "session_stop",
+            reason=str(record.get("reason", "")),
+            source=str(record.get("source", "")),
+        )
+        emit("state", state="offline", label="Session stopped by Jarvis")
+
+    add_session_stop_listener(_announce_session_stop)
+
     import signal
 
     def _handle_interrupt_signal(signum: int, frame: Any) -> None:

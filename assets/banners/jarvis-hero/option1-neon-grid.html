@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Jarvis banner — Option 1 · Neon Grid</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:1920px;height:600px;overflow:hidden}
+  body{
+    position:relative;
+    font-family:"Segoe UI",-apple-system,Roboto,Helvetica,Arial,sans-serif;
+    background:#050208;
+    color:#e8f6ff;
+  }
+
+  /* ---------- background ---------- */
+  .sky{
+    position:absolute;inset:0;
+    background:linear-gradient(180deg,#050208 0%,#0b0320 42%,#1a0b3a 58%,#050208 62%,#050208 100%);
+  }
+  .glow-core{
+    position:absolute;left:50%;top:46%;width:1600px;height:700px;transform:translate(-50%,-50%);
+    background:radial-gradient(ellipse at center,rgba(0,229,255,.16) 0%,rgba(255,45,149,.10) 38%,transparent 68%);
+  }
+  .stars{position:absolute;inset:0;opacity:.7}
+  .star{position:absolute;background:#cfefff;border-radius:50%;opacity:.8}
+
+  /* horizon line */
+  .horizon{
+    position:absolute;left:0;right:0;top:62%;height:2px;
+    background:linear-gradient(90deg,transparent 0%,rgba(255,45,149,.85) 18%,rgba(0,229,255,.9) 50%,rgba(255,45,149,.85) 82%,transparent 100%);
+    box-shadow:0 0 22px rgba(0,229,255,.55),0 0 60px rgba(255,45,149,.35);
+  }
+
+  /* perspective floor grid */
+  .floor{
+    position:absolute;left:-25%;right:-25%;top:62%;bottom:-2px;overflow:hidden;
+    perspective:340px;
+  }
+  .grid{
+    position:absolute;inset:-100% -60% -8px -60%;
+    background-image:
+      linear-gradient(rgba(0,229,255,.55) 2px,transparent 2px),
+      linear-gradient(90deg,rgba(255,45,149,.5) 2px,transparent 2px);
+    background-size:110px 92px;
+    transform:rotateX(62deg);
+    transform-origin:50% 0%;
+    -webkit-mask-image:linear-gradient(180deg,rgba(0,0,0,0) 0%,rgba(0,0,0,.9) 26%,#000 60%);
+            mask-image:linear-gradient(180deg,rgba(0,0,0,0) 0%,rgba(0,0,0,.9) 26%,#000 60%);
+    animation:gridflow 7s linear infinite;
+  }
+  @keyframes gridflow{from{background-position:0 0}to{background-position:0 92px}}
+  @media (prefers-reduced-motion:reduce){.grid{animation:none}}
+
+  /* ---------- content ---------- */
+  .content{
+    position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;text-align:center;
+    padding:0 260px;
+  }
+  .overline{
+    font-size:20px;letter-spacing:.55em;text-indent:.55em;color:#7de9ff;
+    text-transform:uppercase;margin-bottom:18px;opacity:.92;
+    text-shadow:0 0 14px rgba(0,229,255,.6);
+  }
+  h1{
+    font-family:Consolas,"Cascadia Code",ui-monospace,monospace;
+    font-size:172px;line-height:.95;font-weight:700;letter-spacing:.06em;
+    color:#eafcff;
+    text-shadow:
+      0 0 8px rgba(125,233,255,.9),
+      0 0 28px rgba(0,229,255,.55),
+      0 0 70px rgba(0,229,255,.35),
+      0 0 120px rgba(255,45,149,.28);
+  }
+  h1 .cursor{
+    display:inline-block;width:14px;height:132px;margin-left:18px;
+    background:#ff2d95;vertical-align:baseline;transform:translateY(8px);
+    box-shadow:0 0 16px rgba(255,45,149,.9),0 0 40px rgba(255,45,149,.5);
+    animation:blink 1.05s steps(1) infinite;
+  }
+  @keyframes blink{50%{opacity:0}}
+  @media (prefers-reduced-motion:reduce){h1 .cursor{animation:none}}
+  .tagline{
+    margin-top:26px;font-size:34px;font-weight:300;letter-spacing:.12em;
+    color:#bfeaff;text-shadow:0 0 12px rgba(0,229,255,.4);
+  }
+  .tagline b{color:#fff;font-weight:600}
+  .statusline{
+    margin-top:30px;display:flex;gap:14px;align-items:center;
+    font-family:Consolas,ui-monospace,monospace;font-size:17px;color:#69d2ff;
+    letter-spacing:.08em;
+  }
+  .dot{
+    width:10px;height:10px;border-radius:50%;background:#39ff9c;
+    box-shadow:0 0 10px rgba(57,255,156,.95),0 0 26px rgba(57,255,156,.5);
+  }
+  .statusline .sep{color:#3a5f78}
+</style>
+</head>
+<body>
+  <div class="sky"></div>
+  <div class="glow-core"></div>
+  <div class="stars">
+    <span class="star" style="left:6%;top:18%;width:2px;height:2px"></span>
+    <span class="star" style="left:14%;top:34%;width:1px;height:1px"></span>
+    <span class="star" style="left:22%;top:12%;width:2px;height:2px"></span>
+    <span class="star" style="left:31%;top:28%;width:1px;height:1px"></span>
+    <span class="star" style="left:41%;top:9%;width:2px;height:2px"></span>
+    <span class="star" style="left:52%;top:20%;width:1px;height:1px"></span>
+    <span class="star" style="left:63%;top:11%;width:2px;height:2px"></span>
+    <span class="star" style="left:72%;top:31%;width:1px;height:1px"></span>
+    <span class="star" style="left:81%;top:16%;width:2px;height:2px"></span>
+    <span class="star" style="left:90%;top:26%;width:1px;height:1px"></span>
+    <span class="star" style="left:94%;top:38%;width:2px;height:2px"></span>
+    <span class="star" style="left:9%;top:44%;width:1px;height:1px"></span>
+  </div>
+  <div class="horizon"></div>
+  <div class="floor"><div class="grid"></div></div>
+
+  <div class="content">
+    <div class="overline">local &middot; agentic &middot; desktop</div>
+    <h1>JARVIS<span class="cursor"></span></h1>
+    <div class="tagline">A local, agentic <b>desktop assistant</b></div>
+    <div class="statusline">
+      <span class="dot"></span><span>offline</span><span class="sep">//</span>
+      <span>listens &amp; acts</span><span class="sep">//</span><span>runs on your machine</span>
+    </div>
+  </div>
+</body>
+</html>

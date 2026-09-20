@@ -18,7 +18,7 @@
     "action_type": "notify",
     "action_target": "High system memory usage detected. Consider closing unused applications.",
     "cooldown_seconds": 900.0,
-    "last_triggered": 1789815117.6196227,
+    "last_triggered": 1789906324.8195865,
     "enabled": true
   },
   {
@@ -29,7 +29,7 @@
     "action_type": "notify",
     "action_target": "Good morning, sir. System status is nominal. Ready for your daily agenda.",
     "cooldown_seconds": 43200.0,
-    "last_triggered": 1789799671.1223311,
+    "last_triggered": 1789899077.038612,
     "enabled": true
   }
 ]

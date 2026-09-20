@@ -12,6 +12,7 @@ confident click on the wrong control.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -52,8 +53,16 @@ def make_observation(*elements: Element, active_window: str = "Notepad") -> Obse
 
 @pytest.fixture(autouse=True)
 def _clean_cache():
+    """No test may depend on OCR reading a live screen.
+
+    The pixels-only fallback is stubbed off by default, so a test never waits
+    ~0.7s for a real OCR read of whatever happens to be on the developer's
+    desktop. The tests that exercise the fallback patch it in explicitly, which
+    also makes them deterministic.
+    """
     screen_tools.invalidate()
-    yield
+    with patch.object(screen_tools, "_ocr_observation", return_value=None):
+        yield
     screen_tools.invalidate()
 
 
@@ -66,17 +75,37 @@ def cfg():
 
 
 def run_tool(name: str, args: dict | None = None, obs: Observation | None = None,
-             cfg: MagicMock | None = None) -> dict:
-    """Run a screen tool against a fixed observation, capturing dispatches."""
+             cfg: MagicMock | None = None, ocr_obs: Observation | None = None,
+             fresh: list[Observation] | None = None) -> dict:
+    """Run a screen tool against fixed observations, capturing dispatches.
+
+    ``fresh`` supplies one observation per read, for the tests that check what a
+    click did to the screen afterwards; left unset, every read returns ``obs``.
+    ``ocr_obs`` supplies the pixels-only fallback read.
+    """
     if obs is None:
         obs = make_observation()
     if cfg is None:
         cfg = MagicMock()
-    with patch.object(screen_tools, "fresh_observation", return_value=obs), \
-            patch.object(screen_tools, "_active_window", return_value="Notepad"), \
-            patch("jarvis.tools.registry.execute") as execute:
+
+    stack = ExitStack()
+    if fresh is None:
+        stack.enter_context(patch.object(screen_tools, "fresh_observation",
+                                         return_value=obs))
+    else:
+        stack.enter_context(patch.object(screen_tools, "fresh_observation",
+                                         side_effect=fresh))
+    stack.enter_context(patch.object(screen_tools, "_active_window",
+                                     return_value="Notepad"))
+    execute = stack.enter_context(patch("jarvis.tools.registry.execute"))
+    if ocr_obs is not None:
+        stack.enter_context(patch.object(screen_tools, "_ocr_observation",
+                                         return_value=ocr_obs))
+    try:
         execute.return_value = MagicMock(ok=True, message="did it")
         result = screen_tools.run(name, args, cfg)
+    finally:
+        stack.close()
     result["_dispatches"] = execute.call_args_list
     return result
 
@@ -746,3 +775,189 @@ def test_a_partial_name_that_does_cover_the_label_still_resolves():
         assert screen_tools.score_element(element, target) >= screen_tools.MIN_CONFIDENCE, name
         match, _ = screen_tools.resolve(make_observation(element), target)
         assert match is element, name
+
+
+# -------------------------------------------------------------------------- #
+# the pixels-only fallback: controls the accessibility tree cannot name
+# -------------------------------------------------------------------------- #
+
+def test_click_falls_back_to_ocr_when_the_tree_cannot_name_the_control():
+    """An icon or canvas control has no accessible name, so only its pixels help.
+
+    The tree answers with real controls and simply has no name for the one being
+    asked for. OCR of the pixels is the second opinion that closes the gap, and
+    the click still lands on a resolved box's exact centre.
+    """
+    tree = make_observation(make_element(1, "Custom", ""))
+    pixels = make_observation(make_element(0, "Text", "Save",
+                                           bbox=(100, 40, 180, 70)))
+
+    result = run_tool("click_target", {"target": "Save"}, obs=tree, ocr_obs=pixels)
+
+    assert result["ok"] is True
+    assert dispatched(result) == [("click", {"element": 0})]
+    assert "(140,55)" in result["result"]        # the OCR box's true midpoint
+    assert "OCR" in result["result"]
+
+
+def test_the_element_id_is_dispatched_with_the_read_it_came_from():
+    """Ids only mean anything against their own element list.
+
+    An OCR id handed to a tree read would resolve to a different control, so the
+    fallback must dispatch the observation the id actually belongs to.
+    """
+    tree = make_observation(make_element(5, "Button", "Cancel"))
+    pixels = make_observation(make_element(0, "Text", "Publish"))
+
+    with patch.object(screen_tools, "fresh_observation", return_value=tree), \
+            patch.object(screen_tools, "_active_window", return_value="Editor"), \
+            patch.object(screen_tools, "_ocr_observation", return_value=pixels), \
+            patch("jarvis.tools.registry.execute") as execute:
+        execute.return_value = MagicMock(ok=True, message="clicked")
+        result = screen_tools.run("click_target", {"target": "Publish"}, MagicMock())
+
+    assert result["ok"] is True
+    action, args, observation, _cfg = execute.call_args_list[0].args
+    assert args == {"element": 0}
+    assert observation is pixels
+
+
+def test_ocr_is_not_read_when_the_tree_already_answers():
+    """The fallback is a fallback: a named control never pays the OCR cost."""
+    button = make_element(1, "Button", "Save")
+    with patch.object(screen_tools, "fresh_observation",
+                      return_value=make_observation(button)), \
+            patch.object(screen_tools, "_active_window", return_value="Notepad"), \
+            patch.object(screen_tools, "_ocr_observation") as ocr_read, \
+            patch("jarvis.tools.registry.execute") as execute:
+        execute.return_value = MagicMock(ok=True, message="clicked")
+        result = screen_tools.run("click_target", {"target": "Save"}, MagicMock())
+
+    assert result["ok"] is True
+    ocr_read.assert_not_called()
+
+
+def test_a_failed_fallback_keeps_the_accessibility_error():
+    """A useful message beats an empty one, so the tree's advice is preserved.
+
+    The model needs to know the pixels were checked too - otherwise it retries
+    the same wording expecting a different answer.
+    """
+    tree = make_observation(make_element(1, "Button", "Cancel"))
+    pixels = make_observation(make_element(0, "Text", "Something else"))
+
+    result = run_tool("click_target", {"target": "Publish"}, obs=tree, ocr_obs=pixels)
+
+    assert result["ok"] is False
+    assert dispatched(result) == []
+    assert "nothing on screen matches" in result["error"]
+    assert "Cancel" in result["error"]             # the tree's own candidates
+    assert "focus_window" in result["error"]       # and its recovery advice
+    assert "OCR" in result["error"]                # plus that the pixels were read
+
+
+def test_an_ambiguous_ocr_match_still_clicks_nothing():
+    """The refusal rule is what makes the fallback safe, not a weaker one."""
+    tree = make_observation(make_element(1, "Custom", ""))
+    pixels = make_observation(
+        make_element(0, "Text", "Save", bbox=(0, 0, 40, 20)),
+        make_element(1, "Text", "Save", bbox=(0, 40, 40, 60)),
+    )
+    result = run_tool("click_target", {"target": "Save"}, obs=tree, ocr_obs=pixels)
+    assert result["ok"] is False
+    assert dispatched(result) == []
+    assert "ambiguous" in result["error"]
+
+
+def test_look_at_screen_dry_run_also_reads_the_pixels():
+    tree = make_observation(make_element(1, "Button", "Cancel"))
+    pixels = make_observation(make_element(0, "Text", "Save", bbox=(0, 0, 40, 20)))
+    result = run_tool("look_at_screen", {"target": "Save"},
+                      obs=tree, ocr_obs=pixels)
+    assert result["ok"] is True
+    assert dispatched(result) == []
+    assert "(20,10)" in result["result"]
+
+
+def test_type_into_stays_on_the_accessibility_tree():
+    """A mis-focused type is worse than a refusal: an OCR text box is not a field."""
+    tree = make_observation(make_element(1, "Button", "Cancel"))
+    pixels = make_observation(make_element(0, "Text", "Search"))
+    result = run_tool("type_into", {"target": "Search", "text": "hi"},
+                      obs=tree, ocr_obs=pixels)
+    assert result["ok"] is False
+    assert dispatched(result) == []
+    assert "nothing on screen matches" in result["error"]
+
+
+# -------------------------------------------------------------------------- #
+# verification: a return value is not evidence
+# -------------------------------------------------------------------------- #
+
+def test_a_click_that_changes_the_control_list_is_reported_as_registered():
+    before = make_observation(make_element(1, "Button", "Open"))
+    after = make_observation(make_element(1, "Button", "Open"),
+                             make_element(2, "Button", "Apply"))
+    result = run_tool("click_target", {"target": "Open"},
+                      obs=before, fresh=[before, after])
+    assert result["ok"] is True
+    assert "registered" in result["result"]
+
+
+def test_a_click_that_changes_nothing_is_never_reported_as_proof():
+    """The screen is re-read, and silence is reported as silence."""
+    before = make_observation(make_element(1, "Button", "Open"))
+    result = run_tool("click_target", {"target": "Open"},
+                      obs=before, fresh=[before, before])
+    assert result["ok"] is True
+    assert "Nothing on screen has visibly changed" in result["result"]
+    assert "look_at_screen" in result["result"]
+
+
+def test_retry_reclicks_once_when_nothing_changed():
+    before = make_observation(make_element(1, "Button", "Open"))
+    result = run_tool("click_target", {"target": "Open", "retry": True},
+                      obs=before, fresh=[before] * 4)
+    assert result["ok"] is True
+    assert [call[0] for call in dispatched(result)] == ["click", "click"]
+    assert "second time" in result["result"]
+
+
+def test_a_retry_that_leaves_the_screen_unchanged_says_so():
+    before = make_observation(make_element(1, "Button", "Open"))
+    result = run_tool("click_target", {"target": "Open", "retry": True},
+                      obs=before, fresh=[before] * 4)
+    assert "ask the user" in result["result"]
+
+
+def test_retry_is_refused_for_a_control_that_toggles():
+    """A second activation would undo the first, so the runtime refuses it."""
+    before = make_observation(make_element(1, "CheckBox", "Enable sync"))
+    result = run_tool("click_target", {"target": "Enable sync", "retry": True},
+                      obs=before, fresh=[before, before])
+    assert dispatched(result) == [("click", {"element": 1})]
+    assert "would undo the first" in result["result"]
+
+
+def test_retry_is_off_unless_the_caller_asks_for_it():
+    """Default-off: the runtime cannot tell a no-op click from a slow one."""
+    before = make_observation(make_element(1, "Button", "Open"))
+    result = run_tool("click_target", {"target": "Open"},
+                      obs=before, fresh=[before, before])
+    assert [call[0] for call in dispatched(result)] == ["click"]
+
+
+def test_a_click_that_changed_the_window_is_verified_without_a_relabel():
+    """A window change is proof enough: the tree need not be re-read to say so."""
+    button = make_element(1, "Button", "Open Settings")
+    obs = make_observation(button, active_window="Desktop")
+    with patch.object(screen_tools, "fresh_observation", return_value=obs) as fresh, \
+            patch.object(screen_tools, "_active_window",
+                         side_effect=["Desktop", "Settings"]), \
+            patch("jarvis.tools.registry.execute") as execute:
+        execute.return_value = MagicMock(ok=True, message="clicked")
+        result = screen_tools.run("click_target", {"target": "Open Settings"},
+                                  MagicMock())
+    assert result["ok"] is True
+    assert "changed" in result["result"] and "Settings" in result["result"]
+    assert fresh.call_count == 1      # only the initial read, not a verification read

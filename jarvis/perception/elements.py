@@ -14,7 +14,8 @@ technique and it works with 1.5-3B text models.
 
 Two detectors, tried in order:
   * Windows UI Automation (``uiautomation``): rich, exact, no GPU. Primary.
-  * OCR (``easyocr``): optional fallback for canvases/games with no a11y tree.
+  * OCR (Windows OCR first, then rapidocr/easyocr): optional fallback for
+    controls with no accessible name - canvases, games, icon buttons.
 
 Everything degrades gracefully: if neither is available you still get an empty
 element list and the loop can fall back to raw-coordinate actions.
@@ -292,22 +293,22 @@ def _detect_uia(max_elements: int, size: tuple[int, int],
 
 
 def _detect_ocr(max_elements: int) -> list[Element]:
-    """OCR fallback: every recognised text box becomes a clickable element."""
-    import easyocr  # type: ignore
+    """OCR fallback: every recognised text box becomes a clickable element.
+
+    The engine lives in :mod:`jarvis.perception.ocr`, which probes a chain of
+    backends - Windows OCR first, since it needs no model files and runs in
+    ~0.7s. This used to depend on easyocr alone; easyocr pulls torch, is often
+    absent, and so made the whole fallback silently do nothing.
+    """
+    from . import ocr as ocr_mod
     from .screen import capture
 
     shot = capture()
-    reader = _ocr_reader()
-    import numpy as np  # type: ignore
-
-    results = reader.readtext(np.array(shot.image))
     elements: list[Element] = []
-    for i, (box, text, conf) in enumerate(results[:max_elements]):
-        if conf < 0.4 or not text.strip():
+    for box, text, confidence in ocr_mod.read_boxes(shot.image)[:max_elements]:
+        if confidence < 0.4 or not text.strip():
             continue
-        xs = [int(p[0]) for p in box]
-        ys = [int(p[1]) for p in box]
-        left, top, right, bottom = min(xs), min(ys), max(xs), max(ys)
+        left, top, right, bottom = box
         elements.append(Element(
             id=len(elements), role="Text", name=text.strip(),
             bbox=(left, top, right, bottom),
@@ -316,13 +317,28 @@ def _detect_ocr(max_elements: int) -> list[Element]:
     return elements
 
 
-_OCR_SINGLETON = None
+def ocr_observation(max_elements: int = 60, use_ocr: bool = True) -> "Observation | None":
+    """Read the desktop with OCR alone, for controls the tree cannot name.
 
+    :func:`observe` only reaches OCR when UI Automation returns *nothing*. A
+    control with no accessible name is a different failure: the tree answers,
+    it simply cannot name the control that was asked for. This gives the
+    resolution path a second, pixels-only read to fall back on. Returns
+    ``None`` when OCR is unavailable or reads no text, so a caller keeps its
+    original error rather than trading a clear message for an empty one.
+    """
+    if not use_ocr:
+        return None
+    try:
+        from .screen import screen_size
 
-def _ocr_reader():
-    global _OCR_SINGLETON
-    if _OCR_SINGLETON is None:
-        import easyocr  # type: ignore
-
-        _OCR_SINGLETON = easyocr.Reader(["en"], gpu=False)
-    return _OCR_SINGLETON
+        elements = _detect_ocr(max_elements)
+    except Exception:
+        return None
+    if not elements:
+        return None
+    return Observation(
+        elements=elements,
+        screen_size=screen_size(),
+        active_window=_active_window_title(),
+    )

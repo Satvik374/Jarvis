@@ -104,6 +104,17 @@ class _ScreenshotArchiver:
 _SCREENSHOT_ARCHIVER = _ScreenshotArchiver()
 
 
+def _asked_to_stop(result: Any) -> bool:
+    """Whether a step result explicitly asked for this session to end.
+
+    ``is True`` rather than a truthiness test, deliberately: ending the session
+    is the one decision that must never be taken by accident, and a duck-typed
+    result - a test double, a wrapper, anything whose attribute is merely
+    truthy - is not the declared signal. Only the real boolean counts.
+    """
+    return getattr(result, "stop_session", False) is True
+
+
 def _find_image(task: str):
     """Return a PIL image for the first existing image-file path in the prompt.
 
@@ -604,6 +615,19 @@ class Agent:
                         plan_succeeded = True
                         rewardable = verdict is True
                         _notify("finish", result=final_message, success=True, step=step_i)
+                        break
+
+                    if _asked_to_stop(result):
+                        # The agent asked for the session itself to end. There
+                        # is nothing to verify and no next plan worth trying:
+                        # the decision to stop is the outcome. The runtime that
+                        # owns the session closes it once control returns to it.
+                        final_message = result.message
+                        traj.outcome = "session_stop"
+                        traj.summary = final_message
+                        abort_run = True
+                        _notify("session_stop", reason=final_message, step=step_i)
+                        log.warn(f"session stop requested at step {step_i}: {final_message}")
                         break
 
                     if result.needs_observe:

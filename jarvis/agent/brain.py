@@ -29,6 +29,7 @@ import urllib.request
 from typing import Any
 
 from ..config import BrainConfig
+from ..utils.adc import adc_path as find_adc_path
 
 
 class BrainError(RuntimeError):
@@ -1140,15 +1141,17 @@ class GeminiVertexBrain(Brain):
         self.project_id = None
         self._token_expiry = 0
 
-        # Fast-path: Directly parse and refresh from standard ADC JSON
-        # (Avoids slow gcloud CLI subshell spawning in google.auth on Windows)
-        adc_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
-        if not adc_path:
-            adc_path = os.path.expandvars(r'%APPDATA%\gcloud\application_default_credentials.json')
+        # Fast-path: read and refresh the standard ADC JSON directly, so a token
+        # costs neither a google-auth import nor a gcloud CLI subshell. The
+        # search is shared with the live-voice readiness report (see
+        # jarvis.utils.adc): it used to be hard-coded to %APPDATA%, which meant
+        # this fast path was dead on Linux and macOS while the report promised
+        # credentials it could not read.
+        adc_file = find_adc_path()
 
-        if os.path.exists(adc_path):
+        if adc_file is not None and adc_file.is_file():
             try:
-                with open(adc_path, 'r', encoding='utf-8') as f:
+                with open(adc_file, 'r', encoding='utf-8') as f:
                     creds = json.load(f)
 
                 cred_type = creds.get('type')
@@ -1299,9 +1302,13 @@ class GeminiVertexBrain(Brain):
         # JSON envelope consumed by the rest of Jarvis.
         action_declarations: list[dict] = []
         if "Available actions:" in (system or ""):
-            from ..tools.schema import to_json_schema
+            # Gemini's functionDeclarations accept only an OpenAPI subset:
+            # minimum/maximum would be rejected with 400 INVALID_ARGUMENT for
+            # every action at once, so this transport gets the sanitized view
+            # (bounds folded into description text instead).
+            from ..tools.schema import gemini_safe_json_schema
 
-            schemas = to_json_schema()
+            schemas = gemini_safe_json_schema()
             mentioned = {
                 schema["name"] for schema in schemas
                 if f"\n  {schema['name']}(" in f"\n{system}"

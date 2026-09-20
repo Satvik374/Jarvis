@@ -24,7 +24,11 @@ brain:
 
 perception:
   use_uia: true
-  use_ocr: false
+  # OCR reaches controls the accessibility tree cannot name - icon buttons,
+  # canvases, game surfaces. Windows' own OCR engine is tried first, so this no
+  # longer pulls torch, and it also backs the voice agent's click_target
+  # fallback when UI Automation has no name for the control being asked for.
+  use_ocr: true
   max_elements: 60
   save_screenshots: true
 
@@ -54,14 +58,17 @@ voice:
 
 # Voice is opt-in. Use --voice, JARVIS_VOICE=1, or :voice on.
 
-# Real-Time Gemini Live Voice Model (full-duplex bidirectional streaming
-# via Gemini API key / Google Generative Language Live WebSocket). This is the
-# live voice engine: the browser streams the microphone to Gemini and plays the
-# reply, through a loopback relay that holds the API key (see the README).
+# Real-Time Live Voice. Two engines share these settings:
+#   fish   - Fish Audio Agents (https://fish.audio/app/agents). This is the
+#            selected engine: the browser opens the hosted agent session, which
+#            drives Jarvis through client tools, and Fish runs ASR/turn-taking/TTS.
+#   gemini - Gemini Live (full-duplex bidi streaming through the loopback relay
+#            that holds the API key; see the README).
+# `python run.py --check` reports which path is actually usable.
 live_voice:
   enabled: false
-  # gemini (default) | fish | relay | auto
-  provider: gemini
+  # fish | gemini | relay | auto
+  provider: fish
   # Must name a *live* model. gemini-3.8-live is the model the Google AI Studio
   # template uses; if the configured key cannot open it, the relay walks the
   # known-working fallbacks in jarvis/live/gemini_live.py rather than failing.
@@ -93,10 +100,12 @@ live_voice:
   # Read from JARVIS_LIVE_API_KEY, GEMINI_API_KEY, or Windows Credential Vault.
   # Keep credentials out of this shared project file.
   api_key: ""
-  # Fish Audio Agents (https://fish.audio/app/agents) is the alternative engine:
-  # set provider: fish to run the hosted agent instead of Gemini. Auth uses
-  # FISH_AUDIO_API_KEY. JARVIS_FISH_AGENT_ID overrides this without editing here.
-  fish_agent_id: "2548d6d42e55487c95d13d432d195d97"
+  # Fish Audio Agents (https://fish.audio/app/agents) runs the selected engine.
+  # Auth uses FISH_AUDIO_API_KEY. JARVIS_FISH_AGENT_ID overrides this without
+  # editing here. The agent's client tools (Jarvis actions) are attached on the
+  # Fish side; re-attach and publish after changing this id with
+  # `python -m jarvis.live.fish_agents`.
+  fish_agent_id: "923ac033732c45d784aa020f1e06270b"
   # The hosted agent's own LLM. It runs the conversation and decides when to
   # call a tool, so this decides whether "open Spotify" actually happens or is
   # merely narrated. Blank = leave the agent's own setting alone. Other options:

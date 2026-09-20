@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable
 
 import websockets
@@ -215,14 +216,21 @@ class GeminiLiveClient:
         if self._cached_token and now < self._token_expiry and self._project_id:
             return self._cached_token, self._project_id
 
-        # Fast path: check local ADC file
-        adc_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        if not adc_path:
-            adc_path = os.path.expandvars(r"%APPDATA%\gcloud\application_default_credentials.json")
+        # Fast path: read the Application Default Credentials file directly, so
+        # a refresh costs no google-auth import. The search is shared with
+        # readiness.adc_path() instead of being hard-coded to Windows: that
+        # report can announce "Vertex ready" because it found
+        # ~/.config/gcloud/... on Linux or macOS, while this client only ever
+        # looked under %APPDATA% - so the two disagreed on exactly the machines
+        # where it mattered, and the fast path was dead on every non-Windows box.
+        from . import readiness
 
-        if os.path.exists(adc_path):
+        explicit = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+        adc_file = Path(explicit) if explicit else readiness.adc_path()
+
+        if adc_file is not None and adc_file.is_file():
             try:
-                with open(adc_path, "r", encoding="utf-8") as f:
+                with open(adc_file, "r", encoding="utf-8") as f:
                     creds = json.load(f)
 
                 cred_type = creds.get("type")
@@ -549,6 +557,12 @@ class GeminiLiveClient:
                     )
                     for task in pending:
                         task.cancel()
+                    # Cancellation is a request, not an event: without awaiting
+                    # them the sender can still be mid-send against the socket
+                    # this `async with` is about to close, and the loop reports
+                    # "Task was destroyed but it is pending".
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
 
                     for task in done:
                         exc = task.exception()

@@ -24,6 +24,7 @@ from .utils import voice
 from .utils.logging import _c, _c256, _ARC, _COLORS
 from .agent.loop import Agent, _IMG_EXTS
 from . import scheduler
+from .session_control import session_stop_reason, session_stop_requested
 
 
 BANNER = r"""
@@ -125,6 +126,20 @@ def _clipboard_to_path() -> str | None:
     return str(path)
 
 
+def _announce_session_stop() -> None:
+    """Report the agent's own reason for ending the session, once, on the way out.
+
+    A stop the agent chose is not the same event as a user quitting, and it must
+    not scroll past unread: this is the only place its closing note is shown.
+    """
+    reason = (session_stop_reason() or "").strip()
+    log.rule("session stopped by jarvis", "cyan")
+    if reason:
+        print(f"  {_c(reason, 'yellow')}")
+    print(f"  {_c('Jarvis ended its own session. Start it again when you need it.', 'grey')}")
+    log.rule()
+
+
 def _read_input(prompt: str) -> str:
     """Read one prompt. On Windows this is a character-level reader: typing
     '/' pops up a live-filtered command menu (like Claude Code), and a
@@ -138,6 +153,13 @@ def _read_input(prompt: str) -> str:
 
     def _responsive_getwch() -> str:
         while not msvcrt.kbhit():
+            # The agent can ask for its own session to end while this prompt is
+            # parked, and the REPL is only ever going to come back here through
+            # a keypress. Treat that request as the input stream closing, so the
+            # existing EOF path below runs instead of the session sitting at a
+            # prompt it has already decided to leave.
+            if session_stop_requested():
+                raise EOFError
             time.sleep(0.02)
         return msvcrt.getwch()
 
@@ -888,6 +910,14 @@ def repl(cfg: Config | None = None) -> int:
 
         last_ctrl_c_time = 0.0
         while True:
+            # The agent stopped its own session mid-task: the run has already
+            # ended, so close the REPL rather than accept another directive.
+            # Browser mode settles this the same way - the worker tells the
+            # parent, which returns a ':quit' over stdin.
+            if session_stop_requested():
+                _announce_session_stop()
+                break
+
             is_busy = (
                 active_worker_thread is not None
                 and active_worker_thread.is_alive()

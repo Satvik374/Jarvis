@@ -125,6 +125,29 @@ class ReadinessTestCase(unittest.TestCase):
         self.assertTrue(paths["gemini_vertex"].ready)
         self.assertIn(str(adc), paths["gemini_vertex"].detail)
 
+    def test_a_gcloud_backend_names_the_billed_path_it_will_use(self):
+        """`backend: gcloud` means the quotas-billed Vertex path is in use.
+
+        The value used to be read and then dropped, so the report announced
+        "Vertex ready" and left an expected 429 unexplained.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            adc = Path(tmp) / "application_default_credentials.json"
+            adc.write_text("{}", encoding="utf-8")
+            paths = _paths(config=self._config(backend="gcloud"), adc_candidates=[adc])
+
+        self.assertTrue(paths["gemini_vertex"].ready)
+        self.assertIn("gcloud", paths["gemini_vertex"].detail)
+        self.assertIn("Vertex", paths["gemini_vertex"].detail)
+
+    def test_an_api_key_backend_does_not_claim_the_billed_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adc = Path(tmp) / "application_default_credentials.json"
+            adc.write_text("{}", encoding="utf-8")
+            paths = _paths(config=self._config(backend="api_key"), adc_candidates=[adc])
+
+        self.assertNotIn("quotas-billed", paths["gemini_vertex"].detail)
+
     def test_missing_vertex_credentials_name_the_exact_command(self):
         absent = [Path("definitely-not-here") / "adc.json"]
         paths = _paths(config=self._config(), adc_candidates=absent)

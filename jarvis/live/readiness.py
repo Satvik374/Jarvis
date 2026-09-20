@@ -17,14 +17,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from ..utils.adc import ADC_RELATIVE_PATHS as adc_relative_paths
+from ..utils.adc import adc_path as find_adc_path
 
-#: Where `gcloud auth application-default login` writes its credentials. The
-#: Windows location is checked because that is where Jarvis usually runs; a
-#: Linux/macOS checkout uses the first entry.
-ADC_RELATIVE_PATHS = (
-    Path(".config") / "gcloud" / "application_default_credentials.json",
-    Path("gcloud") / "application_default_credentials.json",
-)
+
+#: Kept as a re-export: the search itself now lives in `jarvis.utils.adc`, so
+#: this report and the agent's Vertex brain cannot disagree about where the
+#: credentials are.
+ADC_RELATIVE_PATHS = adc_relative_paths
 
 #: Env vars `config.py` accepts for the Gemini Live API key, in its order.
 LIVE_KEY_ENV_VARS = (
@@ -130,27 +130,13 @@ def adc_path(
     env: Mapping[str, str] | None = None,
     candidates: Iterable[Path] | None = None,
 ) -> Path | None:
-    """The Application Default Credentials file that exists, if any."""
-    env = os.environ if env is None else env
-    if candidates is None:
-        found: list[Path] = []
-        explicit = _env_value(env, "GOOGLE_APPLICATION_CREDENTIALS")
-        if explicit:
-            found.append(Path(explicit))
-        home = Path.home()
-        appdata = _env_value(env, "APPDATA")
-        for relative in ADC_RELATIVE_PATHS:
-            found.append(home / relative)
-            if appdata:
-                found.append(Path(appdata) / relative)
-        candidates = found
-    for candidate in candidates:
-        try:
-            if candidate.is_file():
-                return Path(candidate)
-        except OSError:
-            continue
-    return None
+    """The Application Default Credentials file that exists, if any.
+
+    Delegates to :func:`jarvis.utils.adc.adc_path`, which the agent's Vertex
+    brain shares - each used to search its own platform paths, so the report
+    could promise credentials the brain could not read.
+    """
+    return find_adc_path(env, candidates)
 
 
 def describe(
@@ -269,12 +255,21 @@ def describe(
     adc = adc_path(env, adc_candidates)
     backend = str(getattr(live, "backend", "") or "").strip().lower()
     if adc is not None:
+        detail = f"application default credentials found at {adc}"
+        if backend == "gcloud":
+            # A `gcloud` backend means the quotas-billed Vertex path is the one
+            # live mode will actually use, so a 429 there is expected rather
+            # than surprising - worth saying before the user meets one.
+            detail += (
+                " (live_voice.backend is 'gcloud', so live mode uses this "
+                "quotas-billed Vertex path)"
+            )
         paths.append(
             VoicePath(
                 key="gemini_vertex",
                 label="Gemini Live (Vertex gcloud)",
                 ready=True,
-                detail=f"application default credentials found at {adc}",
+                detail=detail,
             )
         )
     else:
@@ -336,9 +331,6 @@ def describe(
         )
     )
 
-    # A stale `gcloud` backend is worth calling out on its own: it means the
-    # paid/quotad Vertex path is what live mode will actually use, so a 429 is
-    # expected rather than surprising.
     return paths
 
 

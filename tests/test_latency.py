@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -117,6 +119,64 @@ class HTTPConnectionReuseTests(unittest.TestCase):
 
         self.assertEqual(result, ("fresh-token", "real-project"))
         brain._refresh_access_token_and_project.assert_called_once_with()
+
+
+class _FakeTokenResponse:
+    """Stands in for the OAuth token endpoint's HTTP response."""
+
+    def __init__(self, payload: str) -> None:
+        self._payload = payload
+
+    def read(self) -> bytes:
+        return self._payload.encode("utf-8")
+
+    def __enter__(self) -> "_FakeTokenResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+class VertexAdcDiscoveryTests(unittest.TestCase):
+    """The brain's direct ADC refresh must find the file on any platform.
+
+    It looked under `%APPDATA%` only, so on Linux/macOS the fast path could never
+    fire - while the live-voice readiness report, which also checks
+    `~/.config/gcloud/...`, promised credentials the brain could not read.
+    """
+
+    def test_posix_adc_location_is_used_for_the_direct_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            adc = home / ".config" / "gcloud" / "application_default_credentials.json"
+            adc.parent.mkdir(parents=True)
+            adc.write_text(
+                json.dumps(
+                    {
+                        "type": "authorized_user",
+                        "client_id": "client-id",
+                        "client_secret": "client-secret",
+                        "refresh_token": "refresh-token",
+                        "project_id": "jarvis-project",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            response = _FakeTokenResponse(
+                json.dumps({"access_token": "token-from-adc", "expires_in": 3600})
+            )
+            env = {"HOME": str(home), "USERPROFILE": str(home)}
+            # `google.auth` is disabled so a pass can only come from the direct
+            # ADC read: the fallback resolves the same file and would otherwise
+            # hide a dead fast path.
+            with patch.dict(os.environ, env, clear=True), patch.dict(
+                sys.modules, {"google.auth": None}
+            ), patch("urllib.request.urlopen", return_value=response):
+                brain = GeminiVertexBrain(BrainConfig())
+                token, project = brain._refresh_access_token_and_project()
+
+        self.assertEqual(token, "token-from-adc")
+        self.assertEqual(project, "jarvis-project")
 
 
 class BackendTransportRegressionTests(unittest.TestCase):

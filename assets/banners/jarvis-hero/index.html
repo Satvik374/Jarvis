@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jarvis hero banner — 3 options</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0a0a12;color:#e8f0ff;font-family:"Segoe UI",system-ui,sans-serif;padding:40px 32px;line-height:1.5}
+  .wrap{max-width:1200px;margin:0 auto}
+  h1{font-size:26px;margin-bottom:6px}
+  .sub{color:#8fa3bf;margin-bottom:34px;font-size:15px}
+  .card{background:#12121d;border:1px solid #23233a;border-radius:14px;padding:20px;margin-bottom:30px}
+  .card img{width:100%;display:block;border-radius:8px;border:1px solid #23233a}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px}
+  .badge{font-size:12px;font-family:Consolas,monospace;letter-spacing:.1em;text-transform:uppercase;
+         padding:4px 12px;border-radius:999px;border:1px solid #2b4a5e;color:#6fd6ff;background:rgba(0,229,255,.06)}
+  .badge.warm{border-color:#5e2b4a;color:#ff9ecb;background:rgba(255,45,160,.06)}
+  .meta .name{font-weight:600;font-size:17px}
+  .meta .dims{color:#7286a0;font-size:13px;font-family:Consolas,monospace}
+  .rationale{color:#a9bdd9;font-size:14px;max-width:820px}
+  .note{color:#7286a0;font-size:13px;margin-top:30px;border-top:1px solid #1d1d2e;padding-top:16px}
+  code{background:#1a1a28;border:1px solid #2a2a40;padding:1px 7px;border-radius:5px;font-size:12.5px;font-family:Consolas,monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Jarvis hero banner — 3 art-direction options</h1>
+  <p class="sub">Neon / Cyberpunk direction · 1920 × 600 · exported PNG · all visuals pure CSS (no raster assets)</p>
+
+  <div class="card">
+    <div class="meta">
+      <span class="name">Option 1 — Neon Grid</span>
+      <span class="badge">synthwave floor · centered wordmark</span>
+      <span class="dims">option1-neon-grid-1920x600.png</span>
+    </div>
+    <img src="option1-neon-grid-1920x600.png" alt="Option 1: neon perspective grid with glowing JARVIS wordmark">
+    <p class="rationale">Synthwave floor pulls the eye to the wordmark; magenta cursor punctuates the name like a live terminal. The most &ldquo;movie poster&rdquo; of the three — strong as a repo header where you want instant atmosphere.</p>
+  </div>
+
+  <div class="card">
+    <div class="meta">
+      <span class="name">Option 2 — HUD Terminal</span>
+      <span class="badge warm">corner brackets · command chip · AI core</span>
+      <span class="dims">option2-hud-terminal-1920x600.png</span>
+    </div>
+    <div class="rationale" style="margin-bottom:14px">Reads as Jarvis&rsquo;s own interface: HUD brackets frame the canvas, a glowing perception/action core balances the lockup, and the <code>jarvis --run</code> chip hints at agency. Most information-dense; best if the hero must communicate &ldquo;this is a tool, not a poster.&rdquo;</div>
+    <img src="option2-hud-terminal-1920x600.png" alt="Option 2: HUD terminal frame with AI core">
+  </div>
+
+  <div class="card">
+    <div class="meta">
+      <span class="name">Option 3 — Glow Wordmark</span>
+      <span class="badge">type-first · minimal scenery</span>
+      <span class="dims">option3-glow-wordmark-1920x600.png</span>
+    </div>
+    <img src="option3-glow-wordmark-1920x600.png" alt="Option 3: pure neon glow wordmark">
+    <p class="rationale">Typography is the hero: layered cyan/magenta glow on a near-black field with feature chips (voice · vision · action). Scales down best of the three — stays legible even at 640px-wide embeds.</p>
+  </div>
+
+  <p class="note">Generated via the banner-design skill · CSS-only visuals · exports at exactly 1920×600. Regenerate with the same filenames to update PNGs in place.</p>
+</div>
+</body>
+</html>

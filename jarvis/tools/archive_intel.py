@@ -101,14 +101,23 @@ def test_archive(path: Path) -> Dict[str, Any]:
     return {"status": "ERROR", "error": "Unsupported archive format"}
 
 
-def create_archive(src_path: Path, dst_path: Path, archive_format: str = "zip", level: int = 6) -> str:
-    """Pack files or directory into archive."""
+def create_archive(src_path: Path, dst_path: Path, archive_format: str = "zip", level: int = 6,
+                   selected_files: Optional[List[str]] = None) -> str:
+    """Pack files or directory into archive.
+
+    ``selected_files`` optionally restricts packing to those members (relative
+    paths, either separator accepted); ``None`` packs everything — the default
+    preserves the historical whole-directory behaviour.
+    """
     fmt = archive_format.lower().strip()
     if not dst_path.suffix:
         dst_path = dst_path.with_suffix(".zip" if fmt == "zip" else f".{fmt}")
 
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
+    wanted = None
+    if selected_files:
+        wanted = {Path(s).as_posix() for s in selected_files}
 
     if fmt in ("zip", ".zip"):
         with zipfile.ZipFile(str(dst_path), "w", compression=zipfile.ZIP_DEFLATED, compresslevel=max(0, min(9, level))) as zf:
@@ -120,6 +129,8 @@ def create_archive(src_path: Path, dst_path: Path, archive_format: str = "zip", 
                     for f in files:
                         p = Path(root) / f
                         rel = p.relative_to(src_path)
+                        if wanted is not None and rel.as_posix() not in wanted:
+                            continue
                         zf.write(str(p), arcname=str(rel))
                         count += 1
     else:
@@ -133,6 +144,8 @@ def create_archive(src_path: Path, dst_path: Path, archive_format: str = "zip", 
                     for f in files:
                         p = Path(root) / f
                         rel = p.relative_to(src_path)
+                        if wanted is not None and rel.as_posix() not in wanted:
+                            continue
                         tf.add(str(p), arcname=str(rel))
                         count += 1
 
@@ -214,7 +227,8 @@ def archive_intel(
         if not p.exists():
             return f"source path not found: {p}"
         dst = _expand(target) if target else p.with_suffix(f".{archive_format.lstrip('.')}")
-        return create_archive(p, dst, archive_format=archive_format, level=level)
+        return create_archive(p, dst, archive_format=archive_format, level=level,
+                              selected_files=files)
 
     elif op_clean in ("extract", "unzip", "unpack", "untar"):
         if not p.exists():

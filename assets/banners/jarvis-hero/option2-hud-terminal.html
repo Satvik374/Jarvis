@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Jarvis banner — Option 2 · HUD Terminal</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:1920px;height:600px;overflow:hidden}
+  body{
+    position:relative;
+    font-family:"Segoe UI",-apple-system,Roboto,Helvetica,Arial,sans-serif;
+    background:#02060a;color:#dff3ff;
+  }
+
+  /* ---------- backdrop ---------- */
+  .bg{
+    position:absolute;inset:0;
+    background:
+      radial-gradient(ellipse 1100px 520px at 18% 40%, rgba(0,140,255,.14), transparent 65%),
+      radial-gradient(ellipse 900px 480px at 85% 70%, rgba(0,255,200,.08), transparent 65%),
+      #02060a;
+  }
+  .scanlines{
+    position:absolute;inset:0;opacity:.10;
+    background:repeating-linear-gradient(180deg,rgba(0,229,255,.5) 0 1px,transparent 1px 4px);
+  }
+  .vignette{
+    position:absolute;inset:0;
+    background:radial-gradient(ellipse 1300px 640px at 50% 50%, transparent 55%, rgba(0,0,0,.55) 100%);
+  }
+
+  /* ---------- HUD frame ---------- */
+  .corner{position:absolute;width:64px;height:64px;border:2px solid rgba(0,229,255,.85)}
+  .corner.tl{left:44px;top:44px;border-right:none;border-bottom:none;border-radius:10px 0 0 0;
+             box-shadow:-3px -3px 18px rgba(0,229,255,.28)}
+  .corner.tr{right:44px;top:44px;border-left:none;border-bottom:none;border-radius:0 10px 0 0;
+             box-shadow:3px -3px 18px rgba(0,229,255,.28)}
+  .corner.bl{left:44px;bottom:44px;border-right:none;border-top:none;border-radius:0 0 0 10px;
+             box-shadow:-3px 3px 18px rgba(0,229,255,.28)}
+  .corner.br{right:44px;bottom:44px;border-left:none;border-top:none;border-radius:0 0 10px 0;
+             box-shadow:3px 3px 18px rgba(0,229,255,.28)}
+
+  .tick{position:absolute;background:rgba(0,229,255,.5)}
+  .tick.h{width:44px;height:2px}
+  .tick.v{width:2px;height:44px}
+  .t1{left:130px;top:75px} .t2{right:130px;top:75px}
+  .t3{left:130px;bottom:75px} .t4{right:130px;bottom:75px}
+
+  /* ---------- content ---------- */
+  .content{
+    position:absolute;inset:0;display:flex;align-items:center;gap:96px;
+    padding:0 190px;
+  }
+  .left{flex:1.25}
+  .kicker{
+    font-family:Consolas,ui-monospace,monospace;font-size:19px;letter-spacing:.5em;
+    color:#54d8ff;text-transform:uppercase;margin-bottom:20px;
+  }
+  h1{
+    font-family:Consolas,"Cascadia Code",ui-monospace,monospace;
+    font-size:150px;line-height:.98;font-weight:700;letter-spacing:.045em;color:#f2fdff;
+    text-shadow:0 0 6px rgba(0,229,255,.85),0 0 26px rgba(0,229,255,.45),0 0 80px rgba(0,140,255,.3);
+  }
+  .tagline{
+    margin-top:24px;font-size:33px;font-weight:300;color:#b7e6ff;letter-spacing:.04em;
+  }
+  .tagline b{color:#fff;font-weight:600}
+  .cmd{
+    margin-top:34px;display:inline-flex;align-items:center;gap:14px;
+    font-family:Consolas,ui-monospace,monospace;font-size:20px;color:#79ffd8;
+    background:rgba(0,255,200,.06);border:1px solid rgba(0,255,200,.35);
+    border-radius:8px;padding:12px 22px;
+    box-shadow:inset 0 0 22px rgba(0,255,200,.08),0 0 18px rgba(0,255,200,.14);
+  }
+  .cmd .p{color:#ff5fa8}
+  .caret{display:inline-block;width:10px;height:20px;background:#79ffd8;animation:blink 1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+  @media (prefers-reduced-motion:reduce){.caret{animation:none}}
+
+  /* ---------- right visual: HUD reticle / AI core ---------- */
+  .right{flex:.85;display:flex;align-items:center;justify-content:center}
+  .core{position:relative;width:330px;height:330px}
+  .ring{position:absolute;inset:0;border-radius:50%;border:2px solid rgba(0,229,255,.5)}
+  .ring.r2{inset:34px;border-color:rgba(0,229,255,.75);border-style:dashed;
+           animation:spin 14s linear infinite}
+  .ring.r3{inset:70px;border-color:rgba(255,95,168,.6);
+           box-shadow:0 0 24px rgba(255,95,168,.35),inset 0 0 24px rgba(255,95,168,.2)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){.ring.r2{animation:none}}
+  .center{
+    position:absolute;inset:118px;border-radius:50%;
+    background:radial-gradient(circle at 38% 34%, #b9f4ff 0%, #35c6ff 34%, #0a5cff 72%, #062a7a 100%);
+    box-shadow:0 0 34px rgba(0,180,255,.75),0 0 90px rgba(0,120,255,.4),inset 0 0 30px rgba(255,255,255,.35);
+  }
+  .label{
+    position:absolute;font-family:Consolas,ui-monospace,monospace;font-size:15px;color:#6fd6ff;
+    letter-spacing:.18em;opacity:.9;
+  }
+  .lb1{top:-34px;left:50%;transform:translateX(-50%)}
+  .lb2{bottom:-34px;left:50%;transform:translateX(-50%);color:#ff8fc4}
+</style>
+</head>
+<body>
+  <div class="bg"></div>
+  <div class="scanlines"></div>
+  <div class="vignette"></div>
+
+  <div class="corner tl"></div><div class="corner tr"></div>
+  <div class="corner bl"></div><div class="corner br"></div>
+  <div class="tick h t1"></div><div class="tick h t2"></div>
+  <div class="tick v t3"></div><div class="tick v t4"></div>
+
+  <div class="content">
+    <div class="left">
+      <div class="kicker">voice in &middot; action out</div>
+      <h1>JARVIS</h1>
+      <div class="tagline">A local, agentic <b>desktop assistant</b></div>
+      <div class="cmd"><span class="p">&gt;</span> jarvis --run <span class="caret"></span></div>
+    </div>
+    <div class="right">
+      <div class="core">
+        <span class="label lb1">PERCEPTION</span>
+        <span class="label lb2">ACTION</span>
+        <div class="ring"></div>
+        <div class="ring r2"></div>
+        <div class="ring r3"></div>
+        <div class="center"></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

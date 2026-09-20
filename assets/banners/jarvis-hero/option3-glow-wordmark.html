@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Jarvis banner — Option 3 · Glow Wordmark</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:1920px;height:600px;overflow:hidden}
+  body{
+    position:relative;
+    font-family:"Segoe UI",-apple-system,Roboto,Helvetica,Arial,sans-serif;
+    background:#040309;color:#e8f4ff;
+  }
+
+  /* background: two soft color fields meeting */
+  .field{position:absolute;inset:0}
+  .field.cyan{
+    background:radial-gradient(ellipse 1000px 560px at 30% 42%, rgba(0,225,255,.20), transparent 66%);
+  }
+  .field.magenta{
+    background:radial-gradient(ellipse 1000px 560px at 70% 58%, rgba(255,45,160,.16), transparent 66%);
+  }
+  .field.haze{
+    background:linear-gradient(180deg, rgba(3,1,8,0) 62%, rgba(3,1,8,.75) 100%);
+  }
+
+  /* faint particle dots */
+  .dots{position:absolute;inset:0;opacity:.55}
+  .dot{position:absolute;border-radius:50%;background:#9fdcff}
+
+  /* ---------- content ---------- */
+  .content{
+    position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;text-align:center;
+  }
+  .overline{
+    font-family:Consolas,ui-monospace,monospace;font-size:20px;letter-spacing:.6em;
+    text-indent:.6em;color:#67e0ff;text-transform:uppercase;opacity:.9;
+    margin-bottom:16px;
+  }
+  h1{
+    font-family:"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-size:210px;font-weight:800;letter-spacing:.10em;text-indent:.10em;
+    line-height:.95;color:#f4feff;
+    text-shadow:
+      0 0 10px rgba(160,240,255,.85),
+      0 0 34px rgba(0,229,255,.55),
+      0 0 90px rgba(0,170,255,.40),
+      0 0 150px rgba(255,45,160,.25);
+  }
+  .underline{
+    width:560px;height:3px;margin:8px auto 0;
+    background:linear-gradient(90deg,transparent,rgba(0,229,255,.9) 30%,rgba(255,45,160,.9) 70%,transparent);
+    box-shadow:0 0 18px rgba(0,229,255,.6);
+    border-radius:2px;
+  }
+  .tagline{
+    margin-top:22px;font-size:35px;font-weight:300;color:#c6ecff;letter-spacing:.06em;
+    text-shadow:0 0 14px rgba(0,229,255,.35);
+  }
+  .tagline b{color:#fff;font-weight:600}
+  .chips{margin-top:34px;display:flex;gap:18px}
+  .chip{
+    font-family:Consolas,ui-monospace,monospace;font-size:17px;letter-spacing:.16em;
+    color:#8ce4ff;padding:10px 24px;border-radius:999px;
+    border:1px solid rgba(0,229,255,.4);
+    background:rgba(0,229,255,.05);
+    box-shadow:0 0 14px rgba(0,229,255,.15), inset 0 0 14px rgba(0,229,255,.06);
+    text-transform:uppercase;
+  }
+  .chip.warm{
+    color:#ffa5d2;border-color:rgba(255,45,160,.45);
+    background:rgba(255,45,160,.05);
+    box-shadow:0 0 14px rgba(255,45,160,.15), inset 0 0 14px rgba(255,45,160,.06);
+  }
+</style>
+</head>
+<body>
+  <div class="field cyan"></div>
+  <div class="field magenta"></div>
+  <div class="field haze"></div>
+
+  <div class="dots">
+    <span class="dot" style="left:8%;top:22%;width:3px;height:3px"></span>
+    <span class="dot" style="left:16%;top:64%;width:2px;height:2px"></span>
+    <span class="dot" style="left:24%;top:36%;width:2px;height:2px"></span>
+    <span class="dot" style="left:35%;top:74%;width:3px;height:3px"></span>
+    <span class="dot" style="left:44%;top:14%;width:2px;height:2px"></span>
+    <span class="dot" style="left:55%;top:80%;width:2px;height:2px"></span>
+    <span class="dot" style="left:63%;top:26%;width:3px;height:3px"></span>
+    <span class="dot" style="left:71%;top:48%;width:2px;height:2px"></span>
+    <span class="dot" style="left:78%;top:60%;width:2px;height:2px"></span>
+    <span class="dot" style="left:88%;top:30%;width:3px;height:3px"></span>
+    <span class="dot" style="left:93%;top:70%;width:2px;height:2px"></span>
+    <span class="dot" style="left:5%;top:48%;width:2px;height:2px"></span>
+  </div>
+
+  <div class="content">
+    <div class="overline">runs entirely offline</div>
+    <h1>JARVIS</h1>
+    <div class="underline"></div>
+    <div class="tagline">A local, agentic <b>desktop assistant</b></div>
+    <div class="chips">
+      <span class="chip">voice</span>
+      <span class="chip warm">vision</span>
+      <span class="chip">action</span>
+    </div>
+  </div>
+</body>
+</html>

@@ -416,6 +416,16 @@ class TerminalBridge:
         else:
             self.broker.publish(event, **payload)
 
+        if event == "session_stop":
+            # The agent ended its own session. The child is still parked on its
+            # input pipe waiting for a directive that is never coming, so ask
+            # for the shutdown here - the same path the page's END SESSION
+            # button takes, and the one that lets the child exit gracefully
+            # rather than being killed. Deferred off this reader thread for the
+            # same reason as `_advance_shutdown` below: writing back to the pipe
+            # from the thread that reads it deadlocks the child's next read.
+            threading.Timer(0.05, self.request_shutdown).start()
+
         if event == "input_request":
             with self._state_lock:
                 shutdown_pending = self._shutdown_pending

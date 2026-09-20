@@ -100,6 +100,26 @@ screen AND the target is clearly visible in the screenshot.
 WHICH element to click — then click that element by its id, not by guessed coordinates."""
 
 
+def _short_num(v) -> str:
+    """Compact numeric rendering for declared bounds: 1.0 -> '1', -50 -> '-50'."""
+    v = float(v)
+    return str(int(v)) if v.is_integer() else f"{v:g}"
+
+
+def _bounds_note(p) -> str:
+    """`` [lo..hi]`` for a param with declared numeric bounds.
+
+    Generated straight from the schema declaration, so a range added to
+    ``Param(minimum=..., maximum=...)`` shows up here without a second edit;
+    there is no hand-copied list to drift.
+    """
+    if p.minimum is None and p.maximum is None:
+        return ""
+    lo = "-inf" if p.minimum is None else _short_num(p.minimum)
+    hi = "+inf" if p.maximum is None else _short_num(p.maximum)
+    return f" [{lo}..{hi}]"
+
+
 def _action_reference(actions=ACTIONS) -> str:
     lines = ["Available actions:"]
     cat = None
@@ -108,7 +128,8 @@ def _action_reference(actions=ACTIONS) -> str:
             cat = a.category
             lines.append(f"\n# {cat}")
         params = ", ".join(
-            f"{p.name}" + ("" if p.required else "?") for p in a.params
+            f"{p.name}" + ("" if p.required else "?") + _bounds_note(p)
+            for p in a.params
         )
         sig = f"{a.name}({params})"
         lines.append(f"  {sig:<34} {a.summary}")

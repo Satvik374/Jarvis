@@ -61,9 +61,11 @@ class BrainConfig:
 class PerceptionConfig:
     # Use the Windows UI Automation tree to label elements (fast, no GPU).
     use_uia: bool = True
-    # OCR fallback for apps with no accessibility info (games, canvases).
-    # Heavy (pulls torch); off by default.
-    use_ocr: bool = False
+    # OCR fallback for apps with no accessibility info (icon buttons, canvases,
+    # games) and for the voice agent's click_target when the accessibility tree
+    # cannot name a control. Windows' own OCR engine is tried first, so this no
+    # longer implies a torch dependency.
+    use_ocr: bool = True
     # Cap on labelled elements handed to the model, to keep the prompt small.
     max_elements: int = 60
     # Save annotated screenshots for debugging / dataset collection.

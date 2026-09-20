@@ -291,11 +291,13 @@ transcription/TTS.
 > matching a denylist (format, del /, shutdown, …) are refused; file writes are
 > sandboxed to your home directory.
 
-### Gemini Live voice (the live voice engine)
+### Gemini Live voice (built-in engine)
 
-Live voice runs on **Gemini Live** by default: the browser streams the
-microphone to Google, plays the reply as it arrives, and answers the model's
-tool calls locally - so "open notepad" on a voice turn reaches the same registry
+Live voice runs on whichever engine `live_voice.provider` names, and the shipped
+`config.yaml` selects **Fish Audio Agents** (next section). This section covers
+the built-in **Gemini Live** path, selected with `provider: gemini`: the browser
+streams the microphone to Google, plays the reply as it arrives, and answers the
+model's tool calls locally - so "open notepad" on a voice turn reaches the same registry
 the main agent uses. Nothing else about the browser UI changes; the live button
 and `python run.py --live` start this engine.
 
@@ -320,7 +322,7 @@ Configuration (`config.yaml` → `live_voice`):
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| `provider` | `gemini` | `gemini` \| `fish` \| `relay` \| `auto` |
+| `provider` | `fish` | `gemini` \| `fish` \| `relay` \| `auto` (shipped `config.yaml` selects `fish`) |
 | `model` | `gemini-3.8-live` | A retired name is rewritten to its replacement instead of costing a failed handshake first |
 | `voice_name` | `Algenib` | Any prebuilt voice (`Aoede`, `Puck`, `Charon`, `Kore`, …) |
 | `media_resolution` | `medium` | Sent inside `generationConfig`, where the API defines it |
@@ -379,7 +381,7 @@ than what the file says. Three outcomes, three remedies:
 the protocol directly, so a silent model is distinguishable from a broken relay
 in about thirty seconds.
 
-### Fish Audio Agents (the alternative hosted voice agent)
+### Fish Audio Agents (the selected hosted voice agent)
 
 [Fish Agents](https://docs.fish.audio/agents) is a hosted real-time voice
 agent: Fish runs the speech recognition, turn-taking and synthesis, and your
@@ -472,8 +474,9 @@ Then point Jarvis at the agent and open browser voice mode:
 python run.py --browser
 ```
 
-Set `live_voice.provider: fish` (plus `fish_agent_id`) to run the hosted agent
-instead of Gemini Live. `LiveVoiceController` then
+The shipped `config.yaml` sets `live_voice.provider: fish` (plus `fish_agent_id`),
+so this is the engine live mode uses; set `provider: gemini` to run the built-in
+Gemini Live path instead. `LiveVoiceController` then
 mints a session through `POST /api/voice/session` (which calls Fish's
 `POST /v1/agent/sessions` **server-side**, so the API key never reaches the
 browser) and starts `@fishaudio/agent-client` with the three client-tool

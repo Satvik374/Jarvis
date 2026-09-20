@@ -94,6 +94,12 @@ EXCLUDED: dict[str, str] = {
     # secret
     "secret": "secret",
     # session
+    # ``stop_session`` is the one action whose effect is the end of the very
+    # conversation the voice agent is holding. A live model must not be able to
+    # hang up on the user mid-sentence, so it is excluded here and delegated:
+    # the voice agent asks ``execute_task`` for it and the main loop, which can
+    # see the whole task, decides whether stopping is what was really wanted.
+    "stop_session": "session",
     "voice_control": "session",
     "remote_task": "session",
     "mcp": "session",
@@ -166,12 +172,20 @@ def _argument(parameter) -> dict[str, str]:
             if parameter.default is not None else " (optional)"
     else:
         suffix = ""
+    # Declared numeric bounds ride along in the description: the Fish client
+    # transport has no minimum/maximum fields, so the range must be text the
+    # model can read. Generated from the declaration - no list to drift.
+    bounds = ""
+    if parameter.minimum is not None or parameter.maximum is not None:
+        lo = "-inf" if parameter.minimum is None else parameter.minimum
+        hi = "+inf" if parameter.maximum is None else parameter.maximum
+        bounds = f" Range: {lo}..{hi}."
     kind = {"str": "string", "int": "integer", "bool": "boolean",
             "float": "number", "dict": "object", "list": "array"}.get(
                 parameter.type, parameter.type)
     return {
         "name": parameter.name,
-        "description": f"{kind}: {description}{suffix}",
+        "description": f"{kind}: {description}{suffix}{bounds}",
     }
 
 

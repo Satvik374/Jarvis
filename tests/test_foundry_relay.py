@@ -11,12 +11,31 @@ from jarvis.agent.brain import AzureFoundryBrain, BrainError, make_brain
 from jarvis.utils import voice
 
 
-def test_foundry_relay_config_loading():
-    """Verify load_config loads local Foundry relay configurations from env/config."""
-    cfg = load_config()
+def test_foundry_relay_config_loading(tmp_path, monkeypatch):
+    """Verify load_config maps a local Foundry relay configuration from env/config.
+
+    Every ambient source is pinned out. The checkout's `config.yaml` and `.env`
+    describe an OpenRouter brain, so the earlier version of this test asserted
+    the machine's configuration rather than the loader's behaviour - it only
+    passed on a box whose `.env` still pointed at a relay on port 8000.
+    """
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: None, raising=False)
+    for key in ("JARVIS_MODEL", "MODEL_ID", "MODEL", "BACKEND"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("JARVIS_BACKEND", "foundry")
+    monkeypatch.setenv("JARVIS_FOUNDRY_ENDPOINT", "http://localhost:8000/v1")
+    monkeypatch.setenv("JARVIS_TTS_ENDPOINT", "http://localhost:8000/v1/audio/speech")
+    monkeypatch.setenv("JARVIS_TTS_MODEL", "tts-1")
+    monkeypatch.setenv("JARVIS_TTS_VOICE", "en-US-OnyxTurboMultilingualNeural")
+
+    # A path that does not exist means "no project config.yaml in play".
+    cfg = load_config(tmp_path / "config.yaml")
+
+    assert cfg.brain.backend == "foundry"
+    # The Foundry backend names its own model unless one is set explicitly.
     assert cfg.brain.model == "gpt-6"
-    assert "localhost:8000" in cfg.brain.foundry_endpoint or "127.0.0.1:8000" in cfg.brain.foundry_endpoint
-    assert "localhost:8000" in cfg.voice.tts_endpoint or "127.0.0.1:8000" in cfg.voice.tts_endpoint
+    assert "localhost:8000" in cfg.brain.foundry_endpoint
+    assert "localhost:8000" in cfg.voice.tts_endpoint
     assert cfg.voice.tts_model == "tts-1"
     assert cfg.voice.tts_voice == "en-US-OnyxTurboMultilingualNeural"
 
