@@ -1040,11 +1040,19 @@ def repl(cfg: Config | None = None) -> int:
                     log.info(status_msg)
                     # The full dashboard: memory, schedules, watchers,
                     # connections - one place that answers "how are things?".
+                    # In browser mode it must go through log.jarvis (the reply
+                    # channel the page renders as a chat bubble), not raw print
+                    # (which lands in the hidden terminal drawer).
+                    _browser_mode = bool(getattr(log, "_browser_event_bridge_installed", False))
                     try:
                         from .utils.briefing import format_status_report
 
-                        for line in format_status_report(cfg, agent=agent):
-                            print(line)
+                        report = format_status_report(cfg, agent=agent, color=not _browser_mode)
+                        if _browser_mode:
+                            log.jarvis("\n".join(report))
+                        else:
+                            for line in report:
+                                print(line)
                     except Exception as exc:
                         log.warn(f"status dashboard unavailable: {exc}")
                     continue

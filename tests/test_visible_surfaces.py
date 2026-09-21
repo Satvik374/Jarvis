@@ -107,6 +107,26 @@ def test_status_report_without_agent_degrades(tmp_path):
     assert "unavailable this session" in joined
 
 
+def test_status_report_plain_mode_is_bubble_safe():
+    """The browser bubble collapses runs of spaces and must receive no ANSI
+    codes - and singular/plural must read correctly at 1."""
+    agent = types.SimpleNamespace(
+        memory_mgr=types.SimpleNamespace(get_stats=lambda: {
+            "facts_count": 493, "learned_plans_count": 1,
+            "graph_entities": 12, "graph_relations": 30,
+            "total_vectors": 494, "db_path": "x", "memory_file": "y",
+        }),
+    )
+    lines = briefing.format_status_report(_cfg(), agent=agent, color=False)
+    joined = "\n".join(lines)
+    assert "\x1b[" not in joined
+    assert "1 learned plan" in joined
+    assert "1 learned plans" not in joined
+    assert "Vision off" in joined  # labels never glued to values
+    assert "Max steps" in joined
+    assert " · " in joined  # dot separators survive space-collapsing
+
+
 def test_status_report_shows_scheduled_jobs(tmp_path):
     job = types.SimpleNamespace(command="backup the folder", spec="daily at 09:00")
     sched = types.SimpleNamespace(jobs=lambda: [job])

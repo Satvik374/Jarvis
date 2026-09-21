@@ -185,63 +185,80 @@ def build_briefing(cfg: Any, agent: Any = None) -> str:
     return " ".join(lines).strip()
 
 
-def format_status_report(cfg: Any, agent: Any = None) -> List[str]:
-    """The ``:status`` dashboard, as printable console lines."""
+def format_status_report(cfg: Any, agent: Any = None, color: bool = True) -> List[str]:
+    """The ``:status`` dashboard, as printable console lines.
+
+    ``color=False`` returns plain text (no ANSI codes) for surfaces that
+    render text themselves, like the browser chat bubble.
+    """
+    dim = (lambda s: _c(s, "dim")) if color else (lambda s: s)
+    grey = (lambda s: _c(s, "grey")) if color else (lambda s: s)
+    cyan = (lambda s: _c(s, "cyan")) if color else (lambda s: s)
+    green = (lambda s: _c(s, "green")) if color else (lambda s: s)
     out: List[str] = []
     now = datetime.datetime.now()
 
-    out.append(_c("JARVIS STATUS", "cyan"))
+    out.append(cyan("JARVIS STATUS"))
     out.append("")
 
     # --- Last interaction -------------------------------------------------
     last = _last_interaction(cfg, agent)
     if last:
-        out.append(f"  {_c('Last chat', 'dim'):16}{last.strftime('%Y-%m-%d %H:%M')}  ({_friendly_delta(last, now)})")
+        out.append(f"  {dim('Last chat'):16}{last.strftime('%Y-%m-%d %H:%M')}  ({_friendly_delta(last, now)})")
     else:
-        out.append(f"  {_c('Last chat', 'dim'):16}{_c('no chat history yet', 'grey')}")
+        out.append(f"  {dim('Last chat'):16}{grey('no chat history yet')}")
 
     # --- Memory -----------------------------------------------------------
     mem = _memory_stats(agent) if agent is not None else {}
     if mem:
-        parts = [f"{mem['facts']} facts", f"{mem['plans']} learned plans"]
+        parts = [
+            f"{mem['facts']} fact{'' if mem['facts'] == 1 else 's'}",
+            f"{mem['plans']} learned plan{'' if mem['plans'] == 1 else 's'}",
+        ]
         if mem.get("entities"):
             parts.append(f"{mem['entities']} graph entities")
-        out.append(f"  {_c('Memory', 'dim'):16}{', '.join(parts)}")
+        out.append(f"  {dim('Memory'):16}{', '.join(parts)}")
     else:
-        out.append(f"  {_c('Memory', 'dim'):16}{_c('unavailable this session', 'grey')}")
+        out.append(f"  {dim('Memory'):16}{grey('unavailable this session')}")
 
     # --- Scheduled jobs ---------------------------------------------------
     jobs = _cron_jobs()
     if jobs:
-        out.append(f"  {_c('Scheduled', 'dim'):16}{len(jobs)} job(s):")
+        out.append(f"  {dim('Scheduled'):16}{len(jobs)} job(s):")
         for j in jobs[:5]:
-            out.append(f"    {_c('•', 'cyan')} \"{j['command']}\"  {_c(j['spec'], 'grey')}")
+            out.append(f"    {cyan('•')} \"{j['command']}\"  {grey(j['spec'])}")
     else:
-        out.append(f"  {_c('Scheduled', 'dim'):16}{_c('nothing scheduled  (:cron add to schedule)', 'grey')}")
+        out.append(f"  {dim('Scheduled'):16}{grey('nothing scheduled  (:cron add to schedule)')}")
 
     # --- Proactive watchers ----------------------------------------------
     rules = _proactive_rules()
     if rules:
-        out.append(f"  {_c('Watching for', 'dim'):16}{len(rules)} active watcher(s):")
+        out.append(f"  {dim('Watching for'):16}{len(rules)} active watcher(s):")
         for r in rules[:5]:
-            out.append(f"    {_c('•', 'cyan')}{r}")
+            out.append(f"    {cyan('•')}{r}")
     else:
-        out.append(f"  {_c('Watching for', 'dim'):16}{_c('no proactive watchers  (:daemon status)', 'grey')}")
+        out.append(f"  {dim('Watching for'):16}{grey('no proactive watchers  (:daemon status)')}")
 
     # --- Connectors -------------------------------------------------------
     lines = _connector_lines()
     if lines:
-        out.append(f"  {_c('Connections', 'dim'):16}{'; '.join(lines)}")
+        out.append(f"  {dim('Connections'):16}{'; '.join(lines)}")
     else:
-        out.append(f"  {_c('Connections', 'dim'):16}{_c('none available  (:connect)', 'grey')}")
+        out.append(f"  {dim('Connections'):16}{grey('none available  (:connect)')}")
 
     # --- Voice / vision / safety -----------------------------------------
     out.append("")
     voice_on = getattr(cfg, "voice_enabled", False)
     vision_on = getattr(getattr(cfg, "brain", None), "use_vision", False)
     steps = getattr(getattr(cfg, "safety", None), "max_steps", "?")
-    out.append(f"  {_c('Voice', 'dim'):16}{_c('on', 'green') if voice_on else _c('off', 'grey')}"
-               f"   {_c('Vision', 'dim')}{_c('on', 'green') if vision_on else _c('off', 'grey')}"
-               f"   {_c('Max steps', 'dim')}{steps}")
+    voice_state = "on" if voice_on else "off"
+    vision_state = "on" if vision_on else "off"
+    if color:
+        out.append(f"  {dim('Voice'):16}{green(voice_state) if voice_on else grey(voice_state)}"
+                   f"   {dim('Vision'):12}{green(vision_state) if vision_on else grey(vision_state)}"
+                   f"   {dim('Max steps'):12}{steps}")
+    else:
+        # Plain-text surfaces collapse runs of spaces, so separate with dots.
+        out.append(f"Voice {voice_state} · Vision {vision_state} · Max steps {steps}")
 
     return out
