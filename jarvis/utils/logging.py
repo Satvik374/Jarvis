@@ -195,6 +195,53 @@ def error(msg: str) -> None:
     _emit(_glyph("✗", "[x]"), "red", msg, mcolor="red")
 
 
+def friendly_error(exc: BaseException) -> str:
+    """Translate a computer error into one plain-English line a person can act on.
+
+    Used at the user-facing failure points (task failures, brain errors). The
+    technical detail still goes to the log via ``error()``; this is the line
+    the user hears. Unknown errors pass through with a gentle wrapper.
+    """
+    kind = type(exc).__name__
+    text = str(exc)
+    low = text.lower()
+
+    if isinstance(exc, ConnectionError) or "connection" in low and "refused" in low:
+        return ("I couldn't reach the service I needed. Check your internet "
+                "connection, then ask me again.")
+    if isinstance(exc, TimeoutError) or "timed out" in low or "timeout" in low:
+        return ("That took too long and gave up - the other side wasn't "
+                "responding. Try again, and if it keeps happening the service "
+                "may be down right now.")
+    if isinstance(exc, PermissionError) or "access is denied" in low or "permission" in low and "denied" in low:
+        return ("Windows said no - I don't have permission for that file or "
+                "action. Try running Jarvis as administrator, or check that "
+                "the file isn't locked by another program.")
+    if isinstance(exc, FileNotFoundError):
+        return ("I couldn't find that file - it may have been moved, renamed, "
+                "or deleted. Tell me where it lives now and I'll retry.")
+    if isinstance(exc, ModuleNotFoundError):
+        missing = text.split("'")[1] if "'" in text else kind
+        return (f"A piece of Jarvis isn't installed (missing: {missing}). "
+                f"Run: pip install {missing}")
+    if "unauthorized" in low or "401" in low or "invalid api key" in low:
+        return ("The service rejected my login - the API key looks wrong or "
+                "expired. Update the key in your config or .env and I'll "
+                "retry.")
+    if "rate limit" in low or "429" in low:
+        return ("The AI service is busy and asked me to slow down. Give it a "
+                "minute, then ask me again.")
+    if isinstance(exc, KeyboardInterrupt):
+        return "Cancelled - you're the boss."
+    if "disk" in low and ("full" in low or "space" in low):
+        return "The disk is full. Clear some space and I'll try again."
+    if "json" in low and ("decode" in low or "expect" in low):
+        return ("I got a garbled reply from the AI service and couldn't read "
+                "it. Usually a retry fixes this.")
+    return (f"Something went wrong ({kind}). The details are in the log line "
+            f"just above - ask me to 'diagnose' and I'll investigate.")
+
+
 def debug(msg: str) -> None:
     # Silent in normal output unless debug mode is enabled
     if os.environ.get("JARVIS_DEBUG") or os.environ.get("DEBUG"):

@@ -451,7 +451,9 @@ class Agent:
                         raise
                     except Exception as exc:
                         log.error(f"brain error: {exc}")
-                        final_message = f"Brain error: {exc}"
+                        # The log line above keeps the technical detail; what the
+                        # user is told (and hears) is the plain-English version.
+                        final_message = log.friendly_error(exc)
                         traj.outcome = "error"
                         # Record WHY, so failure analysis over trajectories can see
                         # the actual error instead of a bare "error" label.

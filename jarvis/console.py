@@ -43,6 +43,7 @@ _SLASH_COMMANDS = (
     ("/paste", "attach the clipboard image/screenshot (Ctrl+V works too)"),
     ("/remember", "[fact] - store a fact in permanent memory forever"),
     ("/memory", "list permanent memories and learned plans"),
+    ("/status", "dashboard: last chat, memory, schedules, watchers, connections"),
     ("/help", "show all commands"),
     ("/live", "launch Real-Time Gemini 3.1 Flash Live Voice model supervisor"),
     ("/voice", "voice-ONLY mode: talk instead of typing"),
@@ -808,6 +809,18 @@ def repl(cfg: Config | None = None) -> int:
                    "':wake' for hands-free, ':cron' to schedule, ':quit' to exit)")
         # Jarvis always speaks, in every mode; voice mode only adds the mic (STT).
         voice.speak(greeting, wait=cfg.voice_enabled or cfg.wake_enabled)
+        # The informed part: what a real assistant would add after the hello -
+        # when you last talked and what is on the schedule. Printed and spoken
+        # after the hello; skipped entirely when there is nothing to report.
+        try:
+            from .utils.briefing import build_briefing
+
+            briefing_text = build_briefing(cfg, agent)
+        except Exception:
+            briefing_text = ""
+        if briefing_text:
+            log.jarvis(briefing_text)
+            voice.speak(briefing_text, wait=False)
         prompt_idle = f"\n{_COLORS['cyan']}╭─{_COLORS['reset']}{_COLORS['bold']} {_c('you', 'cyan')} {_COLORS['dim']}›{_COLORS['reset']} "
         # A prompt remains editable while work runs.  Do not put dynamic worker
         # state inside it: a background completion can occur after it renders,
@@ -913,8 +926,11 @@ def repl(cfg: Config | None = None) -> int:
                 if not cancel_event.is_set():
                     log.error(f"unexpected error: {exc}")
                     if not voice.is_live_mode_active():
-                        log.jarvis(f"🎙️ [Communicating Agent]: Task failed: {exc}")
-                        voice.speak(f"Task failed: {exc}", wait=False)
+                        # Technical detail stays in the log line above; the user
+                        # sees and hears the plain-English version instead.
+                        friendly = log.friendly_error(exc)
+                        log.jarvis(f"🎙️ [Communicating Agent]: Task failed. {friendly}")
+                        voice.speak(friendly, wait=False)
             finally:
                 done_event.set()
 
@@ -1022,6 +1038,15 @@ def repl(cfg: Config | None = None) -> int:
                         f"Plan: {summary['plan']}"
                     )
                     log.info(status_msg)
+                    # The full dashboard: memory, schedules, watchers,
+                    # connections - one place that answers "how are things?".
+                    try:
+                        from .utils.briefing import format_status_report
+
+                        for line in format_status_report(cfg, agent=agent):
+                            print(line)
+                    except Exception as exc:
+                        log.warn(f"status dashboard unavailable: {exc}")
                     continue
                 if c == "wake":
                     try:
