@@ -4,15 +4,23 @@ Every default state location is resolved here rather than recomputed from
 ``__file__`` at each call site, so there is one answer to "where does this go"
 and one way to move it.
 
-Three levels, in order:
+Three levels, in order - the order the functions below actually apply:
 
-1. an explicit in-process sandbox (:func:`set_sandbox_root`) - used by the test
-   suite, because it survives a test that wipes ``os.environ``;
-2. the environment overrides ``JARVIS_STATE_DIR`` and ``JARVIS_BROWSER_PROFILE``
-   - how a user relocates the application's state;
+1. the environment overrides ``JARVIS_STATE_DIR`` and ``JARVIS_BROWSER_PROFILE``
+   - how a user relocates the application's state, and how a test points a
+   single location at its own directory instead of the run's sandbox;
+2. an explicit in-process sandbox (:func:`set_sandbox_root`) - used by the test
+   suite, because it survives a test that does
+   ``patch.dict(os.environ, {}, clear=True)``: that drops the overrides above,
+   and must not drop the sandbox with them;
 3. the historical defaults: the project root, and ``~/.jarvis/browser_profile``.
 
-With neither override set the paths are exactly what they always were.
+With nothing set the paths are exactly what they always were.
+
+Deliberately *not* here: paths that must keep pointing at the installed program
+rather than at its state - ``config.yaml``/``.env`` inputs, the startup shortcut
+that relaunches ``run.py``, and the browser worker's ``sys.path`` bootstrap. A
+state override must not be able to move those.
 """
 
 from __future__ import annotations

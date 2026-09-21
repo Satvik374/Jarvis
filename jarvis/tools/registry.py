@@ -18,6 +18,7 @@ from . import mouse, keyboard, apps, files, system, mouse_control, converter, co
 from .schema import ACTIONS_BY_NAME
 from ..config import Config
 from ..perception.elements import Observation
+from ..utils.paths import project_root, state_root
 
 
 @dataclass
@@ -541,8 +542,10 @@ def _h_read_file(args, obs, cfg):
     path = str(args.get("path", ""))
     from pathlib import Path
     if Path(path).name == "memory.txt":
-        proj_root = Path(__file__).resolve().parent.parent.parent
-        path = str(proj_root / "memory.txt")
+        # The agent's memory is state, so it follows the state root - not the
+        # directory this module happens to live in, or read_file would hand the
+        # model a different file than the memory manager writes.
+        path = str(state_root() / "memory.txt")
     return ActionResult(True, files.read_file(path),
                         needs_observe=False)
 
@@ -560,8 +563,7 @@ def _h_write_file(args, obs, cfg):
     path = str(args.get("path", ""))
     from pathlib import Path
     if Path(path).name == "memory.txt":
-        proj_root = Path(__file__).resolve().parent.parent.parent
-        path = str(proj_root / "memory.txt")
+        path = str(state_root() / "memory.txt")
         try:
             p = Path(path)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -651,9 +653,11 @@ def _h_self_upgrade(args, obs, cfg):
     from ..agent.coder import Coder
     from ..utils import logging as log
 
-    root = Path(__file__).resolve().parent.parent.parent
+    root = project_root()
     targets = ("jarvis", "run.py", "config.yaml")
-    backup = root / ".self_backups" / time.strftime("%Y%m%d-%H%M%S")
+    # The source read below stays at the project root; the snapshot we take
+    # before editing it is Jarvis's own state and follows the state root.
+    backup = state_root() / ".self_backups" / time.strftime("%Y%m%d-%H%M%S")
     try:
         backup.mkdir(parents=True, exist_ok=True)
         for t in targets:

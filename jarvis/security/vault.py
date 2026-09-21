@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from ..utils import logging as log
+from ..utils.paths import state_root
 
 # Target prefix in Windows Credential Manager
 CREDMAN_PREFIX = "JARVIS:"
@@ -59,8 +60,9 @@ class CredentialVault:
 
     def __init__(self, vault_file: Optional[Path] = None):
         if vault_file is None:
-            proj_root = Path(__file__).resolve().parent.parent.parent
-            self.vault_file = proj_root / "dataset" / "data" / "vault.enc"
+            # Encrypted credentials are state: they follow the state root so a
+            # relocation moves them too, and a test never decrypts the real one.
+            self.vault_file = state_root() / "dataset" / "data" / "vault.enc"
         else:
             self.vault_file = Path(vault_file)
         self.vault_file.parent.mkdir(parents=True, exist_ok=True)

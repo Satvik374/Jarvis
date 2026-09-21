@@ -16,7 +16,11 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent.parent
+from .utils.paths import project_root
+
+# The project root, from the one module that owns that answer. Import stays
+# local: paths has no dependencies, so this cannot cycle back into config.
+ROOT = project_root()
 CONFIG_PATH = ROOT / "config.yaml"
 
 

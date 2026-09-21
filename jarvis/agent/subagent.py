@@ -24,7 +24,7 @@ from ..config import Config
 from ..perception.elements import Observation
 from ..tools import registry
 from ..tools.schema import ACTIONS
-from ..utils import logging as log
+from ..utils import logging as log, paths
 from .brain import Brain, complete_with_retry
 from .prompts import parse_decision, format_decision, _action_reference
 
@@ -144,7 +144,8 @@ RULES
 
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parent.parent.parent
+    """The project root, from the single owner of that answer."""
+    return paths.project_root()
 
 
 def _load_custom(root: Path) -> dict[str, AgentSpec]:

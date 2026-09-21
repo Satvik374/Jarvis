@@ -19,6 +19,7 @@ from typing import Any, Iterable, Mapping
 
 from ..utils.adc import ADC_RELATIVE_PATHS as adc_relative_paths
 from ..utils.adc import adc_path as find_adc_path
+from ..utils.paths import project_root
 
 
 #: Kept as a re-export: the search itself now lives in `jarvis.utils.adc`, so
@@ -303,12 +304,11 @@ def describe(
 
     # 5. Local speech, which is not a voice *session* but is what keeps Jarvis
     #    audible when every session path is dead.
-    # Derived locally rather than imported from `jarvis.browser`: the browser
-    # module imports this one, and a root constant is not worth a cycle.
+    # Taken from the shared root owner rather than ``jarvis.browser``: the
+    # browser module imports this one, and a root constant is not worth a cycle.
     model = local_tts_model
     if model is None:
-        project_root = Path(__file__).resolve().parents[2]
-        model = project_root / "models" / "tts" / "kokoro-v1.0.onnx"
+        model = project_root() / "models" / "tts" / "kokoro-v1.0.onnx"
     try:
         local_ready = Path(model).is_file()
     except OSError:

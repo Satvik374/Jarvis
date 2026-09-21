@@ -32,6 +32,7 @@ import webbrowser
 import requests
 
 from jarvis.utils import logging as log
+from jarvis.utils.paths import state_root
 
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 ISSUER = "https://auth.openai.com"
@@ -42,7 +43,17 @@ BACKEND_ENDPOINT = "https://chatgpt.com/backend-api/codex"
 
 CODEX_DIR = Path.home() / ".codex"
 PRIMARY_AUTH_PATH = CODEX_DIR / "auth.json"
-FALLBACK_AUTH_PATH = Path(__file__).resolve().parent.parent.parent / ".codex_tokens.json"
+
+
+def fallback_auth_path() -> Path:
+    """Jarvis's own copy of the Codex tokens.
+
+    Resolved per call rather than bound at import: a module-level constant is
+    fixed before any test or command can point the state root elsewhere, which
+    is the same import-time trap that once defeated ``RELAY_STATE_PATH``. It is
+    also a secret, so it belongs under the state root, not the source tree.
+    """
+    return state_root() / ".codex_tokens.json"
 
 
 def generate_pkce() -> tuple[str, str]:
@@ -113,7 +124,7 @@ def get_token_expiration(access_token: str) -> float:
 
 def load_tokens() -> dict[str, Any]:
     """Load persisted Codex OAuth tokens from primary or fallback file."""
-    for path in (PRIMARY_AUTH_PATH, FALLBACK_AUTH_PATH):
+    for path in (PRIMARY_AUTH_PATH, fallback_auth_path()):
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -229,9 +240,10 @@ def save_tokens(tokens: dict[str, Any]) -> None:
     except Exception as exc:
         log.warning(f"Could not write to {PRIMARY_AUTH_PATH}: {exc}")
 
-    # Also update fallback file in Jarvis directory
+    # Also update the fallback file under the state root
     try:
-        FALLBACK_AUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fallback = fallback_auth_path()
+        fallback.parent.mkdir(parents=True, exist_ok=True)
         fallback_data = {
             "access_token": access_token,
             "refresh_token": refresh_token,
@@ -240,7 +252,7 @@ def save_tokens(tokens: dict[str, Any]) -> None:
             "expires_at": expires_at,
             "last_refresh": now_iso,
         }
-        FALLBACK_AUTH_PATH.write_text(json.dumps(fallback_data, indent=2), encoding="utf-8")
+        fallback.write_text(json.dumps(fallback_data, indent=2), encoding="utf-8")
     except Exception as exc:
         log.debug(f"Could not write fallback token file: {exc}")
 
@@ -248,7 +260,7 @@ def save_tokens(tokens: dict[str, Any]) -> None:
 def logout() -> bool:
     """Log out of OpenAI Codex by removing stored credentials and tokens."""
     removed = False
-    for path in (PRIMARY_AUTH_PATH, FALLBACK_AUTH_PATH):
+    for path in (PRIMARY_AUTH_PATH, fallback_auth_path()):
         if path.exists():
             try:
                 path.unlink()
