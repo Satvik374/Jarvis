@@ -24,7 +24,7 @@ import wave
 
 from ..config import VoiceConfig
 from . import logging as log
-from .paths import sandbox_root
+from .paths import live_flag_path
 
 _RATE = 16000          # 16 kHz mono int16 - plenty for speech
 _CHUNK = 1600          # 0.1 s per energy reading
@@ -57,30 +57,13 @@ _live_mode_active = False
 #: crashed or force-killed left the flag behind and muted every later session
 #: forever: not only live voice, but ordinary terminal speech too. The owner now
 #: heartbeats the file while live mode is on, and a flag that has gone quiet is
-#: treated as abandoned and removed.
-_LIVE_FLAG_NAME = "jarvis_live_mode.flag"
+#: treated as abandoned and removed. Where the flag lives is decided by
+#: ``paths.live_flag_path``; this module only owns its heartbeat and lifetime.
 _LIVE_FLAG_HEARTBEAT_SECONDS = 15.0
 _LIVE_FLAG_MAX_AGE_SECONDS = 90.0
 _live_flag_owner_pid: int | None = None
 _live_flag_heartbeat: threading.Thread | None = None
 _live_flag_stop = threading.Event()
-
-
-def _live_flag_path() -> Path:
-    """Where the shared live-mode flag lives.
-
-    ``JARVIS_LIVE_FLAG_DIR`` relocates the directory, mirroring how
-    ``JARVIS_LIVE_AUDIO_STATE`` relocates the measured-model verdict. Callers
-    that must not disturb a real session pointing at their own directory use
-    it, instead of patching a global to move the flag out of the way.
-    """
-    override = os.environ.get("JARVIS_LIVE_FLAG_DIR", "").strip()
-    if override:
-        base = Path(override).expanduser()
-    else:
-        sandbox = sandbox_root()
-        base = sandbox / "live-flag" if sandbox is not None else Path(tempfile.gettempdir())
-    return base / _LIVE_FLAG_NAME
 
 
 def _clear_live_flag(force: bool = False) -> None:
@@ -99,7 +82,7 @@ def _clear_live_flag(force: bool = False) -> None:
     if not (force or owned):
         return
     try:
-        path = _live_flag_path()
+        path = live_flag_path()
         if path.exists():
             path.unlink()
     except Exception:
@@ -119,7 +102,7 @@ def _heartbeat_live_flag() -> None:
     """Keep the flag fresh so other processes can keep trusting it."""
     while not _live_flag_stop.wait(_LIVE_FLAG_HEARTBEAT_SECONDS):
         try:
-            path = _live_flag_path()
+            path = live_flag_path()
             if path.exists():
                 os.utime(path, None)
             else:
@@ -141,7 +124,7 @@ def set_live_mode_active(active: bool) -> None:
     _live_flag_stop.clear()
     _live_flag_owner_pid = os.getpid()
     try:
-        _live_flag_path().write_text(str(os.getpid()), encoding="utf-8")
+        live_flag_path().write_text(str(os.getpid()), encoding="utf-8")
     except Exception:
         pass
     if _live_flag_heartbeat is None or not _live_flag_heartbeat.is_alive():
@@ -164,7 +147,7 @@ def is_live_mode_active() -> bool:
     if _live_mode_active or os.environ.get("JARVIS_LIVE_MODE") == "1":
         return True
     try:
-        age = time.time() - _live_flag_path().stat().st_mtime
+        age = time.time() - live_flag_path().stat().st_mtime
     except OSError:
         return False
     except Exception:
@@ -172,7 +155,7 @@ def is_live_mode_active() -> bool:
     if age <= _LIVE_FLAG_MAX_AGE_SECONDS:
         return True
     try:
-        _live_flag_path().unlink()
+        live_flag_path().unlink()
     except Exception:
         pass
     return False

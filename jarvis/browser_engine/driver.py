@@ -171,6 +171,15 @@ _DOM_EXTRACT_SCRIPT = """
 """
 
 
+def screenshot_dir() -> Path:
+    """Where the browser worker writes its captures.
+
+    Named rather than inlined so the location has one home and the test suite
+    can assert where it resolves without starting a browser.
+    """
+    return state_root() / "dataset" / "data" / "screenshots"
+
+
 class _BrowserWorker(threading.Thread):
     """Dedicated single-threaded Playwright executor."""
 
@@ -184,7 +193,7 @@ class _BrowserWorker(threading.Thread):
         self._context = None
         self._page = None
         self._element_map: Dict[str, str] = {}
-        self._shot_dir = state_root() / "dataset" / "data" / "screenshots"
+        self._shot_dir = screenshot_dir()
         self._shot_dir.mkdir(parents=True, exist_ok=True)
         self.start()
         self._ready_event.wait()

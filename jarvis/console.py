@@ -684,6 +684,15 @@ def _shutdown_repl(
         pass
 
 
+def cron_store_path() -> Path:
+    """Where the console keeps its scheduled jobs.
+
+    Named rather than inlined so the location has one home and the test suite
+    can assert where it resolves without entering the interactive loop.
+    """
+    return state_root() / "cron_jobs.json"
+
+
 def repl(cfg: Config | None = None) -> int:
     cfg = cfg or load_config()
     print(_banner())
@@ -736,7 +745,7 @@ def repl(cfg: Config | None = None) -> int:
                 pass
 
         sched = scheduler.Scheduler(
-            state_root() / "cron_jobs.json",
+            cron_store_path(),
             runner=_cron_runner)
         scheduler.set_default(sched)
         sched.start()
