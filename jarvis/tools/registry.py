@@ -1007,7 +1007,9 @@ def _h_regex_intel(args, obs, cfg):
 
 def _h_api_mock(args, obs, cfg):
     op = str(args.get("op", "start")).strip()
-    port = int(args.get("port", 8999) or 8999)
+    # An explicit 0 means "let the OS pick a free port", so it must survive here.
+    raw_port = args.get("port", 8999)
+    port = 8999 if raw_port in (None, "") else int(raw_port)
     path = str(args.get("path", "/")).strip()
     method = str(args.get("method", "GET")).strip()
     status = int(args.get("status", 200) or 200)

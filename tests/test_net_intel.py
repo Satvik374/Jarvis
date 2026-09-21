@@ -70,10 +70,18 @@ def test_port_check_open(local_tcp_server):
 
 def test_port_check_closed():
     """Test probing a closed port returns CLOSED or TIMEOUT."""
-    res = net_intel.net_intel(op="port_check", host="127.0.0.1", port=59999, timeout=1)
+    # Own the port: take a free one from the OS and hold it bound but never
+    # listening, so nothing can serve it and no fixed machine-wide port number
+    # (previously 59999) decides whether this test passes.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+        held.bind(("127.0.0.1", 0))
+        closed_port = held.getsockname()[1]
+        res = net_intel.net_intel(op="port_check", host="127.0.0.1", port=closed_port, timeout=1)
+
     data = json.loads(res)
 
     assert data["status"] in ("CLOSED", "TIMEOUT", "ERROR")
+    assert data["port"] == closed_port
 
 
 def test_dns_resolution():

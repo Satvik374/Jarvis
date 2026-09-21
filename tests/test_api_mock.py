@@ -32,13 +32,15 @@ def test_schema_and_registry_registration():
 
 def test_mock_server_lifecycle_and_routes():
     """Test starting mock server, registering GET/POST routes, and inspecting history."""
-    test_port = 9188
-
-    # 1. Start server
-    res_start = api_mock.api_mock(op="start", port=test_port)
+    # 1. Start server on an ephemeral port: the OS assigns it and we read it back
+    #    from the live socket, so the test owns the port instead of depending on a
+    #    fixed one (9188) happening to be free on this machine.
+    res_start = api_mock.api_mock(op="start", port=0)
     data_start = json.loads(res_start)
     assert data_start["status"] in ("started", "already_running")
-    assert data_start["port"] == test_port
+    test_port = data_start["port"]
+    assert test_port > 0
+    assert data_start["url"] == f"http://127.0.0.1:{test_port}"
 
     # 2. Add GET route
     api_mock.api_mock(
@@ -112,20 +114,25 @@ def test_registry_execution():
         active_window="Mock",
     )
 
+    # Port 0: the OS assigns a free port, so no fixed port (9199) can deny the bind.
     res = registry.execute(
         name="api_mock",
-        args={"op": "start", "port": 9199},
+        args={"op": "start", "port": 0},
         obs=obs,
         cfg=cfg,
     )
     assert res.ok is True
-    assert '"port": 9199' in res.message
+    started = json.loads(res.message)
+    assert started["status"] == "started"
+    test_port = started["port"]
+    assert test_port > 0
+    assert f'"port": {test_port}' in res.message
     assert res.needs_observe is False
 
     # Stop server via registry
     res_stop = registry.execute(
         name="api_mock",
-        args={"op": "stop", "port": 9199},
+        args={"op": "stop", "port": test_port},
         obs=obs,
         cfg=cfg,
     )

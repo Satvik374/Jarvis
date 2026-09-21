@@ -262,7 +262,9 @@ class ScreenshotArchivalTests(unittest.TestCase):
             brain=SimpleNamespace(use_vision=True),
             perception=SimpleNamespace(save_screenshots=True),
         )
-        agent._shot_dir = Path(tempfile.gettempdir()) / "jarvis-latency-test"
+        shot_dir = tempfile.TemporaryDirectory(prefix="jarvis-latency-")
+        self.addCleanup(shot_dir.cleanup)
+        agent._shot_dir = Path(shot_dir.name)
 
         raw_image = Mock(name="raw-image")
         shot = loop.screen_mod.Screenshot(

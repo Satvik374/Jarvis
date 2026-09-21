@@ -46,7 +46,7 @@ class _MockManager:
 
     def start_server(self, port: int = 8999) -> Dict[str, Any]:
         with self._lock:
-            if port in self._servers:
+            if port and port in self._servers:
                 state = self._servers[port]
                 return {
                     "status": "already_running",
@@ -62,7 +62,9 @@ class _MockManager:
                     pass  # Suppress console logging
 
                 def _handle_any(self, method: str):
-                    state = manager._servers.get(port)
+                    # Key on the port the socket actually bound, so a server started
+                    # on port 0 (OS-assigned) still finds its own state.
+                    state = manager._servers.get(self.server.server_address[1])
                     if not state:
                         self.send_response(503)
                         self.end_headers()
@@ -152,16 +154,19 @@ class _MockManager:
                     self.end_headers()
 
             server = _ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+            # Port 0 asks the OS for a free port; the bound port is the real one, so
+            # it is both the registry key and the value callers are told to use.
+            bound_port = int(server.server_address[1])
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
 
-            state = _MockState(port=port, server=server, thread=thread)
-            self._servers[port] = state
+            state = _MockState(port=bound_port, server=server, thread=thread)
+            self._servers[bound_port] = state
 
             return {
                 "status": "started",
-                "port": port,
-                "url": f"http://127.0.0.1:{port}",
+                "port": bound_port,
+                "url": f"http://127.0.0.1:{bound_port}",
             }
 
     def add_route(
@@ -177,8 +182,9 @@ class _MockManager:
         with self._lock:
             state = self._servers.get(port)
             if not state:
-                # Auto-start server if not running
-                self.start_server(port)
+                # Auto-start server if not running, adopting the bound port so an
+                # ephemeral request (port 0) registers its route on the real one.
+                port = int(self.start_server(port)["port"])
                 state = self._servers[port]
 
             clean_method = (method or "GET").strip().upper()
@@ -271,7 +277,7 @@ def api_mock(
     """
     op_clean = (op or "start").strip().lower()
     mgr = _MockManager.get()
-    p_num = int(port or 8999)
+    p_num = 8999 if port in (None, "") else int(port)
 
     if op_clean in ("start", "launch", "init"):
         res = mgr.start_server(port=p_num)
