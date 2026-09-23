@@ -1020,7 +1020,8 @@ ACTIONS: tuple[Action, ...] = (
         "      gmail    - unread | search (query = Gmail search syntax) | read "
         "(target = an [id] from a previous listing)\n"
         "      discord  - guilds | channels (target = server) | messages "
-        "(target = channel id or #name)\n"
+        "(target = channel id or #name) | send (target = channel id or #name, "
+        "query = the message to post)\n"
         "      whatsapp - messages | profile\n"
         "      A service that is not set up replies with the exact .env "
         "variables it needs - relay that to the user rather than guessing.",
@@ -1041,6 +1042,8 @@ ACTIONS: tuple[Action, ...] = (
                    "query": "from:github is:unread", "limit": 5},
                   {"service": "gmail", "op": "read", "target": "24817"},
                   {"service": "discord", "op": "messages", "target": "#general"},
+                  {"service": "discord", "op": "send", "target": "#general",
+                   "query": "Deploy finished - all green."},
                   {"service": "whatsapp", "op": "messages"}),
     ),
     # ---- mcp --------------------------------------------------------------

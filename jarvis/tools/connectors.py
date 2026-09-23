@@ -238,6 +238,9 @@ def _hdr(msg, name: str) -> str:
 # Discord (bot REST API)
 # --------------------------------------------------------------------------- #
 _DISCORD_API = "https://discord.com/api/v10"
+#: Discord refuses a longer body outright rather than truncating it, so the one
+#: place a message is built clips it.
+_DISCORD_MAX_CHARS = 2000
 _DISCORD_HINT = (
     "Discord is not configured. Create an application at "
     "discord.com/developers/applications, add a Bot, copy its token into "
@@ -365,8 +368,98 @@ def _discord(op: str, query: str = "", target: str = "", limit: int = 10) -> str
             lines.append(f"  {when} {author}: {text}")
         return f"#{chan.get('name', chan['id'])} last {len(msgs)}:\n" + "\n".join(lines)
 
-    raise ConnectorError(f"unknown discord op '{op}' - use guilds, channels or "
-                         "messages")
+    if op in ("send", "say", "post", "reply"):
+        # A write, not a read: 'query' carries the text and 'target' the channel,
+        # because the connector action has exactly those four fields and a new
+        # one would change the model-visible schema for every service.
+        body = str(query or "").strip()
+        if not body:
+            raise ConnectorError("discord send needs 'query' - the message to "
+                                 "post.")
+        channel = _channel_id(target)
+        mid = discord_send(channel, body)
+        invalidate("discord")
+        return (f"sent to Discord channel {channel}"
+                + (f" (message {mid})" if mid else ""))
+
+    raise ConnectorError(f"unknown discord op '{op}' - use guilds, channels, "
+                         "messages or send")
+
+
+def _channel_id(target: str) -> str:
+    """A channel id from a raw id, a #name, or a channel id typed as text.
+
+    Reading a channel by name costs one call per server the bot is in, which is
+    fine for a question and wasteful for a send, so an id is taken as it comes.
+    """
+    text = str(target or "").strip().lstrip("#")
+    if text.isdigit():
+        return text
+    return str(_resolve_channel(text)["id"])
+
+
+def discord_send(channel_id: str, body: str, reply_to: str = "") -> str:
+    """Post one message as the bot; returns the message id Discord assigned.
+
+    One owner for this HTTP call: the model reaches it through the connector
+    action's 'send' op, and the gateway listener (jarvis/discord_bot.py) answers
+    a DM with it. Discord's 2000-character limit is a hard refusal, not a
+    truncation, so the body is clipped here where both callers are covered.
+    """
+    import requests
+
+    (token,) = _env("DISCORD_BOT_TOKEN")
+    if not token:
+        raise ConnectorError(_DISCORD_HINT)
+    channel = str(channel_id or "").strip()
+    if not channel.isdigit():
+        raise ConnectorError("discord send needs 'target' - a channel id, or a "
+                             "#name that already exists (list them with op "
+                             "'channels')")
+    text = str(body or "").strip()
+    if not text:
+        raise ConnectorError("discord send needs 'query' - the message text.")
+    payload: dict = {"content": text[:_DISCORD_MAX_CHARS]}
+    if str(reply_to or "").isdigit():
+        # A reply to a message that has since been deleted is refused unless this
+        # is set, and losing the answer to say so is the worse outcome.
+        payload["message_reference"] = {"message_id": str(reply_to),
+                                        "fail_if_not_exists": False}
+    try:
+        r = requests.post(f"{_DISCORD_API}/channels/{channel}/messages",
+                          json=payload, timeout=20,
+                          headers={"Authorization": f"Bot {token}",
+                                   "User-Agent": "Jarvis/1.0"})
+    except Exception as exc:
+        raise ConnectorError(f"could not reach Discord: {exc}")
+    if r.status_code == 401:
+        raise ConnectorError("Discord rejected the token (401). " + _DISCORD_HINT)
+    if r.status_code == 403:
+        raise ConnectorError("Discord refused the send (403) - the bot needs "
+                             "Send Messages in that channel.")
+    if r.status_code == 429:
+        raise ConnectorError("Discord rate-limited the send (429) - retry in "
+                             f"{r.json().get('retry_after', '?')}s.")
+    if r.status_code >= 400:
+        raise ConnectorError(f"Discord send -> HTTP {r.status_code}: "
+                             f"{r.text[:200]}")
+    try:
+        return str(r.json().get("id", ""))
+    except Exception:
+        return ""
+
+
+def discord_owner_id() -> str:
+    """The account this bot belongs to, or ``""`` when Discord will not say.
+
+    This is the *default* allowlist for the gateway listener: whoever created the
+    application is the person who may drive it. An empty answer is deliberate and
+    must be read as "nobody is allowed" rather than "everybody is" - a bot that
+    cannot name its owner has no business answering anyone.
+    """
+    app = _discord_get("/applications/@me")
+    owner = app.get("owner") if isinstance(app, dict) else None
+    return str((owner or {}).get("id") or "") if isinstance(owner, dict) else ""
 
 
 # --------------------------------------------------------------------------- #
@@ -482,7 +575,10 @@ _SERVICES = {
     "discord": {
         "fn": _discord,
         "env": ("DISCORD_BOT_TOKEN",),
-        "ops": "guilds, channels (target=server), messages (target=channel id or #name)",
+        "ops": "guilds, channels (target=server), messages (target=channel id "
+               "or #name), send (target=channel id or #name, query=text)",
+        #: Ops that change something out there. They skip the read cache above.
+        "writes": ("send", "say", "post", "reply"),
     },
     "whatsapp": {
         "fn": _whatsapp,
@@ -521,8 +617,15 @@ def fetch(service: str, op: str, query: str = "", target: str = "",
     except (TypeError, ValueError):
         limit = 10
     key = (service, op, str(query), str(target), limit)
-    text = _cached(key, lambda: spec["fn"](op, str(query or ""),
-                                           str(target or ""), limit))
+    produce = lambda: spec["fn"](op, str(query or ""), str(target or ""), limit)
+    if op in spec.get("writes", ()):
+        # A write is never answered from the read cache. Two identical 'send'
+        # calls are two messages the user asked for, and a memo would report the
+        # second one as sent without the network ever hearing about it.
+        text = produce()
+        invalidate(service)
+    else:
+        text = _cached(key, produce)
     return text[:_CAP] + ("\n...(truncated)" if len(text) > _CAP else "")
 
 

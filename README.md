@@ -775,6 +775,169 @@ tools: read_file, write_file
 1. Open the sales sheet. 2. Sum the week. 3. Write the report.
 ```
 
+### Messaging Jarvis on Discord (`jarvis/discord_bot.py`)
+
+You can write to Jarvis and have it answer — no console open, no window in front.
+It listens on its own, as its own process:
+
+```bash
+python -m jarvis.discord_bot --check     # is it configured? nothing is connected
+python -m jarvis.discord_bot             # listen until Ctrl-C
+```
+
+```text
+JARVIS_DISCORD_LISTEN=1   # required: opt-in, like voice and live voice
+DISCORD_BOT_TOKEN=...     # discord.com/developers/applications -> Bot
+DISCORD_ALLOWED_USERS=    # your user id or your username; blank = the bot's owner
+JARVIS_DISCORD_AGENT=1    # optional: let a command move the desktop, not just talk
+```
+
+> **Why its own process.** Holding that gateway connection *inside* the console
+> was measured to wedge the floating HUD's teardown: `:quit` reaches
+> `mini_overlay.stop()` → `tkinter` `destroy`, which waits on a Tcl interpreter
+> whose thread has already gone, and never returns. A plain thread at the same
+> point in startup is fine, and so is an asyncio loop — it is specifically the
+> connection. A socket that should outlive a window has no business sharing a
+> lifecycle with one, so it runs as its own program and the console does not start
+> it at all.
+
+With `DISCORD_ALLOWED_USERS` unset the allowlist is the **application's owner** —
+whoever created the bot. When Discord will not name an owner, Jarvis answers
+nobody and says why in the log, rather than falling back to everyone; a failed
+lookup is retried on the next message instead of switching the listener off for
+the session. Direct messages are always answered; a server message has to mention
+the bot unless `JARVIS_DISCORD_GUILD=1`, because a bot that comments on every
+message in a busy server is not a feature. Other bots are never answered, its own
+messages included, and a redelivered event is answered once.
+
+By default the words come from the brain, exactly as the away assistant's do, and
+a Discord message gets an answer rather than a task. With
+`JARVIS_DISCORD_AGENT=1` it gets a task too: a message that reads like a command
+("open Notepad", "close Spotify") is carried out **on this computer** by an agent
+of this process's own, and the result comes back as a message. It is a separate
+switch from listening because it is a much larger promise — whoever can message
+the bot can move this machine's mouse and keyboard.
+
+```text
+you:  open Notepad
+🛠️ On it: open Notepad                     <- before the work starts, so silence
+❓ which folder should I save this in?      never looks like a broken bot
+🛠️ ...and whatever the agent did.
+```
+
+Three properties keep that safe, none of which the console's own protection
+covers, because the console is a different process:
+
+* **One task at a time**, across processes. A lock file in the state root
+  (`discord_task.lock`) is shared with a console running a scheduled job, so the
+  two cannot fight over the mouse. A task killed mid-run leaves its lock behind;
+  after 90 s without a heartbeat the lock is stolen rather than blocking forever.
+* **Off the gateway thread.** A command takes minutes and the heartbeat that keeps
+  the session open has milliseconds, so the work runs on a worker thread — the
+  connection that is supposed to deliver the result is not dropped while
+  producing it.
+* **Questions come back to Discord.** When the agent needs to know something it
+  asks in the channel it was messaged from and waits for the next message. The
+  *next* one only: any more would overwrite the answer being read. No answer
+  within five minutes ends the task **with the question** — silence is not consent.
+
+#### Why the commands people send are quick
+
+Measured here: one model completion costs **~10.5 s**, and it is *not* the prompt —
+35k chars and 12k chars came back in the same 11–12 s. So the cost is per call, and
+`Open Notepad` took **10 calls / 137 s**, 112 s of it waiting on the provider.
+Opening an app, meanwhile, is one tool call that takes **1.1 s**. The handful of
+commands that are exactly one tool call are therefore answered **without the model**:
+open/launch a *known* app, close a window, open a URL.
+
+| command | through the agent | now |
+|---|---|---|
+| `Open Calculator` | 137 s (10 model calls) | **3.5 s** |
+| `can you open calculator for me` | 137 s | **1.6 s** |
+| `close Calculator` | — | **1.7 s** |
+| `open youtube.com` | — | **2.7 s** |
+
+Only the names in the tool layer's own alias table are launched that way, and the
+**window list is the evidence** before anything is claimed — `open_app("bogus-app-xyz")`
+answers `launched 'bogus-app-xyz'` with a Windows error dialog on the screen, so a
+launch with no window to show for it is handed to the agent instead of reported as
+done. Anything with a second clause (`open calculator and set an alarm`), a file
+(`open report.pdf`) or an unknown name still goes to the agent, unchanged — and a
+shortcut that throws falls back to it rather than failing the command.
+
+How "command" is told from "pleasantry": the console's own router is asked
+first, and it is deliberately narrow (an imperative verb). Two things widen it
+here, both because a person typing on a phone is not typing at a console:
+
+* **The phrase is offered twice** when the router says no — as written, then with
+  trailing politeness removed. The router understands wrappers at the *front*
+  (`can you`, `please`) but nothing after the object, so `can you open calculator
+  for me` — a real message that came back as raw tool-call syntax — is a command
+  it rejects. Only the *router* sees the trimmed copy; the task that runs keeps
+  the words you used.
+* **A reply that reaches for a tool is an instruction.** When the model answers a
+  message by writing a tool call (`<invoke …>`, `[TOOL_CALL]{tool => …}`), it has
+  said "this is an action" more clearly than any verb list. Rather than post the
+  call syntax or apologise for having no answer, Jarvis goes and does it. With
+  task mode off, such markup is never posted as a message — you get an honest
+  "I could not produce an answer" and the reason goes to the log.
+
+A caveat worth knowing: a task is not fast. Opening an app took **3m 25s** in a
+measured run — the model takes several steps of looking and acting — and only the
+acknowledgement and the final result are posted in between. And a reply longer
+than Discord's 2000-character limit arrives as consecutive messages rather than
+not arriving at all.
+
+The other direction is the same connector: `:connect discord send #general ...`,
+or the `connector` action with `op: send`. Note that a `send` never goes through
+the read cache — two identical sends are two messages, not one memoised answer.
+
+---
+
+## Skills (reusable procedures)
+
+A skill is a written procedure for a whole class of task — a research brief, how
+to drive a desktop app safely, machine triage, inbox handling, long-form
+drafting — stored as one markdown file per skill in `dataset/data/skills/`.
+Five presets ship with the app and are seeded on first use; they are ordinary
+files, so editing one keeps your version.
+
+Jarvis gets at them in **two stages**, which is the whole point:
+
+1. the system prompt carries a one-line **index** (name, what it is, when to
+   reach for it);
+2. the full body is loaded only when a skill is actually chosen.
+
+A library of thirty skills therefore costs about thirty lines of context, and
+the expensive instructions are paid for only when they are about to be used.
+
+```text
+skill action=search query="summarise my inbox"   # find the right one
+skill action=load   name=inbox-triage           # bring its steps into context
+skill action=unload                             # done with it
+skill action=create name=weekly-report body="1. ..."  # write a new one
+```
+
+`create` is how Jarvis learns: after working out a procedure worth repeating, it
+saves it, and the next run is a lookup instead of a rediscovery. Subagents get
+the same library, so a delegated task does not re-derive a skill its parent
+already wrote. The browser interface also has a `SKILLS` tab that lists the
+library and stages a directive for the one you pick — see *The browser
+interface* below.
+
+A skill file is markdown with a small YAML frontmatter block:
+
+```markdown
+---
+name: weekly-report
+description: Build the Monday numbers report from the sales sheet.
+when_to_use: weekly report, monday numbers, sales summary
+tools: read_file, write_file
+---
+
+1. Open the sales sheet. 2. Sum the week. 3. Write the report.
+```
+
 ### Two properties that are enforced, not promised
 
 * **A skill cannot grant a capability.** `tools` is advisory and is filtered
