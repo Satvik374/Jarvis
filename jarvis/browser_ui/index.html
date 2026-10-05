@@ -18,7 +18,15 @@
 
   <div class="app-shell">
     <header class="topbar">
-      <a class="brand" href="#" aria-label="Jarvis home">
+      <a class="skip-link" href="#composer">Skip to directive input</a>
+            <!--
+        A label, not a link. It used to be an anchor pointing at an empty
+        fragment: that advertised a "Jarvis home" destination which does not
+        exist, made the first tab stop in the interface a dead one, and put a
+        bare fragment in the URL when activated. Its text is its name, so it
+        needs no aria-label.
+      -->
+      <div class="brand">
         <span class="brand-mark" aria-hidden="true">
           <i></i><i></i><i></i>
         </span>
@@ -26,7 +34,7 @@
           <strong>JARVIS</strong>
           <small id="brandSubtitle">LOCAL INTELLIGENCE</small>
         </span>
-      </a>
+      </div>
 
       <div class="topbar-center" aria-hidden="true">
         <span id="topbarPrimary">NEURAL LINK</span>
@@ -101,6 +109,15 @@
           <button role="tab" id="tabBtnLogs" type="button" class="panel-tab"
                   aria-selected="false" aria-controls="tabLogs" data-tab="logs" tabindex="-1">
             <span>LOGS</span><i class="tab-count" id="tabCountLogs">0</i>
+          </button>
+          <!--
+            No count badge here on purpose. A badge costs about 17px of a 48px
+            tab, and what it would say (how many keys are configured) is already
+            the first line of the panel itself.
+          -->
+          <button role="tab" id="tabBtnKeys" type="button" class="panel-tab"
+                  aria-selected="false" aria-controls="tabKeys" data-tab="keys" tabindex="-1">
+            <span>KEYS</span>
           </button>
           <span class="tab-underline" aria-hidden="true"></span>
         </div>
@@ -241,6 +258,35 @@
             <div class="alert-list" id="alertList" role="log" aria-live="polite" tabindex="0">
               <p class="vital-empty">No warnings or faults. All clear.</p>
             </div>
+          </section>
+
+          <!-- KEYS -->
+          <section class="tab-panel" id="tabKeys" role="tabpanel"
+                   aria-labelledby="tabBtnKeys" tabindex="0" hidden>
+            <div class="panel-heading">
+              <span class="eyebrow">API KEYS</span>
+              <button class="text-button" id="reloadKeys" type="button">REFRESH</button>
+            </div>
+            <p class="keys-note" id="keysNote">
+              Every key Jarvis reads, instead of editing <code>.env</code> by hand.
+            </p>
+            <label class="sr-only" for="keyFilter">Filter API keys</label>
+            <input class="cmd-filter" id="keyFilter" type="search"
+                   placeholder="Filter keys…" autocomplete="off" spellcheck="false">
+            <div class="keys-list" id="keysList" role="list">
+              <p class="vital-empty">Loading credentials…</p>
+            </div>
+            <form class="keys-add" id="keysAdd">
+              <label class="sr-only" for="newKeyName">New variable name</label>
+              <input class="keys-add-name" id="newKeyName" type="text" placeholder="NEW_VARIABLE"
+                     autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="64">
+              <div class="keys-add-row">
+                <label class="sr-only" for="newKeyValue">New value</label>
+                <input class="keys-add-value" id="newKeyValue" type="password" placeholder="value"
+                       autocomplete="new-password" spellcheck="false">
+                <button class="key-button" type="submit" id="newKeyAdd">ADD</button>
+              </div>
+            </form>
           </section>
         </div>
       </aside>
@@ -405,7 +451,7 @@
           <button type="button" id="removeAttachment" aria-label="Remove attachment">×</button>
         </div>
 
-        <form class="composer" id="composer">
+        <form class="composer" id="composer" tabindex="-1">
           <label class="sr-only" id="promptLabel" for="promptInput">Send a directive to Jarvis</label>
           <textarea id="promptInput" rows="1" maxlength="200000"
                     placeholder="Waiting for terminal link…" disabled></textarea>

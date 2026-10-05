@@ -18,6 +18,7 @@ from . import mouse, keyboard, apps, files, system, mouse_control, converter, co
 from .schema import ACTIONS_BY_NAME
 from ..config import Config
 from ..perception.elements import Observation
+from ..providers import kind_of
 from ..utils.paths import project_root, state_root
 
 
@@ -39,10 +40,30 @@ class ActionResult:
     # because a stop is not a completed task and must never be handed to the
     # verifier as one.
     stop_session: bool = False
+    # A fresh post-action read, when the handler already needed one (wait_for).
+    # The loop can use it instead of immediately repeating the UIA/OCR pass.
+    observation: Observation | None = None
 
 
 class UnknownAction(Exception):
     pass
+
+
+def _choreograph(name: str, args: dict[str, Any], cfg: Config) -> Any:
+    """The animator for one action, or None when there is nothing to animate.
+
+    Best-effort on purpose: this is a display concern sitting on the path of
+    every tool call, so a missing HUD, a config oddity or an import failure must
+    cost the action nothing rather than fail it. Imported here (not at module
+    scope) because ``jarvis.hud`` pulls in tkinter, which the dataset builder and
+    the training pipeline - both of which import this module - do not have.
+    """
+    try:
+        from ..hud import choreography
+
+        return choreography.begin(name, args, cfg)
+    except Exception:
+        return None
 
 
 def execute(name: str, args: dict[str, Any], obs: Observation,
@@ -53,7 +74,22 @@ def execute(name: str, args: dict[str, Any], obs: Observation,
     handler = handler_for(name)
     if handler is None:  # pragma: no cover - schema/registry mismatch guard
         raise UnknownAction(name)
-    return handler(args, obs, cfg)
+
+    # Narrate the action: a short script of what this tool is doing, played on
+    # the HUD / browser stage / terminal while the handler runs. Both calls are
+    # non-blocking by construction (a queue put, or a no-op when nothing is
+    # watching), so this can never be the reason a tool feels slow - and the
+    # closing beat always carries the handler's *real* result.
+    animator = _choreograph(name, args, cfg)
+    try:
+        result = handler(args, obs, cfg)
+    except BaseException as exc:
+        if animator is not None:
+            animator.finish(False, f"{type(exc).__name__}: {exc}")
+        raise
+    if animator is not None:
+        animator.finish(result.ok, result.message)
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -65,7 +101,7 @@ def _norm_to_pixels(x: float, y: float, obs: Observation, cfg) -> tuple[float, f
     convention, reinforced by our system instruction). Convert a raw pair back
     to real screen pixels. Values above 1000 are already pixels and pass
     through untouched."""
-    if cfg is None or not (cfg.brain.backend in {"gemini", "vertex"}
+    if cfg is None or not (kind_of(cfg.brain.backend) == "gemini"
                            and cfg.brain.use_vision):
         return x, y
     sw, sh = obs.screen_size
@@ -74,6 +110,73 @@ def _norm_to_pixels(x: float, y: float, obs: Observation, cfg) -> tuple[float, f
     if x <= 1000 and y <= 1000:
         return round(x * sw / 1000), round(y * sh / 1000)
     return x, y
+
+
+def _coord_name(args: dict, el_key: str = "element") -> str:
+    """The saved-coordinate name a pointer action asked for, if any.
+
+    An explicit element id outranks it: an id is ground truth for THIS turn,
+    while a saved name is a memory of a past one.
+    """
+    if args.get(el_key) is not None:
+        return ""
+    for key in ("coord", "coordinate", "coord_name"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _resolve_saved_coord(name: str, obs: Observation) -> tuple:
+    """A remembered click target, resolved without re-reading the screen.
+
+    This is the whole point of the coordinate memory: a control the agent has
+    found before costs one lookup instead of a screenshot and a UI-Automation
+    walk (or, on a phone, a JPEG upload and a model round trip).
+
+    Only ``pc`` entries are clickable here. A ``mobile`` coordinate lives in the
+    phone's own pixel space, so clicking it on the desktop would hit an
+    unrelated spot - that mistake is answered with the fix, never a silent miss.
+    """
+    from ..memory.coordinates import get_store
+
+    store = get_store()
+    try:
+        screen_w, screen_h = obs.screen_size
+    except Exception:  # a bare/None observation still resolves stored pixels
+        screen_w = screen_h = 0
+    entry = store.resolve(name, kind="pc", screen_w=screen_w, screen_h=screen_h)
+    if entry is not None:
+        # A resolved name IS the coordinate being consumed: the pointer call
+        # below is fire-and-forget, so this counts uses, not verified UI
+        # outcomes. A target that has moved is corrected by re-saving it (the
+        # save moves the entry), which is what the prompt asks for.
+        try:
+            store.record_use(entry.name, kind="pc", ok=True)
+        except Exception:
+            pass
+        return (entry.x, entry.y), ""
+    if store.get(name, kind="mobile") is not None:
+        return None, (f"'{name}' is saved as a MOBILE coordinate - it belongs to "
+                      f"the phone's screen, not this computer. Put it in a "
+                      f"remote_task for the phone instead, or save a 'pc' "
+                      f"coordinate for the control on this desktop.")
+    return None, f"no saved coordinate named '{name}'{_coord_suggestion(store, name)}"
+
+
+def _coord_suggestion(store, name: str) -> str:
+    """Near-miss names, so one typo costs a corrected click, not a dead end."""
+    try:
+        matches = store.search(name, limit=3)
+    except Exception:
+        matches = []
+    if not matches:
+        return (". Use coordinates(action=\"find\", query=\"...\") to search the "
+                "saved names, or click by element id from the list.")
+    listed = ", ".join(f"{m.name} [{m.kind}]" for m in matches)
+    return (f". Closest saved names: {listed}. Click one of those exactly, or "
+            f"search them with coordinates(action=\"find\", query=\"...\") - and "
+            f"if the target was never saved, use an element id from the list.")
 
 
 def _resolve_point(args: dict, obs: Observation, cfg=None,
@@ -98,6 +201,9 @@ def _resolve_point(args: dict, obs: Observation, cfg=None,
         return None, (f"element {args[el_key]} is NOT in the current element "
                       f"list (valid ids: {rng}). The list is rebuilt every "
                       f"turn - use an id from the list shown THIS turn.")
+    saved = _coord_name(args, el_key)
+    if saved:
+        return _resolve_saved_coord(saved, obs)
     if args.get(x_key) is not None and args.get(y_key) is not None:
         try:
             fx, fy = float(args[x_key]), float(args[y_key])
@@ -136,7 +242,7 @@ def _resolve_point(args: dict, obs: Observation, cfg=None,
                       f"{sw}x{sh} screen - the value looks corrupted. Do NOT "
                       f"retry it; click by element id from the list instead.")
     return None, ("no target given - pass an element id from the list "
-                  "(preferred) or on-screen x,y")
+                  "(preferred), a saved 'coord' name, or on-screen x,y")
 
 
 def _num(args: dict, key: str, default: float, lo: float, hi: float) -> float:
@@ -174,6 +280,13 @@ def _target_desc(args: dict, obs: Observation, el_key: str = "element",
             name = (el.name or "").strip().replace("\n", " ")[:40]
             label = f' "{name}"' if name else ""
             return f"element [{el.id}] {el.role}{label}"
+    saved = _coord_name(args, el_key)
+    if saved:
+        # Echo the NAME, not the pixels, for the same reason raw clicks echo the
+        # model's own numbers: a saved name is what the model should click
+        # again, and a copied pixel pair can be re-read as a normalized
+        # coordinate on the next turn.
+        return f'saved \"{saved}\"'
     return f"({args.get(x_key)},{args.get(y_key)})"
 
 
@@ -181,19 +294,30 @@ def _target_desc(args: dict, obs: Observation, el_key: str = "element",
 # handlers
 # --------------------------------------------------------------------------- #
 
+def _shadow_input(method: str, message: str, *args, **kwargs) -> ActionResult | None:
+    """Dispatch in shadow mode, never retrying failures on the real desktop."""
+    from ..desktop import is_shadow_enabled, get_virtual_input
+    if not is_shadow_enabled():
+        return None
+    try:
+        ok = bool(getattr(get_virtual_input(), method)(*args, **kwargs))
+    except Exception as exc:
+        return ActionResult(False, f"{method} failed in shadow workspace: {exc}")
+    if not ok:
+        return ActionResult(False, f"{method} failed in shadow workspace: "
+                            "no target, unsupported input, or rejected window message")
+    return ActionResult(True, message + " (shadow workspace)")
+
+
 def _h_click(args, obs, cfg):
     pt, err = _resolve_point(args, obs, cfg)
     if pt is None:
         return ActionResult(False, f"click failed: {err}")
     count = int(_num(args, "count", 1, 1, 10))
-    try:
-        from ..desktop import is_shadow_enabled, get_virtual_input
-        if is_shadow_enabled():
-            get_virtual_input().click(pt[0], pt[1], clicks=count)
-            return ActionResult(True, "left-clicked " + _target_desc(args, obs)
-                                + (f" x{count}" if count > 1 else "") + " (shadow workspace)")
-    except Exception:
-        pass
+    shadow = _shadow_input("click", "left-clicked " + _target_desc(args, obs)
+                           + (f" x{count}" if count > 1 else ""), *pt, clicks=count)
+    if shadow is not None:
+        return shadow
 
     mouse.click(*pt, clicks=count)
     return ActionResult(True, "left-clicked " + _target_desc(args, obs)
@@ -204,13 +328,10 @@ def _h_double_click(args, obs, cfg):
     pt, err = _resolve_point(args, obs, cfg)
     if pt is None:
         return ActionResult(False, f"double_click failed: {err}")
-    try:
-        from ..desktop import is_shadow_enabled, get_virtual_input
-        if is_shadow_enabled():
-            get_virtual_input().click(pt[0], pt[1], clicks=2)
-            return ActionResult(True, "double-clicked " + _target_desc(args, obs) + " (shadow workspace)")
-    except Exception:
-        pass
+    shadow = _shadow_input("click", "double-clicked " + _target_desc(args, obs),
+                           *pt, clicks=2)
+    if shadow is not None:
+        return shadow
     mouse.double_click(*pt)
     return ActionResult(True, "double-clicked " + _target_desc(args, obs))
 
@@ -219,13 +340,10 @@ def _h_triple_click(args, obs, cfg):
     pt, err = _resolve_point(args, obs, cfg)
     if pt is None:
         return ActionResult(False, f"triple_click failed: {err}")
-    try:
-        from ..desktop import is_shadow_enabled, get_virtual_input
-        if is_shadow_enabled():
-            get_virtual_input().click(pt[0], pt[1], clicks=3)
-            return ActionResult(True, "triple-clicked " + _target_desc(args, obs) + " (shadow workspace)")
-    except Exception:
-        pass
+    shadow = _shadow_input("click", "triple-clicked " + _target_desc(args, obs),
+                           *pt, clicks=3)
+    if shadow is not None:
+        return shadow
     mouse.triple_click(*pt)
     return ActionResult(True, "triple-clicked " + _target_desc(args, obs))
 
@@ -234,13 +352,10 @@ def _h_right_click(args, obs, cfg):
     pt, err = _resolve_point(args, obs, cfg)
     if pt is None:
         return ActionResult(False, f"right_click failed: {err}")
-    try:
-        from ..desktop import is_shadow_enabled, get_virtual_input
-        if is_shadow_enabled():
-            get_virtual_input().click(pt[0], pt[1], button="right", clicks=1)
-            return ActionResult(True, "right-clicked " + _target_desc(args, obs) + " (shadow workspace)")
-    except Exception:
-        pass
+    shadow = _shadow_input("click", "right-clicked " + _target_desc(args, obs),
+                           *pt, button="right", clicks=1)
+    if shadow is not None:
+        return shadow
     mouse.right_click(*pt)
     return ActionResult(True, "right-clicked " + _target_desc(args, obs))
 
@@ -249,19 +364,20 @@ def _h_move(args, obs, cfg):
     pt, err = _resolve_point(args, obs, cfg)
     if pt is None:
         return ActionResult(False, f"move failed: {err}")
-    try:
-        from ..desktop import is_shadow_enabled
-        if is_shadow_enabled():
-            return ActionResult(True, "moved virtual cursor to " + _target_desc(args, obs) + " (shadow workspace)",
-                                needs_observe=False)
-    except Exception:
-        pass
+    from ..desktop import is_shadow_enabled
+    if is_shadow_enabled():
+        return ActionResult(False, "move is not supported in shadow workspace",
+                            needs_observe=False)
     mouse.move(*pt)
     return ActionResult(True, "moved mouse to " + _target_desc(args, obs),
                         needs_observe=False)
 
 
 def _h_drag(args, obs, cfg):
+    from ..desktop import is_shadow_enabled
+    if is_shadow_enabled():
+        return ActionResult(False, "drag is not supported in shadow workspace",
+                            needs_observe=False)
     src, err_s = _resolve_point(args, obs, cfg, "from_element", "x1", "y1")
     dst, err_d = _resolve_point(args, obs, cfg, "to_element", "x2", "y2")
     if src is None or dst is None:
@@ -278,13 +394,19 @@ def _h_scroll(args, obs, cfg):
     # value overflows it the same way as bad coordinates.
     dy = int(_num(args, "dy", 3, -50, 50))
     dx = int(_num(args, "dx", 0, -50, 50))
-    try:
-        from ..desktop import is_shadow_enabled, get_virtual_input
-        if is_shadow_enabled():
-            get_virtual_input().scroll(dy, dx)
-            return ActionResult(True, f"scrolled dy={dy} (shadow workspace)")
-    except Exception:
-        pass
+    from ..desktop import is_shadow_enabled, get_virtual_input
+    if is_shadow_enabled():
+        try:
+            dispatcher = get_virtual_input()
+            # Win32 wheel deltas are positive UP; dx is a separate axis, not
+            # the dispatcher's second positional argument (screen x).
+            if dy and not dispatcher.scroll(-dy):
+                return ActionResult(False, "vertical scroll failed in shadow workspace")
+            if dx and not dispatcher.scroll(dx, horizontal=True):
+                return ActionResult(False, "horizontal scroll failed in shadow workspace")
+        except Exception as exc:
+            return ActionResult(False, f"scroll failed in shadow workspace: {exc}")
+        return ActionResult(True, f"scrolled dy={dy} dx={dx} (shadow workspace)")
     return ActionResult(True, mouse.scroll(dy, dx))
 
 
@@ -308,13 +430,9 @@ def _h_type(args, obs, cfg):
     text = str(args.get("text", ""))
     if not text:
         return ActionResult(False, "type needs text")
-    try:
-        from ..desktop import is_shadow_enabled, get_virtual_input
-        if is_shadow_enabled():
-            get_virtual_input().type_text(text)
-            return ActionResult(True, f"typed '{text}' (shadow workspace)")
-    except Exception:
-        pass
+    shadow = _shadow_input("type_text", f"typed '{text}'", text)
+    if shadow is not None:
+        return shadow
     return ActionResult(True, keyboard.type_text(text))
 
 
@@ -322,51 +440,65 @@ def _h_press(args, obs, cfg):
     keys = str(args.get("keys", ""))
     if not keys:
         return ActionResult(False, "press needs keys")
-    try:
-        from ..desktop import is_shadow_enabled, get_virtual_input
-        if is_shadow_enabled():
-            get_virtual_input().press_key(keys)
-            return ActionResult(True, f"pressed key '{keys}' (shadow workspace)")
-    except Exception:
-        pass
-    return ActionResult(True, keyboard.press(keys))
+    shadow = _shadow_input("press_key", f"pressed key '{keys}'", keys)
+    if shadow is not None:
+        return shadow
+    message = keyboard.press(keys)
+    return ActionResult(message.startswith("pressed "), message)
 
 
 
 def _h_key_sequence(args, obs, cfg):
     keys = args.get("keys", [])
-    if not keys:
+    if isinstance(keys, str):
+        keys = [keys]
+    if (not isinstance(keys, list) or not keys
+            or any(not isinstance(key, str) or not key.strip() for key in keys)):
         return ActionResult(False, "key_sequence needs a non-empty 'keys' list")
-    return ActionResult(True, keyboard.press_sequence(keys))
+    from ..desktop import is_shadow_enabled
+    if is_shadow_enabled():
+        for key in keys:
+            result = _shadow_input("press_key", f"pressed key '{key}'", key)
+            if result is None or not result.ok:
+                return result if result is not None else ActionResult(
+                    False, "shadow workspace was disabled during key_sequence")
+        return ActionResult(True, "pressed sequence: " + " -> ".join(keys)
+                            + " (shadow workspace)")
+    message = keyboard.press_sequence(keys)
+    return ActionResult(message.startswith("pressed "), message)
 
 
 def _h_open_app(args, obs, cfg):
     name = str(args.get("name", ""))
     if not name:
         return ActionResult(False, "open_app needs a name")
-    return ActionResult(True, apps.open_app(name))
+    message = apps.open_app(name)
+    return ActionResult(message.startswith(("launched ", "opened ", "focused ")), message)
 
 
 def _h_focus_window(args, obs, cfg):
-    return ActionResult(True, apps.focus_window(str(args.get("title", ""))))
+    message = apps.focus_window(str(args.get("title", "")))
+    return ActionResult(message.startswith("focused "), message)
 
 
 def _h_snap_window(args, obs, cfg):
     direction = str(args.get("direction", "maximize"))
     title = args.get("title")
     msg = apps.snap_window(direction, title=str(title) if title else None)
-    return ActionResult(not msg.startswith("could not") and not msg.startswith("unknown"), msg)
+    return ActionResult(msg.startswith(("snapped ", "maximized ", "minimized ",
+                                        "restored ", "centered ")), msg)
 
 
 def _h_tile_windows(args, obs, cfg):
     layout = str(args.get("layout", "side_by_side"))
     msg = apps.tile_windows(layout)
-    return ActionResult(not msg.startswith("unknown"), msg)
+    return ActionResult(msg.startswith(("tiled ", "minimized ", "maximized ")), msg)
 
 
 
 def _h_open_url(args, obs, cfg):
-    return ActionResult(True, system.open_url(str(args.get("url", ""))))
+    message = system.open_url(str(args.get("url", "")))
+    return ActionResult(message.startswith("opened "), message)
 
 
 def _h_read_url(args, obs, cfg):
@@ -391,6 +523,14 @@ def _h_close_window(args, obs, cfg):
     return ActionResult(True, apps.close_window(str(args.get("title", ""))))
 
 
+#: wait_for's polling cadence. The whole job is to notice the target the
+#: moment it exists, so it checks the (cheap) window list every 50ms and pays
+#: for a full perception pass only this often - two probes a second, instead of
+#: a flat one-second sleep that could report a window up to a second late.
+_WAIT_FOR_POLL = 0.05
+_WAIT_FOR_OBSERVE_EVERY = 0.5
+
+
 def _h_wait_for(args, obs, cfg):
     target = str(args.get("target", "")).strip().lower()
     if not target:
@@ -401,27 +541,32 @@ def _h_wait_for(args, obs, cfg):
     except (TypeError, ValueError):
         timeout = 10.0
     from ..perception import elements as elem_mod
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
+    next_observe = 0.0
     while True:
         # Window titles first (cheap), then a full perception pass (thorough).
         for t in apps.list_windows():
             if target in t.lower():
                 return ActionResult(True, f"window '{t}' is present")
-        try:
-            cur = elem_mod.observe(max_elements=cfg.perception.max_elements,
-                                   use_uia=cfg.perception.use_uia,
-                                   use_ocr=cfg.perception.use_ocr)
-            for el in cur.elements:
-                if target in (el.name or "").lower():
-                    return ActionResult(
-                        True, f"element '{el.name.strip()[:60]}' is present")
-        except Exception:
-            pass                     # perception hiccup: keep polling
-        if time.time() >= deadline:
+        now = time.monotonic()
+        if now >= next_observe:
+            try:
+                cur = elem_mod.observe(max_elements=cfg.perception.max_elements,
+                                       use_uia=cfg.perception.use_uia,
+                                       use_ocr=cfg.perception.use_ocr)
+                for el in cur.elements:
+                    if target in (el.name or "").lower():
+                        return ActionResult(
+                            True, f"element '{el.name.strip()[:60]}' is present",
+                            observation=cur)
+            except Exception:
+                pass                 # perception hiccup: keep polling
+            next_observe = now + _WAIT_FOR_OBSERVE_EVERY
+        if time.monotonic() >= deadline:
             return ActionResult(
                 False, f"'{args.get('target')}' did not appear within "
                        f"{timeout:.0f}s")
-        time.sleep(1.0)
+        time.sleep(_WAIT_FOR_POLL)
 
 
 def _h_run_command(args, obs, cfg):
@@ -1250,6 +1395,234 @@ def _h_memory_search(args, obs, cfg):
     return ActionResult(True, "\n".join(lines), needs_observe=False)
 
 
+def _h_notes(args, obs, cfg):
+    """Read and write the user's Obsidian vault.
+
+    Every branch answers with ``needs_observe=False``: this action only touches
+    notes and memory, so it must never cost a fresh screenshot.
+    """
+    from ..memory.obsidian import VaultUnavailable
+    from ..memory.manager import get_memory_manager
+
+    op = str(args.get("action", "")).strip().lower() or "search"
+    manager = get_memory_manager()
+    try:
+        limit = int(args.get("limit", 10))
+    except (TypeError, ValueError):
+        limit = 10
+    limit = max(1, min(50, limit))
+
+    try:
+        vault = manager.obsidian_vault(cfg)
+    except VaultUnavailable as exc:
+        return ActionResult(False, str(exc), needs_observe=False)
+
+    if op == "status":
+        status = manager.obsidian_status(cfg)
+        if not status.get("configured"):
+            return ActionResult(True, str(status.get("detail", "")), needs_observe=False)
+        if not status.get("available"):
+            return ActionResult(False, str(status.get("detail", "")), needs_observe=False)
+        return ActionResult(True, (
+            f"Obsidian vault: {status['vault']}\n"
+            f"Notes found: {status['notes']}\n"
+            f"Notes filed as long-term memory: {status['indexed']}\n"
+            f"Daily notes folder: {status['daily_folder']}"
+        ), needs_observe=False)
+
+    if vault is None:
+        return ActionResult(False, (
+            "No Obsidian vault is configured. Set memory.obsidian_vault in config.yaml "
+            "or JARVIS_OBSIDIAN_VAULT to the folder holding the notes."
+        ), needs_observe=False)
+
+    try:
+        if op == "list":
+            notes = vault.notes(limit)
+            if not notes:
+                return ActionResult(True, f"No markdown notes found in {vault.root}.",
+                                    needs_observe=False)
+            lines = [f"{len(notes)} note(s) in the vault:"]
+            for note in notes:
+                tag_note = f"  (tags: {', '.join(note.tags)})" if note.tags else ""
+                lines.append(f"  • {note.path} — {note.title}{tag_note}")
+            return ActionResult(True, "\n".join(lines), needs_observe=False)
+
+        if op == "search":
+            query = str(args.get("query", "")).strip()
+            if not query:
+                return ActionResult(False, "notes needs a 'query' for action='search'",
+                                    needs_observe=False)
+            hits = vault.search(query, limit)
+            if not hits:
+                return ActionResult(True, f"No note in the vault mentions '{query}'.",
+                                    needs_observe=False)
+            lines = [f"Found {len(hits)} note(s) mentioning '{query}':"]
+            for note, _score in hits:
+                preview = " ".join(note.excerpt(240).split())[:180]
+                lines.append(f"  • {note.path} — {note.title}: {preview}")
+            lines.append("Read one in full with notes(action='read', title=<path>).")
+            return ActionResult(True, "\n".join(lines), needs_observe=False)
+
+        if op == "read":
+            title = str(args.get("title", "")).strip()
+            if not title:
+                return ActionResult(False, "notes needs a 'title' for action='read'",
+                                    needs_observe=False)
+            note = vault.read(title)
+            header = [f"Note: {note.path}", f"Title: {note.title}"]
+            if note.tags:
+                header.append(f"Tags: {', '.join(note.tags)}")
+            if note.links:
+                header.append(f"Links to: {', '.join(note.links)}")
+            return ActionResult(True, "\n".join(header) + f"\n\n{note.excerpt(4000)}",
+                                needs_observe=False)
+
+        if op == "index":
+            indexed, links = manager.sync_obsidian(cfg)
+            if indexed == 0:
+                return ActionResult(True, "No markdown notes found to index.",
+                                    needs_observe=False)
+            return ActionResult(True, (
+                f"Indexed {indexed} note(s) into long-term memory, with {links} "
+                "link(s) recorded in the knowledge graph."
+            ), needs_observe=False)
+
+        if op in {"append", "create", "daily"}:
+            content = str(args.get("content", "")).strip()
+            if not content:
+                return ActionResult(False, f"notes needs 'content' for action='{op}'",
+                                    needs_observe=False)
+            title = str(args.get("title", "")).strip()
+            if op in {"append", "create"} and not title:
+                return ActionResult(False, f"notes needs a 'title' for action='{op}'",
+                                    needs_observe=False)
+            tags = [t.strip() for t in str(args.get("tags", "")).split(",") if t.strip()]
+            relative = manager.save_obsidian_note(
+                title or "Untitled",
+                content,
+                mode=op,
+                heading=str(args.get("heading", "")).strip(),
+                tags=tags,
+                cfg=cfg,
+            )
+            return ActionResult(True, f"Saved to {relative} in the Obsidian vault.",
+                                needs_observe=False)
+    except (ValueError, FileNotFoundError, FileExistsError, VaultUnavailable) as exc:
+        return ActionResult(False, str(exc), needs_observe=False)
+    except Exception as exc:  # noqa: BLE001 - report, never crash the loop
+        return ActionResult(False, f"Obsidian vault error: {exc}", needs_observe=False)
+
+    return ActionResult(False, (
+        f"Unknown notes action '{op}'; use search, read, list, append, create, "
+        "daily, index or status."
+    ), needs_observe=False)
+
+
+def _h_coordinates(args, obs, cfg):
+    """Save, find, list and forget named click coordinates (pc / mobile).
+
+    Every branch answers with ``needs_observe=False``: this action only reads
+    and writes Jarvis's own memory, so it must never cost a fresh screenshot -
+    taking one is precisely the expense the memory exists to avoid.
+    """
+    from ..memory import coordinates as coords
+
+    op = str(args.get("action", "find")).strip().lower() or "find"
+    kind = coords.normalize_kind(args.get("kind"), default=coords.DEFAULT_KIND)
+    name = str(args.get("name", "")).strip()
+    query = str(args.get("query", "")).strip()
+    limit = int(_num(args, "limit", 5, 1, 50))
+    store = coords.get_store()
+
+    if op in {"save", "remember", "store", "add", "set"}:
+        if not name:
+            return ActionResult(False, "coordinates 'save' needs a name you choose "
+                                       "for the target, e.g. 'whatsapp-send-button'",
+                                needs_observe=False)
+        if args.get("x") is None or args.get("y") is None:
+            return ActionResult(False, "coordinates 'save' needs the x and y pixels "
+                                       "of the target", needs_observe=False)
+        screen_w, screen_h = coords.parse_screen(args.get("screen"))
+        if not (screen_w and screen_h):
+            # Fall back to the screen we can see, so the entry still scales if
+            # the model omitted the size it read the pixels on.
+            try:
+                screen_w, screen_h = (0, 0) if obs is None else obs.screen_size
+            except Exception:
+                screen_w, screen_h = 0, 0
+        try:
+            entry = store.save(
+                name, kind=kind,
+                x=int(_num(args, "x", 0, -100000, 100000)),
+                y=int(_num(args, "y", 0, -100000, 100000)),
+                screen_w=int(screen_w or 0), screen_h=int(screen_h or 0),
+                app=str(args.get("app", "")), note=str(args.get("note", "")),
+            )
+        except ValueError as exc:
+            return ActionResult(False, str(exc), needs_observe=False)
+        how = (f'click {{"action":"click","args":{{"coord":"{entry.name}"}}}}'
+               if entry.kind == "pc" else
+               f'name it inside a remote_task so the phone can tap '
+               f'({entry.x},{entry.y})')
+        return ActionResult(
+            True,
+            f"Saved '{entry.name}' [{entry.kind}] at ({entry.x},{entry.y})"
+            + (f" on {entry.screen_w}x{entry.screen_h}" if entry.screen_w else "")
+            + f". Next time, {how} - no screenshot needed to find it again.",
+            needs_observe=False,
+        )
+
+    if op in {"find", "search", "lookup", "look_up", "get"}:
+        term = query or name
+        if not term:
+            return ActionResult(False, "coordinates 'find' needs a 'query' (words "
+                                       "from the target's name)", needs_observe=False)
+        matches = store.search(term, kind=(kind if args.get("kind") else None),
+                               limit=limit)
+        if not matches:
+            listed = store.list_all(kind=(kind if args.get("kind") else None), limit=limit)
+            if listed:
+                body = "\n".join(f"  {e.describe()}" for e in listed)
+                return ActionResult(
+                    True,
+                    f"No saved coordinate matches '{term}'. Saved so far:\n{body}",
+                    needs_observe=False,
+                )
+            return ActionResult(True, f"No saved coordinates yet (nothing matches "
+                                       f"'{term}'). Save one with "
+                                       f"coordinates(action=\"save\", name=..., x=..., y=...).",
+                                needs_observe=False)
+        lines = [f"{len(matches)} saved coordinate(s) matching '{term}':"]
+        lines.extend(f"  {e.describe()}" for e in matches)
+        if any(e.kind == "pc" for e in matches):
+            lines.append('Click one with {"action":"click","args":{"coord":"<name>"}}.')
+        return ActionResult(True, "\n".join(lines), needs_observe=False)
+
+    if op in {"list", "all", "show"}:
+        entries = store.list_all(kind=(kind if args.get("kind") else None), limit=limit)
+        if not entries:
+            return ActionResult(True, f"No saved coordinates for kind '{kind}' yet.",
+                                needs_observe=False)
+        lines = [f"{len(entries)} saved coordinate(s):"]
+        lines.extend(f"  {e.describe()}" for e in entries)
+        return ActionResult(True, "\n".join(lines), needs_observe=False)
+
+    if op in {"forget", "delete", "remove", "drop"}:
+        if not name:
+            return ActionResult(False, "coordinates 'forget' needs the name (or part "
+                                       "of it) to remove", needs_observe=False)
+        removed = store.forget(name, kind=(kind if args.get("kind") else None))
+        if not removed:
+            return ActionResult(True, f"No saved coordinate matching '{name}' to remove.",
+                                needs_observe=False)
+        gone = ", ".join(f"{e.name} [{e.kind}]" for e in removed)
+        return ActionResult(True, f"Forgot {gone}.", needs_observe=False)
+
+    return ActionResult(False, f"unknown coordinates action '{op}'. Use one of: "
+                               f"save, find, list, forget.", needs_observe=False)
+
+
 def _h_graph_query(args, obs, cfg):
     entity = str(args.get("entity", "")).strip()
     if not entity:
@@ -1297,63 +1670,6 @@ def _h_voice_control(args, obs, cfg):
         sens = getattr(cfg.voice, "barge_in_sensitivity", 0.5) if cfg else 0.5
         msg = f"Voice Status: speaking={speaking}, full_duplex={duplex}, barge_in_sensitivity={sens}"
         return ActionResult(True, msg, needs_observe=False)
-
-
-def _h_macro(args, obs, cfg):
-    action = str(args.get("action", "list")).strip().lower()
-    name = str(args.get("name", "")).strip()
-    desc = str(args.get("description", "")).strip()
-    speed = float(args.get("speed", 1.0))
-    params = args.get("params") or {}
-
-    from ..macro import get_macro_manager, MacroPlayer
-    mgr = get_macro_manager()
-
-    if action == "record":
-        if not name:
-            return ActionResult(False, "macro 'record' requires a 'name' parameter", needs_observe=False)
-        from ..macro.recorder import get_macro_recorder
-        rec = get_macro_recorder(mgr)
-        rec.start_recording(name=name, description=desc)
-        return ActionResult(True, f"Started recording macro '{name}'. Perform your actions on screen, then call macro(action='stop').", needs_observe=False)
-
-    elif action == "stop":
-        from ..macro.recorder import get_macro_recorder
-        rec = get_macro_recorder(mgr)
-        macro = rec.stop_recording(save_to_memory=True)
-        return ActionResult(True, f"Saved macro '{macro.name}' ({len(macro.steps)} steps). Plan:\n\n{macro.format_plan()}", needs_observe=False)
-
-    elif action == "play":
-        if not name:
-            return ActionResult(False, "macro 'play' requires a 'name' parameter", needs_observe=False)
-        player = MacroPlayer(mgr)
-        res = player.play(name, speed=speed, params=params)
-        return ActionResult(res.get("ok", True), res.get("message", "Played."), needs_observe=True)
-
-    elif action == "show":
-        if not name:
-            return ActionResult(False, "macro 'show' requires a 'name' parameter", needs_observe=False)
-        macro = mgr.load_macro(name)
-        if not macro:
-            return ActionResult(False, f"Macro '{name}' not found.", needs_observe=False)
-        return ActionResult(True, macro.format_plan(), needs_observe=False)
-
-    elif action == "delete":
-        if not name:
-            return ActionResult(False, "macro 'delete' requires a 'name' parameter", needs_observe=False)
-        ok = mgr.delete_macro(name)
-        msg = f"Macro '{name}' deleted." if ok else f"Macro '{name}' could not be deleted."
-        return ActionResult(ok, msg, needs_observe=False)
-
-    else:  # list
-        macros = mgr.list_macros()
-        if not macros:
-            return ActionResult(True, "No macros recorded yet. Use macro(action='record', name='...') to create one.", needs_observe=False)
-        lines = [f"Found {len(macros)} saved macro(s):"]
-        for m in macros:
-            lines.append(f"  • {m.name} ({len(m.steps)} steps) - {m.description}")
-        return ActionResult(True, "\n".join(lines), needs_observe=False)
-
 
 
 def _h_skill(args, obs, cfg):
@@ -1637,11 +1953,52 @@ def _h_browser_action(args, obs, cfg):
         return ActionResult(False, f"Unknown browser_action '{action}'. Supported actions: navigate, click, type, select, scroll, hover, press, extract, snapshot, screenshot, eval, close.", needs_observe=False)
 
 
+def _mobile_coord_hint(task: str) -> str:
+    """Known phone coordinates for this task, appended to a remote_task.
+
+    The phone runs its own screenshot-driven loop, so a control Jarvis already
+    located there has been getting re-found by upload after upload. Handing the
+    pixels over with the task lets the phone use its ``tap x y`` fallback for
+    spots that are already known - and keeps working when the phone's element
+    list cannot name the control at all.
+
+    Empty when nothing matches, so a task with no saved phone coordinates is
+    sent byte-for-byte as before.
+    """
+    try:
+        from ..memory.coordinates import get_store, search_tokens
+
+        wanted = set(search_tokens(task))
+        if not wanted:
+            return ""
+        matches = []
+        for entry in get_store().list_all(kind="mobile"):
+            overlap = len(wanted & set(search_tokens(entry.name, entry.app, entry.note)))
+            if overlap:
+                matches.append((overlap + min(entry.uses, 5) * 0.05, entry))
+        if not matches:
+            return ""
+        matches.sort(key=lambda pair: pair[0], reverse=True)
+        lines = ["",
+                 "Known coordinates on this phone - use them directly instead of "
+                 "searching the screen again:"]
+        for _, entry in matches[:3]:
+            spot = f"tap {entry.x} {entry.y}"
+            detail = f" ({entry.note})" if entry.note else ""
+            lines.append(f"  {entry.name}: {spot}{detail}")
+        lines.append("Do not re-derive these positions from a screenshot.")
+        return "\n" + "\n".join(lines)
+    except Exception:
+        # A coordinate hint is a shortcut, never a reason for the task to fail.
+        return ""
+
+
 def _h_remote_task(args, obs, cfg):
     device = str(args.get("device", "")).strip()
     task = str(args.get("task", "")).strip()
     if not device or not task:
         return ActionResult(False, "remote_task needs both a device and task", needs_observe=False)
+    task = task + _mobile_coord_hint(task)
     try:
         timeout = args.get("timeout")
         timeout = int(timeout) if timeout is not None else None
@@ -1762,6 +2119,7 @@ def _h_secret(args, obs, cfg):
 
 
 def _h_see(args, obs, cfg):
+    """The older route: a second brain describes the frame back as prose."""
     prompt = str(args.get("prompt", "What do you see?")).strip()
     source = str(args.get("source", "both")).strip().lower()
     camera = int(args.get("camera", 0))
@@ -1774,6 +2132,32 @@ def _h_see(args, obs, cfg):
 
     res = vision.analyze(source=source, prompt=prompt, brain=brain, camera_index=camera)
     return ActionResult(True, res, needs_observe=False)
+
+
+def _h_camera(args, obs, cfg):
+    """Look through the webcam: take a frame, and attach it to the next turn.
+
+    The picture is not described here. It is handed back as ``image_path``, which
+    the loop loads and attaches to the very next model call, so the model looks at
+    the frame itself instead of reading a second model's prose about it - one
+    round trip instead of two, and no loss in the telling.
+    """
+    from ..perception import camera as camera_mod
+
+    op = str(args.get("op", "look") or "look").strip().lower()
+    if op in ("status", "list", "check"):
+        return ActionResult(True, camera_mod.status(), needs_observe=False)
+    if op not in ("look", "snapshot", "capture", "see"):
+        return ActionResult(
+            False, f"camera: unknown op '{op}' - use 'look' or 'status'",
+            needs_observe=False)
+
+    path, message, _size = camera_mod.snapshot(args.get("camera", 0))
+    if path is None:
+        return ActionResult(False, message, needs_observe=False)
+    # needs_observe=False: a webcam frame does not change the screen, and the walk
+    # it would trigger costs more than the capture did.
+    return ActionResult(True, message, needs_observe=False, image_path=str(path))
 
 
 def _h_self_heal(args, obs, cfg):
@@ -1847,7 +2231,7 @@ def _h_daemon_rule(args, obs, cfg):
         cooldown = float(args.get("cooldown", 300))
 
         if not target:
-            return ActionResult(False, "daemon_rule 'add' requires 'target' (message text, task prompt, or macro name)", needs_observe=False)
+            return ActionResult(False, "daemon_rule 'add' requires 'target' (message text or task prompt)", needs_observe=False)
 
         try:
             evt_type = EventType(trigger_str)

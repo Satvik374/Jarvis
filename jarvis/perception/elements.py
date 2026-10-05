@@ -105,15 +105,15 @@ def observe(max_elements: int = 60, use_uia: bool = True,
 
 
 def _active_window_title() -> str:
-    try:
-        from ..desktop import is_shadow_enabled, get_shadow_manager
-        if is_shadow_enabled():
+    from ..desktop import is_shadow_enabled, get_shadow_manager
+    if is_shadow_enabled():
+        try:
             windows = get_shadow_manager().list_windows()
             if windows:
                 return windows[0].title
             return "Shadow Desktop (Empty)"
-    except Exception:
-        pass
+        except Exception:
+            return "Shadow Desktop (Unavailable)"
 
     try:
         import pygetwindow as gw  # type: ignore
@@ -127,8 +127,9 @@ def _active_window_title() -> str:
 def _title_match(window_title: str, doc_name: str) -> bool:
     """True when the browser Document plausibly belongs to the active tab.
 
-    Window title is usually '<tab title> - <browser>'; the Document name is
-    the tab title. Chromium sometimes serves a STALE tree (previous tab, old
+    Window title is usually '<tab title> - <browser>'; the OUTERMOST Document's
+    name is the tab title (see :func:`_detect_uia` - an iframe's Document name
+    is not). Chromium sometimes serves a STALE tree (previous tab, old
     fullscreen-era coordinates) whose Document name no longer matches - the
     signature of the click-lands-on-the-tab-strip bug.
     """
@@ -138,6 +139,32 @@ def _title_match(window_title: str, doc_name: str) -> bool:
     if not win or not doc:
         return True     # nothing to compare - assume fine
     return win.startswith(doc[:60])
+
+
+# Window-title/Document-name disagreements already waited out with no change.
+#
+# The stale-tree retry below is worth paying once per disagreement, but a page
+# whose Document can never match its window title pays it on EVERY observation
+# for the life of the session: a Discord channel with a YouTube embed reports
+# the VIDEO's title ('WALKING STREET IN PATTAYA - YouTube') for a window titled
+# 'Discord | @zovexis_ - Comet', and the walk stops at ``max_elements`` before
+# it ever reaches the page's own document. Measured: 0.8s of sleep plus a second
+# full walk - 1.28s per observe instead of 0.23s, on every step of every task.
+#
+# Keyed by (window title, outermost document names), so a genuinely different
+# stale tab still retries - only the identical disagreement is skipped, and only
+# after waiting it out changed nothing. Bounded, and emptied wholesale when full:
+# a dropped entry costs one extra retry, never a wrong answer.
+_FUTILE_TITLE_RETRY: set[tuple] = set()
+_FUTILE_TITLE_RETRY_CAP = 64
+
+# The same policy for the empty-document wait below: some windows keep a
+# Document whose content the walk never reaches (a canvas or video surface, or
+# a page the element budget caps before its own content), so the 0.6s wait plus
+# the second full walk buys nothing on every observation for the life of the
+# session. Keyed by (window title, outermost document names), added only after a
+# wait that changed nothing, and bounded the same way.
+_FUTILE_EMPTY_DOC_RETRY: set[tuple] = set()
 
 
 def _detect_uia(max_elements: int, size: tuple[int, int],
@@ -166,20 +193,15 @@ def _detect_uia(max_elements: int, size: tuple[int, int],
 
     sw, sh = size
 
-    root = None
-    try:
-        from ..desktop import is_shadow_enabled, get_shadow_manager
-        if is_shadow_enabled():
-            windows = get_shadow_manager().list_windows()
-            if windows:
-                root = auto.ControlFromHandle(windows[0].hwnd)
-            else:
-                # In shadow mode with no active windows, return empty list (never inspect host screen)
-                return []
-    except Exception:
-        pass
-
-    if root is None:
+    from ..desktop import is_shadow_enabled, get_shadow_manager
+    if is_shadow_enabled():
+        windows = get_shadow_manager().list_windows()
+        if not windows:
+            return []
+        # Errors or a missing root must stay inside the shadow workspace;
+        # observe() can return an empty list instead of inspecting the host.
+        root = auto.ControlFromHandle(windows[0].hwnd)
+    else:
         root = auto.GetForegroundControl()
 
     if root is None:
@@ -190,6 +212,8 @@ def _detect_uia(max_elements: int, size: tuple[int, int],
     # Chromium-based browsers build the page's accessibility tree LAZILY: the
     # first UIA query on a freshly focused tab can return an empty Document.
     # If that happens, wait briefly and walk once more.
+    pending_retry: tuple | None = None    # disagreement this walk is waiting out
+    pending_empty: tuple | None = None    # empty-document wait this walk is paying for
     for attempt in range(2):
         elements: list[Element] = []
         seen: set[tuple] = set()
@@ -198,14 +222,14 @@ def _detect_uia(max_elements: int, size: tuple[int, int],
         chrome_count = 0
         doc_found = False
         doc_kept = 0
-        doc_name = ""
+        doc_names: list[str] = []
 
         # queue holds (control, depth, in_document)
         queue: deque = deque([(root, 0, False)])
         visited = 0
-        deadline = time.time() + _TIME_BUDGET
+        deadline = time.monotonic() + _TIME_BUDGET
         while (queue and len(elements) < max_elements
-               and visited < _MAX_VISITED and time.time() < deadline):
+               and visited < _MAX_VISITED and time.monotonic() < deadline):
             ctrl, depth, in_doc = queue.popleft()
             visited += 1
             try:
@@ -230,21 +254,29 @@ def _detect_uia(max_elements: int, size: tuple[int, int],
             fully_offscreen = valid_rect and (right <= 0 or bottom <= 0
                                               or left >= sw or top >= sh)
 
-            # Name is a cross-process COM call; only fetch it when it can matter
-            # (a keepable interactive node, or the Document we must name-match).
+            # Reject unclickable and surplus chrome nodes BEFORE fetching
+            # Name: each property is a cross-process COM call. Still traverse
+            # their children, and always name Documents for stale-tab checks.
+            keep = role in _INTERACTIVE_ROLES and on_screen
+            if not in_doc and not is_doc and chrome_count >= _MAX_CHROME:
+                keep = False
             name = ""
-            if role in _INTERACTIVE_ROLES or is_doc:
+            if keep or is_doc:
                 try:
                     name = (ctrl.Name or "").strip()
                 except Exception:
                     pass
-                if is_doc and not doc_name:
-                    doc_name = name
+                if is_doc and not in_doc:
+                    # Only the OUTERMOST document belongs to the page in the
+                    # window title; every other Document is an iframe. Naming
+                    # the page from an iframe made a perfectly healthy page look
+                    # stale - a Discord channel with a YouTube embed reported
+                    # the video's title - so the retry below (a 0.8s sleep plus
+                    # a second full walk) fired on every step of every task and
+                    # re-walked the same tree forever.
+                    doc_names.append(name)
 
-            keep = (role in _INTERACTIVE_ROLES and on_screen
-                    and (name or role in _KEEP_UNNAMED))
-            if keep and not in_doc and not is_doc and chrome_count >= _MAX_CHROME:
-                keep = False    # chrome budget spent; still traverse to find the doc
+            keep = keep and (name or role in _KEEP_UNNAMED)
             if keep and role == "Text" and name and name in kept_names:
                 keep = False    # plain-text duplicate of an element already listed
             key = (role, name, left, top)
@@ -263,6 +295,9 @@ def _detect_uia(max_elements: int, size: tuple[int, int],
                 elif not is_doc:
                     chrome_count += 1
 
+            if len(elements) >= max_elements:
+                break  # no children can be used once the element budget is full
+
             limit = _DOC_DEPTH if (in_doc or is_doc) else _CHROME_DEPTH
             if depth < limit and not fully_offscreen:
                 try:
@@ -279,14 +314,36 @@ def _detect_uia(max_elements: int, size: tuple[int, int],
                         queue.append((child, depth + 1, False))
 
         if attempt == 0 and doc_found and doc_kept == 0:
-            time.sleep(0.6)     # let the renderer finish building the a11y tree
-            continue
-        if attempt == 0 and doc_found and not _title_match(window_title, doc_name):
+            key = (window_title, tuple(doc_names))
+            if key not in _FUTILE_EMPTY_DOC_RETRY:
+                pending_empty = key
+                time.sleep(0.6)     # let the renderer finish building the a11y tree
+                continue
+        if attempt and pending_empty is not None and doc_found and doc_kept == 0:
+            # Waiting did not change the answer, so do not wait for it again.
+            if len(_FUTILE_EMPTY_DOC_RETRY) >= _FUTILE_TITLE_RETRY_CAP:
+                _FUTILE_EMPTY_DOC_RETRY.clear()
+            _FUTILE_EMPTY_DOC_RETRY.add(pending_empty)
+            pending_empty = None
+        # Any outermost document that matches is enough: only a page whose own
+        # tree disagrees with its window title is the stale-tree signature.
+        mismatch = bool(doc_names) and not any(
+            _title_match(window_title, name) for name in doc_names)
+        if attempt == 0 and mismatch:
+            key = (window_title, tuple(doc_names))
+            if key in _FUTILE_TITLE_RETRY:
+                break           # this exact disagreement already failed to heal
             # Chromium served a STALE tree (an old tab's page, often with
             # fullscreen-era coordinates) - clicking it hits the tab strip.
             # Give the renderer a moment and walk again.
+            pending_retry = key
             time.sleep(0.8)
             continue
+        if attempt and pending_retry is not None and mismatch:
+            # Waiting did not change the answer, so do not wait for it again.
+            if len(_FUTILE_TITLE_RETRY) >= _FUTILE_TITLE_RETRY_CAP:
+                _FUTILE_TITLE_RETRY.clear()
+            _FUTILE_TITLE_RETRY.add(pending_retry)
         break
 
     return elements

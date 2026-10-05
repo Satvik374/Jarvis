@@ -55,6 +55,10 @@ class Action:
 _TARGET_PARAMS = (
     Param("element", "int", "Id of a labelled element from the current screen "
           "observation. Prefer this over raw coordinates.", required=False),
+    Param("coord", "str", "Name of a target you saved earlier with the "
+          "'coordinates' action (e.g. 'whatsapp-send-button'). It resolves "
+          "instantly, with no screenshot and no element search - use it for "
+          "any control you have already located.", required=False),
     Param("x", "int", "Absolute screen x pixel. Use only when no element id fits.",
           required=False),
     Param("y", "int", "Absolute screen y pixel. Use only when no element id fits.",
@@ -479,8 +483,8 @@ ACTIONS: tuple[Action, ...] = (
          Param("rule_id", "str", "Rule ID (for remove/enable/disable).", required=False),
          Param("name", "str", "Human readable rule name (for add).", required=False),
          Param("trigger", "str", "Trigger event: 'battery_low', 'battery_charging', 'high_cpu', 'high_memory', 'file_dropped', 'morning_routine', 'app_launched'.", required=False),
-         Param("action_type", "str", "Action type: 'notify' (voice/UI alert), 'task' (run agent prompt), or 'macro' (replay macro).", required=False, default="notify"),
-         Param("target", "str", "Action target (notification text, task prompt, or macro name).", required=False),
+         Param("action_type", "str", "Action type: 'notify' (voice/UI alert) or 'task' (run agent prompt).", required=False, default="notify"),
+         Param("target", "str", "Action target (notification text or task prompt).", required=False),
          Param("cooldown", "int", "Cooldown in seconds between triggers (default 300).", required=False, default=300)),
         category="system",
         examples=({"action": "list"},
@@ -933,6 +937,74 @@ ACTIONS: tuple[Action, ...] = (
         examples=({"query": "coding preferences"}, {"query": "git repository location"}),
     ),
     Action(
+        "notes", "Read and write the user's Obsidian vault. Search it whenever "
+        "the answer is probably already written down in their own notes, and "
+        "write to it when something should be there for them to read later. "
+        "Vault notes are also long-term memory once indexed, so relevant notes "
+        "can arrive as RAG context without asking for them.",
+        (Param("action", "str", "One of: 'search', 'read', 'list', 'append', "
+               "'create', 'daily', 'index', 'status'."),
+         Param("query", "str", "Words to look for in note titles, tags, "
+               "headings and text (action='search').", required=False),
+         Param("title", "str", "Note name or vault-relative path without the "
+               "'.md', e.g. 'Projects/Roadmap' or 'Journal/2026-09-23' "
+               "(actions: 'read', 'append', 'create').", required=False),
+         Param("content", "str", "Markdown to write into the note "
+               "(actions: 'append', 'create', 'daily').", required=False),
+         Param("tags", "str", "Comma-separated frontmatter tags for a new note "
+               "(action='create').", required=False),
+         Param("heading", "str", "Heading to file the appended text under "
+               "(action='append').", required=False),
+         Param("limit", "int", "Max notes to return (1-50, default 10).",
+               required=False, default=10, minimum=1, maximum=50)),
+        category="system",
+        examples=(
+            {"action": "search", "query": "pricing decision"},
+            {"action": "read", "title": "Projects/Roadmap"},
+            {"action": "append", "title": "Projects/Roadmap", "heading": "Decisions",
+             "content": "Decided to ship the memory work first."},
+            {"action": "daily", "content": "Reviewed the vault integration."},
+        ),
+    ),
+    Action(
+        "coordinates", "Remember, search and forget click coordinates you have "
+        "already found, so the same button is never located twice. Search "
+        "BEFORE taking a fresh screenshot, and click a saved one with the "
+        "'coord' argument of click. Names them yourself, and they come in two "
+        "kinds: 'pc' (this computer) and 'mobile' (a paired phone).",
+        (Param("action", "str", "One of: 'save', 'find', 'list', 'forget'."),
+         Param("name", "str", "The name YOU choose for the target, kebab-case as "
+               "<app>-<control>, e.g. 'whatsapp-send-button'. Saving a name "
+               "that already exists MOVES that target to the new coordinates. "
+               "(save, forget)", required=False),
+         Param("kind", "str", "Which screen the coordinate belongs to: 'pc' "
+               "(this computer, the default) or 'mobile' (the paired phone). "
+               "The two are unrelated pixel spaces, so never save a phone "
+               "coordinate as 'pc'.", required=False, default="pc"),
+         Param("x", "int", "Screen x pixel of the target (save).", required=False),
+         Param("y", "int", "Screen y pixel of the target (save).", required=False),
+         Param("screen", "str", "The screen size x,y were read on, e.g. "
+               "'1920x1080' or '1080x2400'. Stored so a resized window or a "
+               "different phone still resolves to the same control (save).",
+               required=False),
+         Param("app", "str", "The app or window the target lives in, e.g. "
+               "'WhatsApp'. Used to match it to later tasks (save).",
+               required=False),
+         Param("note", "str", "One line on what the target is, e.g. 'green "
+               "send arrow in the chat composer' (save).", required=False),
+         Param("query", "str", "Words to search the saved names with (find).",
+               required=False),
+         Param("limit", "int", "Maximum results to return (find, list; "
+               "default 5).", required=False, default=5, minimum=1, maximum=50)),
+        category="system",
+        examples=({"action": "find", "query": "whatsapp send"},
+                  {"action": "save", "name": "whatsapp-send-button", "kind": "pc",
+                   "x": 1185, "y": 842, "screen": "1920x1080", "app": "WhatsApp"},
+                  {"action": "save", "name": "phone-whatsapp-send",
+                   "kind": "mobile", "x": 540, "y": 1180, "screen": "1080x2400"},
+                  {"action": "list", "kind": "mobile"}),
+    ),
+    Action(
         "graph_query", "Query entity connections and relationships in the Knowledge Graph.",
         (Param("entity", "str", "Name of the entity to query connections for (e.g. 'User', 'Spotify', 'Jarvis')."),),
         category="system",
@@ -944,19 +1016,6 @@ ACTIONS: tuple[Action, ...] = (
          Param("value", "str", "Optional value, e.g. sensitivity float 0.1-1.0.", required=False)),
         category="system",
         examples=({"action": "interrupt"}, {"action": "enable_duplex"}, {"action": "set_sensitivity", "value": "0.7"}),
-    ),
-    Action(
-        "macro", "Watch & Learn Macro recorder and playback engine. Record desktop actions or execute learned macros.",
-        (Param("action", "str", "One of: 'record', 'stop', 'play', 'list', 'show', 'delete'."),
-         Param("name", "str", "Macro name (e.g. 'open_daily_report', 'send_invoice').", required=False),
-         Param("description", "str", "Description of what the macro accomplishes.", required=False),
-         Param("speed", "float", "Playback speed multiplier (e.g. 1.0 = normal, 2.0 = 2x speed).", required=False, default=1.0),
-         Param("params", "dict", "Optional dictionary of parameter values to substitute.", required=False)),
-        category="control",
-        examples=({"action": "record", "name": "open_sales_sheet", "description": "Open Chrome and go to sales dashboard"},
-                  {"action": "stop"},
-                  {"action": "play", "name": "open_sales_sheet", "speed": 1.5},
-                  {"action": "list"}),
     ),
     Action(
         "skill", "Search, learn, use and write Jarvis Skills - reusable presets "
@@ -1114,6 +1173,28 @@ ACTIONS: tuple[Action, ...] = (
                   {"prompt": "Read the text written on the whiteboard in my webcam view.", "source": "webcam"},
                   {"prompt": "What error message is visible in the terminal?", "source": "screen"}),
     ),
+    Action(
+        "camera", "Look through this computer's camera. The frame is attached to "
+        "your very next turn, so take it and then say what you actually see in "
+        "it - never describe a picture you were not given. Reach for it whenever "
+        "the question is about the physical world in front of the computer "
+        "rather than the screen: the person you are talking to, something they "
+        "are holding up, a document or a whiteboard, the room, or how you look "
+        "to whoever is standing there. Unlike 'see', this does not call a second "
+        "model to describe the frame - you look at it yourself on the next turn, "
+        "which is both quicker and more faithful. If no picture comes back, say "
+        "so and offer the reason instead of inventing what was in front of it.",
+        (Param("op", "str", "One of: 'look' (take a picture and look at it), "
+               "'status' (whether a camera can be reached at all).",
+               required=False, default="look"),
+         Param("camera", "int", "Which camera to use when there is more than "
+               "one (0-9, default 0).", required=False, default=0, minimum=0,
+               maximum=9)),
+        category="system",
+        examples=({"op": "look"},
+                  {"op": "status"},
+                  {"op": "look", "camera": 1}),
+    ),
     # ---- meta ------------------------------------------------------------
     Action(
         "wait", "Pause briefly to let the screen settle after an action.",
@@ -1232,8 +1313,8 @@ def gemini_safe_json_schema() -> list[dict]:
 
     Gemini function calling accepts only a subset of OpenAPI Schema: unknown
     property fields (``minimum``, ``maximum``, ``default``) are rejected with a
-    400 INVALID_ARGUMENT that would take down the recovery path for ALL 89
-    actions at once. Bounds are therefore folded into the description text —
+    400 INVALID_ARGUMENT that would take down the recovery path for every
+    declared action at once. Bounds are therefore folded into the description text —
     the model still sees them, the validator does not. The full JSON view
     (:func:`to_json_schema`) is unchanged; this only narrows what one transport
     receives. Keep in step with the accepted-field list in the Gemini docs.

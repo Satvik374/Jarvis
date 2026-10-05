@@ -13,6 +13,7 @@ import base64
 import codecs
 from collections import deque
 import hmac
+import io
 from http import HTTPStatus
 import itertools
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -140,6 +141,11 @@ class TerminalBridge:
         self.input_mode = "command"
         self.input_prompt = ""
         self.state = "booting"
+        #: Hands-free ("Hey Jarvis") mode is running in the child. The child is
+        #: then parked on the microphone rather than at a prompt, which is what
+        #: makes a queued shutdown need an interrupt to land (see request_shutdown).
+        self.wake_active = False
+        self.auto_active = False
         self.speech_active = False
         self.speech_utterance_id = 0
         self.speech_duration_ms = 0
@@ -325,6 +331,16 @@ class TerminalBridge:
             # event: the HTTP response is the consumer.
             self._resolve_tool_result(payload)
             return
+        if event == "wake_mode":
+            # Recorded, not just relayed: while hands-free mode waits on the
+            # microphone no prompt will arrive to consume a shutdown, so the
+            # shutdown path has to know to break that wait. The generic publish
+            # below still carries the event to the page.
+            with self._state_lock:
+                self.wake_active = bool(payload.get("active"))
+        elif event == "auto_mode":
+            with self._state_lock:
+                self.auto_active = bool(payload.get("active"))
         if event in {"state", "input_request"}:
             with self._state_lock:
                 if self._process_exited.is_set():
@@ -682,12 +698,38 @@ class TerminalBridge:
             return True, "remote agent shutdown requested"
         with self._state_lock:
             self._shutdown_pending = True
+            wake_active = self.wake_active or self.auto_active
+        if wake_active:
+            # Microphone modes park the child away from the REPL prompt. Interrupt
+            # the active wait so the queued shutdown can reach that prompt.
+            self._send_interrupt()
         ok, message = self._advance_shutdown()
         if ok:
             return True, "shutdown requested"
         if message == "shutdown queued":
             return True, message
         return False, message
+
+    def _send_interrupt(self) -> bool:
+        """Ask the child to stop what it is doing, in this platform's idiom.
+
+        Only ever a request: what an interrupt means is the child's call, because
+        only it knows whether it is running a task or waiting for the wake word.
+        False means there was no runtime left to signal.
+        """
+        process = self.process
+        if process is None or process.poll() is not None:
+            return False
+        interrupt_signal = (
+            getattr(signal, "CTRL_BREAK_EVENT", signal.SIGINT)
+            if os.name == "nt"
+            else signal.SIGINT
+        )
+        try:
+            process.send_signal(interrupt_signal)
+        except (OSError, ValueError):
+            return False
+        return True
 
     def request_interrupt(self) -> tuple[bool, str]:
         process = self.process
@@ -696,15 +738,8 @@ class TerminalBridge:
         with self._state_lock:
             if self.accepting_input:
                 return False, "Jarvis is ready for the next directive"
-        interrupt_signal = (
-            getattr(signal, "CTRL_BREAK_EVENT", signal.SIGINT)
-            if os.name == "nt"
-            else signal.SIGINT
-        )
-        try:
-            process.send_signal(interrupt_signal)
-        except (OSError, ValueError) as exc:
-            return False, f"could not interrupt Jarvis: {exc}"
+        if not self._send_interrupt():
+            return False, "could not interrupt Jarvis"
         self.broker.publish(
             "activity",
             kind="warning",
@@ -994,9 +1029,10 @@ class LiveSocketRelay:
             },
             "screen_share": {
                 "enabled": bool(getattr(live, "screen_share", True)),
-                "interval": float(getattr(live, "screen_share_interval", 1.0) or 1.0),
-                "max_dim": int(getattr(live, "screen_share_max_dim", 1024) or 1024),
-                "quality": int(getattr(live, "screen_share_quality", 60) or 60),
+                "always_on": bool(getattr(live, "screen_share_always_on", False)),
+                "interval": max(2.0, float(getattr(live, "screen_share_interval", 2.0) or 2.0)),
+                "max_dim": int(getattr(live, "screen_share_max_dim", 768) or 768),
+                "quality": int(getattr(live, "screen_share_quality", 50) or 50),
             },
             "sessions": self.sessions,
             "error": self.last_error,
@@ -1072,7 +1108,9 @@ class LiveSocketRelay:
                     setup = gemini_live.build_setup(
                         live,
                         model=model,
-                        system_instruction=self._system_prompt(),
+                        system_instruction=self._system_prompt(
+                            always_screen_share=bool(getattr(live, "screen_share_always_on", False))
+                        ),
                         google_search=grounding,
                     )
                     await upstream.send(json.dumps(setup))
@@ -1151,6 +1189,18 @@ class LiveSocketRelay:
                     return
             except websockets.exceptions.ConnectionClosed as exc:
                 reason = str(exc)
+                if self._is_auth_rejection(exc):
+                    self.last_error = reason
+                    await self._notice(
+                        client,
+                        "authentication",
+                        "Google rejected the configured Gemini API credential. The model and screen-sharing settings are not the cause.",
+                        remedy=(
+                            "Create a fresh Gemini API key in Google AI Studio, replace "
+                            "JARVIS_LIVE_API_KEY in Jarvis Credential Vault, then restart Live Voice."
+                        ),
+                    )
+                    return
                 if grounding and gemini_live.quota_refusal(reason):
                     grounding = False
                     self.grounding_blocked = reason
@@ -1172,6 +1222,17 @@ class LiveSocketRelay:
                 continue
             except Exception as exc:
                 self.last_error = str(exc)
+                if self._is_auth_rejection(exc):
+                    await self._notice(
+                        client,
+                        "authentication",
+                        "Google rejected the configured Gemini API credential. The model and screen-sharing settings are not the cause.",
+                        remedy=(
+                            "Create a fresh Gemini API key in Google AI Studio, replace "
+                            "JARVIS_LIVE_API_KEY in Jarvis Credential Vault, then restart Live Voice."
+                        ),
+                    )
+                    return
                 log.warn(f"Gemini Live relay could not open a session: {exc}")
                 model_idx += 1
                 await asyncio.sleep(0.3)
@@ -1184,6 +1245,20 @@ class LiveSocketRelay:
             "No Gemini Live session could be opened.",
             remedy=self.last_error or "try another live model in config.yaml",
         )
+
+    @staticmethod
+    def _is_auth_rejection(error: BaseException) -> bool:
+        """Recognize credential failures so model fallback cannot retry them."""
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None) or getattr(error, "status_code", None)
+        if status in {401, 403}:
+            return True
+        detail = str(error).lower()
+        return any(marker in detail for marker in (
+            "invalid authentication credentials",
+            "access_token_type_unsupported",
+            "api_key_invalid",
+        ))
 
     async def _pump(
         self,
@@ -1208,6 +1283,18 @@ class LiveSocketRelay:
         audible_frames = 0
         model_messages = 0
         last_audible_at = 0.0
+        usage_window: deque[tuple[float, int]] = deque()
+        current_turn_tokens = 0
+        token_budget = max(10000, int(getattr(live, "token_budget_per_minute", 50000) or 50000))
+        screen_pause_at = max(10000, int(token_budget * 0.9))
+        screen_paused = asyncio.Event()
+        upstream_send_lock = asyncio.Lock()
+
+        def recent_usage() -> int:
+            cutoff = time.monotonic() - 60.0
+            while usage_window and usage_window[0][0] < cutoff:
+                usage_window.popleft()
+            return sum(tokens for _, tokens in usage_window)
 
         async def page_to_upstream() -> None:
             nonlocal audible_frames, last_audible_at
@@ -1230,10 +1317,11 @@ class LiveSocketRelay:
                         "The live session configuration comes from the server, not the page.",
                     )
                     continue
-                await upstream.send(raw)
+                async with upstream_send_lock:
+                    await upstream.send(raw)
 
         async def upstream_to_page() -> None:
-            nonlocal model_messages
+            nonlocal model_messages, current_turn_tokens
             while True:
                 raw = await upstream.recv()
                 # The Live endpoint packs its JSON into *binary* frames, so
@@ -1258,6 +1346,66 @@ class LiveSocketRelay:
                     or message.get("toolCall") or message.get("tool_call")
                 ):
                     model_messages += 1
+
+                # Live API reports per-turn usage metadata. Keep a rolling minute
+                # sum and pause screen frames before ending voice with headroom.
+                if isinstance(message, dict):
+                    usage = message.get("usageMetadata") or message.get("usage_metadata") or {}
+                    if isinstance(usage, dict):
+                        try:
+                            current_turn_tokens = max(
+                                current_turn_tokens,
+                                int(usage.get("totalTokenCount") or usage.get("total_token_count") or 0),
+                            )
+                        except (TypeError, ValueError):
+                            pass
+                    projected_usage = recent_usage() + current_turn_tokens
+                    if projected_usage >= screen_pause_at and not screen_paused.is_set():
+                        screen_paused.set()
+                        await self._send(client, {
+                            "jarvisStatus": {
+                                "notice": f"Screen frames paused at {projected_usage:,} reported tokens in the last minute to protect the Live quota."
+                            }
+                        })
+                        log.warn(f"Live screen feed paused at {projected_usage:,} reported tokens/minute.")
+                    if current_turn_tokens and projected_usage >= token_budget:
+                        await self._notice(
+                            client, "rate_limit_guard",
+                            f"Live Voice stopped at {projected_usage:,} reported tokens in the last minute to stay below the configured {token_budget:,} token budget.",
+                            remedy="Wait for the rolling minute window to cool down before starting Live Voice again.",
+                        )
+                        try:
+                            await client.close(code=1013, reason="Live token budget reached")
+                        except Exception:
+                            pass
+                        return
+                    server_content = message.get("serverContent") or message.get("server_content") or {}
+                    turn_complete = bool(
+                        server_content.get("turnComplete") or server_content.get("turn_complete")
+                    ) if isinstance(server_content, dict) else False
+                    if turn_complete and current_turn_tokens:
+                        usage_window.append((time.monotonic(), current_turn_tokens))
+                        current_turn_tokens = 0
+                        used = recent_usage()
+                        if used >= screen_pause_at and not screen_paused.is_set():
+                            screen_paused.set()
+                            await self._send(client, {
+                                "jarvisStatus": {
+                                    "notice": f"Screen frames paused at {used:,} reported tokens in the last minute to protect the Live quota."
+                                }
+                            })
+                            log.warn(f"Live screen feed paused at {used:,} reported tokens/minute.")
+                        if used >= token_budget:
+                            await self._notice(
+                                client, "rate_limit_guard",
+                                f"Live Voice stopped at {used:,} reported tokens in the last minute to stay below the configured {token_budget:,} token budget.",
+                                remedy="Wait for the rolling minute window to cool down before starting Live Voice again.",
+                            )
+                            try:
+                                await client.close(code=1013, reason="Live token budget reached")
+                            except Exception:
+                                pass
+                            return
                 go_away = message.get("goAway") or message.get("go_away")
                 if isinstance(go_away, dict):
                     await self._notice(
@@ -1265,6 +1413,52 @@ class LiveSocketRelay:
                         "Gemini will close this session shortly; it will continue on a new one.",
                     )
                 await client.send(raw)
+
+        async def screen_to_upstream() -> None:
+            if not (
+                bool(getattr(live, "screen_share", True))
+                and bool(getattr(live, "screen_share_always_on", False))
+            ):
+                return
+            interval = max(2.0, float(getattr(live, "screen_share_interval", 2.0) or 2.0))
+            max_dim = int(getattr(live, "screen_share_max_dim", 768) or 768)
+            quality = int(getattr(live, "screen_share_quality", 50) or 50)
+            warned = False
+            log.info(f"Gemini Live desktop sharing active ({interval:.1f}s/frame, max {max_dim}px).")
+            await self._send(client, {"jarvisStatus": {"screen_share_active": True}})
+            while True:
+                if screen_paused.is_set():
+                    await asyncio.sleep(1.0)
+                    continue
+                def capture_jpeg() -> bytes | None:
+                    from .perception.live_vision import get_live_vision
+                    image = get_live_vision().capture_screen()
+                    if image is None:
+                        return None
+                    image.thumbnail((max_dim, max_dim))
+                    output = io.BytesIO()
+                    image.save(output, format="JPEG", quality=quality, optimize=True)
+                    return output.getvalue()
+                try:
+                    frame = await asyncio.to_thread(capture_jpeg)
+                    if frame:
+                        packet = json.dumps({
+                            "realtimeInput": {
+                                "video": {
+                                    "mimeType": "image/jpeg",
+                                    "data": base64.b64encode(frame).decode("ascii"),
+                                }
+                            }
+                        })
+                        async with upstream_send_lock:
+                            await upstream.send(packet)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if not warned:
+                        log.warn(f"Gemini Live screen capture unavailable: {exc}")
+                        warned = True
+                await asyncio.sleep(interval)
 
         async def ignore_watchdog() -> None:
             """End a session that was spoken to, then went quiet, and said nothing.
@@ -1294,6 +1488,10 @@ class LiveSocketRelay:
             asyncio.create_task(upstream_to_page()),
             watchdog,
         ]
+        if bool(getattr(live, "screen_share", True)) and bool(
+            getattr(live, "screen_share_always_on", False)
+        ):
+            tasks.append(asyncio.create_task(screen_to_upstream()))
         # Anything the page sent while the handshake was in flight is delivered
         # now, so the first words of a sentence are not lost.
         while pending:
@@ -1326,13 +1524,21 @@ class LiveSocketRelay:
         return deaf
 
     @staticmethod
-    def _system_prompt() -> str:
+    def _system_prompt(always_screen_share: bool = False) -> str:
         from .live import prompts
 
         try:
-            return prompts.build_live_voice_system_prompt()
+            prompt = prompts.build_live_voice_system_prompt()
         except Exception:
-            return "You are Jarvis, a concise voice assistant."
+            prompt = "You are Jarvis, a concise voice assistant."
+        if always_screen_share:
+            prompt += (
+                "\n\nCONTINUOUS SCREEN CONTEXT: The desktop is already being shared with you "
+                "through the Live session, with a fresh compressed frame about every two seconds. "
+                "Use the newest frames as ongoing context. Do not ask the page to start screen sharing "
+                "and do not stop the stream; it ends when Live Voice ends."
+            )
+        return prompt
 
     async def _notice(self, client: Any, code: str, message: str, remedy: str = "") -> None:
         """Tell the page why the session is not running, in words it can show."""
@@ -1557,6 +1763,8 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                     "accepting_input": bridge.accepting_input,
                     "input_mode": bridge.input_mode,
                     "input_prompt": bridge.input_prompt,
+                    "hands_free": bool(getattr(bridge, "wake_active", False)),
+                    "auto_mode": bool(getattr(bridge, "auto_active", False)),
                     "speech": bridge.speech_snapshot(),
                     "interface": interface,
                     "worker": worker,
@@ -1665,6 +1873,10 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {"ok": False, "error": str(exc), "skills": [], "active": ""},
                 )
+            return
+
+        if path == "/api/keys":
+            self._handle_keys()
             return
 
         if path == "/api/sessions/load":
@@ -1812,6 +2024,66 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                 "message": message,
                 "error": None if ok else message,
             },
+        )
+
+    def _handle_keys(self) -> None:
+        """Every credential Jarvis reads, as a list the page can edit.
+
+        Values stay masked on the way out - the page is served over loopback,
+        and a page that can read a key can leak one - so the interface shows
+        *that* a key is set, not what it is. Writing and clearing it is the
+        part editing actually needs, and that is the POST below.
+        """
+        if not self._require_api_access():
+            return
+        from .security import api_keys
+
+        try:
+            self._json(HTTPStatus.OK, api_keys.describe())
+        except Exception as exc:  # a read failure must not take the page down
+            self._json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"ok": False, "error": str(exc)},
+            )
+
+    def _handle_keys_update(self, payload: dict[str, Any]) -> None:
+        """Save or clear credentials from the interface, in one request.
+
+        ``updates`` maps a variable name to its new value (an empty string
+        clears it) and ``remove`` deletes a variable's line outright. A partial
+        failure is not a thing here: either the file was rewritten or it was
+        not, and the response carries the fresh state either way so the page
+        never has to guess what it now holds.
+        """
+        if not self._require_api_access(require_origin=True):
+            return
+        from .security import api_keys
+
+        updates = payload.get("updates") or {}
+        remove = payload.get("remove") or []
+        if not isinstance(updates, dict):
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "error": "updates must be an object"},
+            )
+            return
+        if not isinstance(remove, list):
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "error": "remove must be a list"},
+            )
+            return
+        try:
+            result = api_keys.apply(updates, remove)
+        except Exception as exc:
+            self._json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"ok": False, "error": str(exc)},
+            )
+            return
+        self._json(
+            HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST,
+            result,
         )
 
     def _handle_tool_execute(self, payload: dict[str, Any]) -> None:
@@ -2011,6 +2283,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             "/api/live/config",
             "/api/voice/session",
             "/api/tool/execute",
+            "/api/keys",
         }:
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
             return
@@ -2149,6 +2422,10 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             self._handle_tool_execute(payload)
             return
 
+        if path == "/api/keys":
+            self._handle_keys_update(payload)
+            return
+
         if path == "/api/voice/session":
             self._handle_voice_session(payload)
             return
@@ -2267,9 +2544,10 @@ def _gemini_session_block(cfg: Any, relay: "LiveSocketRelay | None" = None) -> d
             },
             "screen_share": {
                 "enabled": bool(getattr(live, "screen_share", True)),
-                "interval": float(getattr(live, "screen_share_interval", 1.0) or 1.0),
-                "max_dim": int(getattr(live, "screen_share_max_dim", 1024) or 1024),
-                "quality": int(getattr(live, "screen_share_quality", 60) or 60),
+                "always_on": bool(getattr(live, "screen_share_always_on", False)),
+                "interval": max(2.0, float(getattr(live, "screen_share_interval", 2.0) or 2.0)),
+                "max_dim": int(getattr(live, "screen_share_max_dim", 768) or 768),
+                "quality": int(getattr(live, "screen_share_quality", 50) or 50),
             },
             "sessions": 0,
             "error": "the live voice relay is not running",

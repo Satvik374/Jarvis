@@ -264,13 +264,17 @@ def download_file(url: str, dest: str = "", allow: tuple[str, ...] = (),
         max_bytes = 500 * 1024 * 1024
 
     total = 0
+    created = False
     try:
         with requests.get(url, stream=True, timeout=30,
                           headers={"User-Agent": _DL_UA}) as r:
             if r.status_code >= 400:
                 return f"could not download {url}: HTTP {r.status_code}"
             d.parent.mkdir(parents=True, exist_ok=True)
-            with d.open("wb") as fh:
+            # The network request can take seconds: another writer may have
+            # created the destination since the exists() check above.
+            with d.open("xb") as fh:
+                created = True
                 for chunk in r.iter_content(chunk_size=65536):
                     if not chunk:
                         continue
@@ -282,7 +286,11 @@ def download_file(url: str, dest: str = "", allow: tuple[str, ...] = (),
                                 f"(raise max_mb to allow larger files)")
                     fh.write(chunk)
     except Exception as exc:
-        d.unlink(missing_ok=True)      # don't leave a half-written file behind
+        if created:
+            try:
+                d.unlink(missing_ok=True)  # clean up only a file we created
+            except OSError:
+                pass  # preserve the original download error
         return f"could not download {url}: {exc}"
     return f"downloaded {total} bytes to {d}"
 

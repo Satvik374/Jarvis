@@ -36,6 +36,7 @@ WM_RBUTTONDBLCLK = 0x0206
 WM_MBUTTONDOWN = 0x0207
 WM_MBUTTONUP = 0x0208
 WM_MOUSEWHEEL = 0x020A
+WM_MOUSEHWHEEL = 0x020E
 MK_LBUTTON = 0x0001
 MK_RBUTTON = 0x0002
 
@@ -95,6 +96,10 @@ class VirtualInputDispatcher:
         self._is_windows = sys.platform == "win32"
         self._user32 = ctypes.windll.user32 if self._is_windows else None
 
+    def _post(self, hwnd: int, message: int, wparam: int, lparam: int) -> None:
+        if not self._user32.PostMessageW(hwnd, message, wparam, lparam):
+            raise OSError("PostMessageW rejected the shadow input")
+
     def _resolve_hwnd(self, hwnd: Optional[int] = None) -> int:
         if hwnd:
             return hwnd
@@ -132,13 +137,13 @@ class VirtualInputDispatcher:
 
         try:
             # Send focus & mouse move
-            self._user32.PostMessageW(target_hwnd, WM_SETFOCUS, 0, 0)
-            self._user32.PostMessageW(target_hwnd, WM_MOUSEMOVE, 0, lparam)
+            self._post(target_hwnd, WM_SETFOCUS, 0, 0)
+            self._post(target_hwnd, WM_MOUSEMOVE, 0, lparam)
 
             for _ in range(clicks):
-                self._user32.PostMessageW(target_hwnd, down_msg, flags, lparam)
+                self._post(target_hwnd, down_msg, flags, lparam)
                 time.sleep(0.01)
-                self._user32.PostMessageW(target_hwnd, up_msg, 0, lparam)
+                self._post(target_hwnd, up_msg, 0, lparam)
                 if clicks > 1:
                     time.sleep(0.05)
 
@@ -158,10 +163,13 @@ class VirtualInputDispatcher:
             return False
 
         try:
-            self._user32.PostMessageW(target_hwnd, WM_SETFOCUS, 0, 0)
-            for ch in text:
-                char_code = ord(ch)
-                self._user32.PostMessageW(target_hwnd, WM_CHAR, char_code, 1)
+            self._post(target_hwnd, WM_SETFOCUS, 0, 0)
+            # Unicode windows consume UTF-16 code units, not Python's full
+            # code points: emoji and other non-BMP characters need a pair.
+            encoded = text.encode("utf-16-le", errors="surrogatepass")
+            for index in range(0, len(encoded), 2):
+                char_code = int.from_bytes(encoded[index:index + 2], "little")
+                self._post(target_hwnd, WM_CHAR, char_code, 1)
                 time.sleep(0.005)
             return True
         except Exception as exc:
@@ -187,17 +195,18 @@ class VirtualInputDispatcher:
                 return False
 
         try:
-            self._user32.PostMessageW(target_hwnd, WM_SETFOCUS, 0, 0)
-            self._user32.PostMessageW(target_hwnd, WM_KEYDOWN, vk, 1)
+            self._post(target_hwnd, WM_SETFOCUS, 0, 0)
+            self._post(target_hwnd, WM_KEYDOWN, vk, 1)
             time.sleep(0.01)
-            self._user32.PostMessageW(target_hwnd, WM_KEYUP, vk, 0xC0000001)
+            self._post(target_hwnd, WM_KEYUP, vk, 0xC0000001)
             return True
         except Exception as exc:
             log.warn(f"VirtualInput press_key failed: {exc}")
             return False
 
-    def scroll(self, clicks: int, x: int = 0, y: int = 0, hwnd: Optional[int] = None) -> bool:
-        """Inject vertical scroll wheel delta."""
+    def scroll(self, clicks: int, x: int = 0, y: int = 0,
+               hwnd: Optional[int] = None, *, horizontal: bool = False) -> bool:
+        """Inject wheel clicks: positive is up vertically, right horizontally."""
         if not self._is_windows:
             return False
 
@@ -208,7 +217,8 @@ class VirtualInputDispatcher:
         lparam = _makelparam(x, y)
         wparam = (int(clicks) * 120) << 16
         try:
-            self._user32.PostMessageW(target_hwnd, WM_MOUSEWHEEL, wparam, lparam)
+            message = WM_MOUSEHWHEEL if horizontal else WM_MOUSEWHEEL
+            self._post(target_hwnd, message, wparam, lparam)
             return True
         except Exception as exc:
             log.warn(f"VirtualInput scroll failed: {exc}")

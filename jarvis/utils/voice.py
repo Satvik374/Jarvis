@@ -353,6 +353,39 @@ def _wav_bytes(pcm: bytes, rate: int = 24000) -> bytes:
     return output.getvalue()
 
 
+def _repair_wav_sizes(data: bytes) -> bytes:
+    """Return WAV bytes whose declared lengths match the bytes actually present.
+
+    Fish Audio streams a WAV whose header keeps its placeholder sizes - data
+    ``0xFFFFFF00``, RIFF ``0xFFFFFF24`` - whatever the clip weighs.  That is not
+    cosmetic: ``wave`` then reads a four second greeting as fifteen hours, and
+    ``winsound.PlaySound`` with ``SND_MEMORY`` walks the declared length, so the
+    placeholder is an access violation that kills the process instead of raising
+    something a caller could handle.
+
+    Only a length field is ever rewritten, and only when it overruns the buffer
+    it describes; anything that is not a plain RIFF/WAVE, or whose chunks do not
+    parse, is returned untouched.
+    """
+    size = len(data)
+    if size < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return data
+    declared_riff = int.from_bytes(data[4:8], "little")
+    offset = 12
+    while offset + 8 <= size:
+        chunk_size = int.from_bytes(data[offset + 4:offset + 8], "little")
+        if data[offset:offset + 4] == b"data":
+            available = size - (offset + 8)
+            if chunk_size <= available and declared_riff <= size - 8:
+                return data
+            repaired = bytearray(data)
+            repaired[4:8] = (size - 8).to_bytes(4, "little")
+            repaired[offset + 4:offset + 8] = available.to_bytes(4, "little")
+            return bytes(repaired)
+        offset += 8 + chunk_size + (chunk_size & 1)
+    return data
+
+
 # --------------------------------------------------------------------------- #
 # Local TTS (Kokoro-82M via kokoro-onnx)
 # --------------------------------------------------------------------------- #
@@ -665,7 +698,7 @@ def _synthesize_fish_audio(text: str, config: VoiceConfig) -> bytes:
             wav_bytes = resp.read()
             if not wav_bytes:
                 raise RuntimeError(f"Fish Audio returned empty audio stream from {endpoint_url}")
-            return wav_bytes
+            return _repair_wav_sizes(wav_bytes)
     except urllib.error.HTTPError as err:
         err_body = ""
         try:
@@ -686,7 +719,7 @@ def _synthesize_fish_audio(text: str, config: VoiceConfig) -> bytes:
                 with urllib.request.urlopen(alt_req, timeout=30.0) as resp:
                     wav_bytes = resp.read()
                     if wav_bytes:
-                        return wav_bytes
+                        return _repair_wav_sizes(wav_bytes)
             except Exception as retry_exc:
                 log.warn(f"Fish Audio free tier retry failed: {retry_exc}")
         raise RuntimeError(f"Fish Audio API error ({err.code}): {err_body or err.reason}") from err
@@ -1045,6 +1078,7 @@ def _play_wav(data: bytes, wait: bool) -> None:
     import winsound
 
     global _async_wav_path
+    data = _repair_wav_sizes(data)
     _stop_async_playback()
     if wait:
         winsound.PlaySound(
@@ -1089,6 +1123,7 @@ def _play_stream_interruptible(
     if not data:
         return False, 0.0
 
+    data = _repair_wav_sizes(data)
     _stop_async_playback()
     cancel = cancel_event or threading.Event()
     with _active_playback_lock:
@@ -1439,7 +1474,8 @@ def _drop_wake_worker(worker: dict) -> None:
 
 
 def wait_for_wake(phrase: str = "hey jarvis", timeout: float | None = None,
-                  _wav_file: str | None = None) -> bool:
+                  _wav_file: str | None = None,
+                  stop_event: threading.Event | None = None) -> bool:
     """Block until the wake phrase is spoken. Offline, near-zero CPU.
 
     Uses Windows' built-in SAPI recognizer with a one-phrase grammar - no
@@ -1448,6 +1484,11 @@ def wait_for_wake(phrase: str = "hey jarvis", timeout: float | None = None,
     respond within a short startup grace period - so a wedged SAPI server
     can never hang the caller. Ctrl+C propagates so the caller can exit
     hands-free mode.
+
+    ``stop_event`` is that same exit, asked for by another thread: a frontend
+    with no console to press Ctrl+C in (the browser's STOP button, a shutdown)
+    sets it, and the wait ends at the worker's next pump instead of running
+    until the phrase is spoken.
 
     ``_wav_file`` feeds a file instead of the microphone (self-tests); that
     path is one-shot, in-process, and does not use the background worker.
@@ -1505,7 +1546,10 @@ def wait_for_wake(phrase: str = "hey jarvis", timeout: float | None = None,
     worker = _ensure_wake_worker()
     ready_q: queue.Queue = queue.Queue(maxsize=1)
     done_q: queue.Queue = queue.Queue(maxsize=1)
-    cancel_event = threading.Event()
+    # A caller may bring its own cancellation event so it can end this wait from
+    # elsewhere; sharing that event is the whole mechanism. It is the caller's
+    # job to clear it before the next wait, not this function's.
+    cancel_event = stop_event if stop_event is not None else threading.Event()
     worker["requests"].put((phrase, timeout, ready_q, done_q, cancel_event))
 
     try:
@@ -1657,12 +1701,13 @@ class _BargeInVAD(_EnergyVAD):
 
 
 def listen(start_timeout: float = 6.0, max_seconds: float = 12.0,
-           silence_after: float | None = None) -> bytes | None:
+           silence_after: float | None = None,
+           stop_event: threading.Event | None = None) -> bytes | None:
     """Record one spoken phrase from the default microphone.
 
     Waits up to ``start_timeout`` for speech to begin, then records until
     ``silence_after`` seconds of quiet (or ``max_seconds`` total). Returns
-    WAV bytes, or None if nothing was heard / no microphone.
+    WAV bytes, or None if nothing was heard, canceled, or no microphone.
     """
     try:
         import sounddevice as sd  # type: ignore
@@ -1690,6 +1735,8 @@ def listen(start_timeout: float = 6.0, max_seconds: float = 12.0,
         with sd.RawInputStream(samplerate=_RATE, channels=1, dtype="int16",
                                blocksize=_CHUNK) as stream:
             while True:
+                if stop_event is not None and stop_event.is_set():
+                    return None
                 chunk, _ = stream.read(_CHUNK)
                 chunk = bytes(chunk)
                 state = det.feed(rms(chunk))

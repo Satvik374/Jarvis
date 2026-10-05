@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FlyBrain &mdash; Flappy Bird played by a fruit fly connectome</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #0b0e14; color: #d8dee9; font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace;
+    display: flex; flex-direction: column; align-items: center; min-height: 100vh;
+  }
+  header { width: 100%; padding: 14px 20px 6px; text-align: center; }
+  h1 { font-size: 16px; margin: 0 0 4px; letter-spacing: .5px; font-weight: 600; }
+  .sub { color: #7b8794; font-size: 12px; }
+  .wrap { display: flex; gap: 16px; padding: 14px 20px 28px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
+  .panel { background: #12161f; border: 1px solid #1e2531; border-radius: 10px; padding: 12px; }
+  canvas { display: block; border-radius: 6px; background: #000; }
+  #brain { cursor: crosshair; }
+  .stats { display: grid; grid-template-columns: auto auto; gap: 2px 12px; font-size: 12px; }
+  .stats b { color: #8fd3ff; font-weight: 500; }
+  .title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #6b7785; margin-bottom: 8px; }
+  label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #98a3b3; margin: 3px 0; }
+  input[type=range] { width: 130px; }
+  button {
+    background: #1b2330; color: #d8dee9; border: 1px solid #2a3546; border-radius: 6px;
+    padding: 6px 12px; font: inherit; cursor: pointer;
+  }
+  button:hover { background: #24303f; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .legend { font-size: 11px; color: #6b7785; margin-top: 8px; line-height: 1.45; }
+  #status { color: #ffd479; min-height: 18px; }
+  .bar { height: 8px; background: #1b2330; border-radius: 4px; overflow: hidden; margin-top: 4px; }
+  .bar > i { display: block; height: 100%; background: linear-gradient(90deg, #2b6cb0, #63b3ed); width: 50%; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Flappy Bird played by a real fruit fly brain</h1>
+  <div class="sub">
+    97,973 neurons and 1.5 million synapses of the FlyWire 783 adult
+    <i>Drosophila</i> connectome, simulated as leaky integrate-and-fire cells at 1 ms resolution.
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <div class="title">The world (what the fly sees)</div>
+    <canvas id="view" width="300" height="400"></canvas>
+    <div class="legend">
+      Rendered from the same luminance field that is fed to the 10,582
+      photoreceptors, so this is literally the fly's view.
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="title">The fly's brain (frontal projection)</div>
+    <canvas id="brain" width="440" height="330"></canvas>
+    <div class="legend">
+      Every dot is one real neuron at its real position. Bright dots fired in the
+      last few milliseconds; the two optic lobes sit on the outside, the
+      descending neurons run down the middle.
+    </div>
+  </div>
+
+  <div class="panel" style="min-width: 260px">
+    <div class="title">Readout</div>
+    <div class="stats">
+      <span>pipes passed</span><b id="score">0</b>
+      <span>best</span><b id="best">0</b>
+      <span>biological time</span><b id="bio">0.0 s</b>
+      <span>speed</span><b id="speed">&mdash;</b>
+      <span>wingbeat rate</span><b id="wb">0 Hz</b>
+      <span>photoreceptors</span><b id="rr">0 Hz</b>
+      <span>descending neurons</span><b id="dn">0 Hz</b>
+      <span>lobula plate</span><b id="lp">0 Hz</b>
+    </div>
+
+    <div class="title" style="margin-top: 14px">Descending motor command</div>
+    <div class="bar"><i id="bar"></i>    </div>
+    <div class="legend" id="cmd">positive = the gap is above me, so beat the wings harder</div>
+    <div class="legend" id="run" style="margin-top:6px"></div>
+
+    <div class="row" style="margin-top: 14px">
+      <button id="restart">Restart</button>
+      <button id="pause">Pause</button>
+    </div>
+    <label>simulation speed <input id="speedCtl" type="range" min="1" max="40" value="14"></label>
+    <label>motor gain <input id="gainCtl" type="range" min="10" max="120" value="45"></label>
+    <label>lobe transparency <input id="fadeCtl" type="range" min="0" max="60" value="26"></label>
+    <div id="status">loading circuit&hellip;</div>
+  </div>
+</div>
+
+<script type="module">
+import { parseCircuit } from '../sim/flybrain.js';
+import { FlyGame, DEFAULT_CONFIG } from '../sim/game.js';
+import { readCommand } from '../sim/fly.js';
+
+const $ = (id) => document.getElementById(id);
+const view = $('view'), vctx = view.getContext('2d');
+const brainCv = $('brain'), bctx = brainCv.getContext('2d');
+
+// ------------------------------------------------------------------ load
+const res = await fetch('./circuit.bin');
+const buf = await res.arrayBuffer();
+const circuit = parseCircuit(buf);
+const game = new FlyGame(circuit, { ...DEFAULT_CONFIG });
+game.spikes = [];
+$('status').textContent =
+  `${game.brain.N.toLocaleString()} neurons, ` +
+  `${(game.brain.csr.data.length / 1e6).toFixed(2)}M synapses loaded`;
+
+// ------------------------------------------------------- brain projection
+const N = game.brain.N;
+const pos = game.brain.pos;
+const types = game.brain.types;
+const px = new Float32Array(N), py = new Float32Array(N);
+{
+  // front view: x is left/right, z is dorsal/ventral
+  const lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
+  const coordOf = (i) => [pos[i * 3] * 4, pos[i * 3 + 2] * 40];
+  for (let i = 0; i < N; i++) {
+    const [a, b] = coordOf(i);
+    if (a < lo[0]) lo[0] = a; if (a > hi[0]) hi[0] = a;
+    if (b < lo[1]) lo[1] = b; if (b > hi[1]) hi[1] = b;
+  }
+  const pad = 14;
+  const sx = (brainCv.width - 2 * pad) / (hi[0] - lo[0]);
+  const sy = (brainCv.height - 2 * pad) / (hi[1] - lo[1]);
+  const s = Math.min(sx, sy);
+  for (let i = 0; i < N; i++) {
+    const [a, b] = coordOf(i);
+    px[i] = pad + (a - lo[0]) * s + ((brainCv.width - 2 * pad) - (hi[0] - lo[0]) * s) / 2;
+    py[i] = brainCv.height - pad - (b - lo[1]) * s;
+  }
+}
+const isPhoto = new Uint8Array(N);
+const isDN = new Uint8Array(N);
+for (const i of game.brain.groups.photoreceptors) isPhoto[i] = 1;
+for (const i of game.brain.groups.descending) isDN[i] = 1;
+
+// ------------------------------------------------------------- the world
+const SCENE_W = 120, SCENE_H = 160;
+const scene = document.createElement('canvas');
+scene.width = SCENE_W; scene.height = SCENE_H;
+const sctx = scene.getContext('2d');
+const img = sctx.createImageData(SCENE_W, SCENE_H);
+const viewScaleX = view.width / game.world.W, viewScaleY = view.height / game.world.H;
+
+function drawWorld() {
+  const w = game.world;
+  const d = img.data;
+  // Same luminance field as `world.sceneAt`, but rendered column-first so each
+  // pixel only has to consider the single pipe that can cover it.  (The retina
+  // itself keeps calling sceneAt per photoreceptor -- this is just the display.)
+  const pipeOf = new Int32Array(SCENE_W).fill(-1);
+  for (let x = 0; x < SCENE_W; x++) {
+    const wx = (x + 0.5) * w.W / SCENE_W;
+    for (let k = 0; k < w.pipes.length; k++) {
+      const p = w.pipes[k];
+      if (wx >= p.x && wx < p.x + w.pipeW) { pipeOf[x] = k; break; }
+    }
+  }
+  let p4 = 0;
+  for (let y = 0; y < SCENE_H; y++) {
+    const wy = (y + 0.5) * w.H / SCENE_H;
+    const ground = wy >= w.groundY;
+    for (let x = 0; x < SCENE_W; x++) {
+      let v;
+      if (ground) {
+        const wx = (x + 0.5) * w.W / SCENE_W;
+        const s = Math.floor(wx / 16);
+        v = 0.16 + 0.10 * ((s % 2) + 2) % 2;
+      } else {
+        const k = pipeOf[x];
+        if (k >= 0) {
+          const g = w.pipes[k];
+          if (wy < g.gapY - w.gapH / 2 || wy > g.gapY + w.gapH / 2) {
+            const wx = (x + 0.5) * w.W / SCENE_W;
+            const edge = Math.min(wx - g.x, g.x + w.pipeW - wx);
+            v = edge < 5 ? 0.46 : 0.28;
+          } else v = 0.87 - 0.10 * (wy / w.H);
+        } else v = 0.87 - 0.10 * (wy / w.H);
+      }
+      const c = v * 255;
+      d[p4++] = c * 0.92; d[p4++] = c * 0.97; d[p4++] = c;
+      d[p4++] = 255;
+    }
+  }
+  sctx.putImageData(img, 0, 0);
+  vctx.imageSmoothingEnabled = true;
+  vctx.clearRect(0, 0, view.width, view.height);
+  vctx.drawImage(scene, 0, 0, view.width, view.height);
+
+  // the bird itself (the fly does not see its own body)
+  const bx = w.birdX * viewScaleX, by = w.y * viewScaleY;
+  vctx.fillStyle = '#ffd479';
+  vctx.beginPath();
+  vctx.ellipse(bx, by, 9, 6, 0, 0, Math.PI * 2);
+  vctx.fill();
+  vctx.fillStyle = 'rgba(255,212,121,.25)';
+  vctx.beginPath(); vctx.arc(bx, by, 26, 0, Math.PI * 2); vctx.fill();
+
+  // the fly's visual field, centred on its eye
+  const fw = game.retina.fovW * viewScaleX, fh = game.retina.fovH * viewScaleY;
+  vctx.strokeStyle = 'rgba(143,211,255,.45)';
+  vctx.setLineDash([4, 3]);
+  vctx.strokeRect(bx - fw / 2, by - fh / 2, fw, fh);
+  vctx.setLineDash([]);
+  vctx.fillStyle = 'rgba(143,211,255,.75)';
+  vctx.font = '9px ui-monospace, monospace';
+  vctx.fillText('visual field', bx - fw / 2 + 3, by - fh / 2 + 11);
+}
+
+// ------------------------------------------------------------- the brain
+function drawBrain() {
+  const fade = Number($('fadeCtl').value) / 100;
+  bctx.fillStyle = `rgba(11,14,20,${fade})`;
+  bctx.fillRect(0, 0, brainCv.width, brainCv.height);
+  const b = game.brain;
+  const t = game.bioTime;
+  const window = 0.018;
+  const spikes = game.spikes, times = game.spikeTimes;
+  let start = 0;
+  for (let i = times.length - 1; i >= 0; i--) {
+    if (t - times[i] > window) { start = i + 1; break; }
+  }
+  // never draw more than a fixed budget of points per frame
+  if (spikes.length - start > 9000) start = spikes.length - 9000;
+  bctx.globalCompositeOperation = 'lighter';
+  for (let k = start; k < spikes.length; k++) {
+    const i = spikes[k];
+    const age = (t - times[k]) / window;
+    if (age > 1) continue;
+    const alpha = (1 - age) * 0.9;
+    if (isPhoto[i]) bctx.fillStyle = `rgba(255,214,102,${alpha})`;
+    else if (isDN[i]) bctx.fillStyle = `rgba(255,110,150,${alpha})`;
+    else bctx.fillStyle = `rgba(120,220,255,${alpha * 0.85})`;
+    bctx.fillRect(px[i] - 1, py[i] - 1, 2.4, 2.4);
+  }
+  bctx.globalCompositeOperation = 'source-over';
+  // trim old spikes
+  if (times.length > 40000) { spikes.splice(0, 20000); times.splice(0, 20000); }
+  bctx.fillStyle = 'rgba(150,163,179,.75)';
+  bctx.font = '9px ui-monospace, monospace';
+  bctx.fillText('neurons firing now', 8, 14);
+}
+
+// ---------------------------------------------------------------- console
+function updateStats(cmd, dtBio, dtWall) {
+  $('score').textContent = game.world.score;
+  $('best').textContent = game.best;
+  $('bio').textContent = game.bioTime.toFixed(1) + ' s';
+  $('speed').textContent = (dtBio / Math.max(dtWall, 1e-3)).toFixed(2) + '\u00d7';
+  $('wb').textContent = game.motor.wingbeatRate.toFixed(2) + ' Hz';
+  $('rr').textContent = game.groupRate('photoreceptors').toFixed(1) + ' Hz';
+  $('dn').textContent = game.groupRate('descending').toFixed(2) + ' Hz';
+  $('lp').textContent = game.groupRate('tangential').toFixed(1) + ' Hz';
+  const cn = game.motor.normalised;
+  const frac = Math.max(0, Math.min(1, 0.5 + cn / 6));
+  $('bar').style.width = (frac * 100).toFixed(1) + '%';
+  $('cmd').textContent = cn > 0.15
+    ? 'CLIMB \u2014 the gap is above me'
+    : (cn < -0.15 ? 'SINK \u2014 the gap is below me' : 'hold');
+}
+
+// ------------------------------------------------------------------ loop
+let running = true, last = performance.now();
+$('restart').onclick = () => { game.reset((Math.random() * 1e9) | 0); last = performance.now(); };
+$('pause').onclick = (e) => { running = !running; e.target.textContent = running ? 'Pause' : 'Resume'; };
+$('speedCtl').oninput = (e) => { game.cfg.stepsPerFrame = Number(e.target.value); };
+$('gainCtl').oninput = (e) => { game.motor.rateGain = Number(e.target.value) / 100; };
+
+let errors = 0;
+let deadUntil = 0;
+function frame(now) {
+  try {
+    const dtWall = (now - last) / 1000;
+    last = now;
+    if (running) {
+      if (game.world.alive) {
+        const before = game.bioTime;
+        game.stepFrame();
+        updateStats(readCommand(game.brain, game.readout), game.bioTime - before, dtWall);
+      } else {
+        // the fly hit something: keep its best score and take off again
+        if (deadUntil === 0) deadUntil = now + 1500;
+        else if (now > deadUntil) {
+          game.best = Math.max(game.best, game.world.score);
+          game.reset((Math.random() * 1e9) | 0);
+          deadUntil = 0;
+        }
+      }
+    }
+    drawWorld();
+    drawBrain();
+  } catch (e) {
+    if (++errors < 4) $('status').textContent = 'error: ' + e.message;
+  }
+  schedule();
+}
+game.reset(20260922);
+$('status').textContent = '';
+// A timer-driven loop rather than requestAnimationFrame, so the fly keeps
+// flying even when the page is not being composited (background tab, headless
+// capture).
+function schedule() { setTimeout(() => frame(performance.now()), 16); }
+schedule();
+</script>
+</body>
+</html>

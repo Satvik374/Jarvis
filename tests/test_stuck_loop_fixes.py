@@ -108,9 +108,11 @@ class TargetDescTests(unittest.TestCase):
 class RetryBudgetTests(unittest.TestCase):
     @patch("jarvis.agent.brain.time.sleep")
     def test_rate_limit_gets_extended_budget(self, _sleep):
+        # The extended budget is the task-side profile, and it is opted into
+        # explicitly: a caller a person is waiting on gets the short one.
         brain = Mock()
         brain.complete.side_effect = [RuntimeError("HTTP 429")] * 4 + ["ok"]
-        out = complete_with_retry(brain, "sys", [], tries=3)
+        out = complete_with_retry(brain, "sys", [], tries=3, task_patience=True)
         self.assertEqual(out, "ok")        # survived past the old 3-try limit
         self.assertEqual(brain.complete.call_count, 5)
 

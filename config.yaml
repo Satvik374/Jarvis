@@ -2,23 +2,28 @@
 # Environment variables override these values.
 
 brain:
-  # Backend: gemini | openai | openrouter | ollama | hf | llamacpp | anthropic | codex.
-  # The brain is OpenRouter running a hosted DeepSeek model; the key is read
-  # from OPENROUTER_API_KEY (.env or the Credential Vault), never from here.
-  backend: openrouter
-  model: deepseek/deepseek-v4-flash-0731:free
+  # Backend: gemini | openai | openrouter | omniroute | ollama | hf | llamacpp |
+  # anthropic | codex. The brain is OmniRoute - the local OpenAI-compatible AI
+  # gateway that pools every provider behind one endpoint
+  # (http://localhost:20128/v1). The key is read from OMNIROUTE_API_KEY (.env or
+  # the Credential Vault), never from here.
+  backend: omniroute
+  # Any OmniRoute model id works here; the gateway's self-routing "combo" ids
+  # (auto/vision, auto/smart, auto/best-coding, auto/best-reasoning,
+  # auto/best-fast, auto/cheap, auto/best-free) route automatically.
+  model: agy/gemini-3.7-flash-medium
   location: global
   adapter_path: ""
-  base_url: "https://openrouter.ai/api/v1"
+  base_url: "http://localhost:20128/v1"
+  api_key_env: OMNIROUTE_API_KEY
   api_key: ""
   temperature: 0.2
   # Keep the output budget reasonable; backends can override this when needed.
   max_tokens: 16384
-  # deepseek/deepseek-v4-flash-0731 is text-only (OpenRouter reports
-  # input_modalities: [text]), so screenshots are not sent - grounding still
-  # comes from the numbered UI-Automation element list. Point this at a vision
-  # model and set this back to true to use the raw-vision path.
-  use_vision: false
+  # agy/gemini-3.7-flash-medium is multimodal, so screenshots are sent and the
+  # raw-vision path is live. Point this at a text-only model or combo
+  # (auto/smart, auto/best-coding) and set this back to false.
+  use_vision: true
   request_timeout: 120
   conversational: true
 
@@ -68,7 +73,7 @@ voice:
 live_voice:
   enabled: false
   # fish | gemini | relay | auto
-  provider: fish
+  provider: gemini
   # Must name a *live* model. gemini-3.8-live is the model the Google AI Studio
   # template uses; if the configured key cannot open it, the relay walks the
   # known-working fallbacks in jarvis/live/gemini_live.py rather than failing.
@@ -87,14 +92,16 @@ live_voice:
   context_trigger_tokens: 104857
   context_sliding_tokens: 52428
   session_resumption: true
-  # Screen sharing. The voice agent calls share_screen when it needs to look;
-  # the browser then streams about one frame a second through the open session
-  # until it calls stop_screen_share (or you stop the share in Chrome). Frames
-  # leave this machine, so this is the switch that authorises it.
+  # Gemini can request screen sharing through its share_screen tool.
+  # Screen frames are not sent continuously when a Live session starts.
   screen_share: true
-  screen_share_interval: 1.0
-  screen_share_max_dim: 1024
-  screen_share_quality: 60
+  screen_share_always_on: false
+  screen_share_interval: 2.0
+  screen_share_max_dim: 768
+  screen_share_quality: 50
+  # Stop the Live session before this rolling one-minute usage threshold to
+  # leave headroom below the reported 65K tokens/minute project limit.
+  token_budget_per_minute: 50000
   location: us-central1
   backend: api_key                       # api_key | gcloud
   # Read from JARVIS_LIVE_API_KEY, GEMINI_API_KEY, or Windows Credential Vault.
@@ -139,6 +146,15 @@ data:
   verify_success: true
   memory_max_chars: 4000
   chat_history_turns: 10
+
+memory:
+  # Obsidian vault used as a long-term memory source and sink. Point this at the
+  # folder holding your notes (the one with .obsidian/ inside) and Jarvis can
+  # search them, retrieve them as RAG context, and append to them. Empty = off.
+  # The JARVIS_OBSIDIAN_VAULT environment variable overrides this value.
+  obsidian_vault: ""
+  # Folder for daily notes, relative to the vault root.
+  obsidian_daily_folder: "Journal"
 
 remote:
   relay_url: ""

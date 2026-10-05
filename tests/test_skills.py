@@ -20,6 +20,7 @@ import pytest
 
 from jarvis.skills import Skill, SkillManager
 from jarvis.skills import manager as skills_manager
+from jarvis.skills.builtin import BUILTIN_SKILLS
 from jarvis.skills.manager import MAX_BODY_CHARS, SkillError, parse_skill, score_skill
 
 
@@ -87,10 +88,14 @@ def test_tool_names_that_do_not_exist_are_dropped_and_reported():
 # ---------------------------------------------------------------------------
 
 def test_builtins_are_seeded_once_and_never_overwrite_an_edit(store):
-    assert store.ensure_seeded() == 5
+    assert store.ensure_seeded() == len(BUILTIN_SKILLS)
     names = [skill.name for skill in store.list_skills()]
     assert {"research-brief", "gui-app-automation", "system-triage",
-            "inbox-triage", "long-form-drafting"} <= set(names)
+            "inbox-triage", "long-form-drafting",
+            "install-application", "uninstall-application", "download-a-file",
+            "setup-dev-environment", "organize-files", "backup-files",
+            "send-email", "update-software", "fill-a-web-form",
+            "troubleshoot-connection", "media-playback", "data-entry"} <= set(names)
 
     # An edited preset must survive every later start.
     path = store.storage_dir / "system-triage.md"
@@ -156,6 +161,19 @@ def test_saving_filters_unknown_tools_and_says_so(store):
     ("research the latest pricing for solar panels", "research-brief"),
     ("gui app automation", "gui-app-automation"),
     ("reserch breif", "research-brief"),  # near-miss spelling still lands
+    # the instruction-file set added for common jobs, including INSTALL.md
+    ("install an application", "install-application"),
+    ("uninstall the app", "uninstall-application"),
+    ("download a file", "download-a-file"),
+    ("set up the project dependencies", "setup-dev-environment"),
+    ("organize my downloads folder", "organize-files"),
+    ("backup my documents", "backup-files"),
+    ("send an email to my boss", "send-email"),
+    ("update the software", "update-software"),
+    ("fill out this form", "fill-a-web-form"),
+    ("the wifi keeps dropping", "troubleshoot-connection"),
+    ("play some music", "media-playback"),
+    ("enter this data into the spreadsheet", "data-entry"),
 ])
 def test_the_right_skill_ranks_first(store, query, expected):
     store.ensure_seeded()
@@ -164,7 +182,7 @@ def test_the_right_skill_ranks_first(store, query, expected):
     assert hits[0][1].name == expected
 
 
-@pytest.mark.parametrize("query", ["what is the weather", "hello how are you", "play some music"])
+@pytest.mark.parametrize("query", ["what is the weather", "hello how are you", "how tall is mount everest"])
 def test_an_unrelated_query_matches_nothing(store, query):
     """A false match loads the wrong procedure, which is worse than no match.
 
@@ -192,6 +210,30 @@ def test_note_carries_the_index_not_the_bodies(store):
     assert "the strained resource" not in note
     assert "instructions, not permissions" in note
     assert "The rules above always win" in note
+
+
+def test_note_orders_the_model_to_check_for_instructions_first(store):
+    """The instruction files are only useful if the prompt says to read them
+    before acting - this is the 'check, then do the task' contract."""
+    store.ensure_seeded()
+    note = store.note("install an application")
+    assert "BEFORE YOUR FIRST ACTION" in note
+    assert "FOLLOW ITS STEPS" in note
+    # ...without collapsing the two-stage loading: a matching skill's body is
+    # still only in the prompt once the agent actually loads it.
+    assert "winget install" not in note
+
+
+def test_the_install_instructions_ship_and_look_up_first(store):
+    """The INSTALL procedure: terminal package manager before the browser."""
+    store.ensure_seeded()
+    skill = store.get("install-application")
+    assert skill is not None
+    body = skill.body
+    assert "web_search" in body                      # research before acting
+    assert "winget install" in body                  # terminal first
+    assert "ask permission to download" in body      # then ask for the browser
+    assert "Verify it is really installed" in body    # then check the result
 
 
 def test_note_includes_the_body_only_while_a_skill_is_active(store):

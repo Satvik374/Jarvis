@@ -14,6 +14,8 @@ env/
 # Jarvis runtime artifacts
 dataset/data/screenshots/
 dataset/data/trajectories/
+# Webcam frames the 'camera' action takes (the screen's pictures, not the room's).
+dataset/data/camera/
 *.log
 # The "the mouse is in use" file a Discord task and a console share.
 discord_task.lock
@@ -68,3 +70,5 @@ relay_server/relay_state.json.tmp
 # Local tool state and test artefacts.
 .freebuff/
 .pytest_tmp/
+
+tests/.pytest_live_artifacts/

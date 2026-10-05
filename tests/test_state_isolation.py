@@ -22,7 +22,6 @@ from jarvis.agent import memory as agent_memory
 from jarvis.browser_engine import driver
 from jarvis.config import Config
 from jarvis.daemon.engine import ProactiveDaemon
-from jarvis.macro.manager import MacroManager
 from jarvis.memory import manager as memory_manager
 from jarvis.skills.manager import SkillManager
 from jarvis.tools.tool_synthesis import get_default_tools_dir
@@ -58,7 +57,6 @@ def test_every_store_default_resolves_inside_the_isolated_root() -> None:
     assert memory_manager.get_default_db_path() == root / "jarvis_memory.db"
     assert paths.browser_profile_dir() == root / "browser_profile"
     assert sessions.default_sessions_dir() == root / "dataset" / "data" / "sessions"
-    assert MacroManager().storage_dir == root / "dataset" / "data" / "macros"
     assert SkillManager().storage_dir == root / "dataset" / "data" / "skills"
     assert get_default_tools_dir() == root / "tools_synthesized"
     assert mcp.get_manager().path == root / "mcp_servers.json"

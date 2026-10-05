@@ -214,7 +214,12 @@ class LiveVisionEngine:
 
         try:
             from ..agent.brain import complete_with_retry
-            reply = complete_with_retry(brain, system_instruction, messages, image=images)
+            # Interactive, and stated as such: someone asked "what am I looking
+            # at" and is waiting for the answer, and here the picture IS the
+            # question - a text-only retry would describe nothing. So no long
+            # capacity wait, and the screenshots are never dropped.
+            reply = complete_with_retry(brain, system_instruction, messages,
+                                        image=images, task_patience=False)
             return reply.strip()
         except Exception as exc:
             log.error(f"Visual analysis failed: {exc}")

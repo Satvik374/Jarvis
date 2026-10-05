@@ -107,6 +107,14 @@
     skillList: $("#skillList"),
     reloadSkills: $("#reloadSkills"),
     tabCountSkills: $("#tabCountSkills"),
+    // API keys
+    keysNote: $("#keysNote"),
+    keysList: $("#keysList"),
+    keyFilter: $("#keyFilter"),
+    reloadKeys: $("#reloadKeys"),
+    keysAdd: $("#keysAdd"),
+    newKeyName: $("#newKeyName"),
+    newKeyValue: $("#newKeyValue"),
     // Shortcuts overlay
     shortcutsBackdrop: $("#shortcutsBackdrop"),
     closeShortcuts: $("#closeShortcuts"),
@@ -132,9 +140,10 @@
     ["/enhance", "AI-rewrite a rough prompt, confirm, then run it"],
     ["/paste", "attach the clipboard image/screenshot (Ctrl+V works too)"],
     ["/remember", "[fact] - store a fact in permanent memory forever"],
-    ["/memory", "list permanent memories and learned plans"],
+    ["/memory", "list permanent memories"],
     ["/help", "show all commands"],
     ["/voice", "voice-ONLY mode: talk instead of typing"],
+    ["/auto", "continuous listen, agent, spoken reply mode"],
     ["/wake", 'hands-free mode: say "Hey Jarvis" to command'],
     ["/cron", "list/add/remove scheduled jobs"],
     ["/connect", "Gmail/Discord/WhatsApp connector status and test"],
@@ -204,9 +213,12 @@
   let attachment = null;
   let attachmentUploading = false;
   let uploadVersion = 0;
+  let draftVersion = 0;
   let terminalText = "";
   let currentState = "booting";
   let eventSource = null;
+  let linkGeneration = 0;
+  let lastEventId = 0;
   //: One link probe at a time: EventSource fires onerror on every retry.
   let linkProbeInFlight = false;
   //: Last toast text, so a repeated failure does not stack identical alerts.
@@ -218,6 +230,10 @@
   let speechIdWatermark = 0;
   let speechExpiryTimer = null;
   let interruptPending = false;
+  //: Hands-free ("Hey Jarvis") mode: the runtime is parked on the microphone
+  //: instead of at a prompt, so STOP is the only way out of it.
+  let wakeActive = false;
+  let autoActive = false;
   let interfaceMode = "console";
   let remotePairings = [];
   let remoteUnattended = false;
@@ -408,6 +424,7 @@
     const params = new URLSearchParams(location.hash.replace(/^#/, ""));
     const fromHash = params.get("token");
     if (fromHash) {
+      if (fromHash !== token) lastEventId = 0;
       token = fromHash;
       try {
         sessionStorage.setItem("jarvis-browser-token", token);
@@ -481,6 +498,14 @@
       elements.prompt.placeholder = interfaceMode === "remote-agent"
         ? "Remote agent session has ended"
         : "Terminal session has ended";
+    } else if (autoActive) {
+      elements.prompt.placeholder = 'Auto voice mode — speak after each reply, or press STOP to exit';
+    } else if (wakeActive) {
+      // Hands-free mode disables the composer on purpose, for as long as the
+      // user keeps talking to it: say what still works here rather than leaving
+      // "Jarvis is working…" up for minutes.
+      elements.prompt.placeholder =
+        'Hands-free — say "Hey Jarvis", or press STOP to exit';
     } else if (interfaceMode === "remote-agent") {
       elements.prompt.placeholder = remotePairings.some((pair) => pair.trusted)
         ? "Waiting for a trusted controller…"
@@ -506,8 +531,22 @@
     );
   }
 
+  /**
+   * Whether STOP would reach something live right now.
+   *
+   * A generating answer is one case. Hands-free wake mode is the other: there
+   * the runtime is waiting for the phrase and never asks for input on its own,
+   * so an interrupt is the only exit the page can offer.
+   */
+  function isInterruptible() {
+    return (
+      isGeneratingResponse() ||
+      ((wakeActive || autoActive) && connected && currentState !== "offline")
+    );
+  }
+
   function updateSendEnabled() {
-    const canStop = isGeneratingResponse();
+    const canStop = isInterruptible();
     elements.send.classList.toggle("is-stop", canStop);
     elements.sendLabel.textContent = canStop ? "STOP" : "SEND";
     elements.send.setAttribute(
@@ -1267,6 +1306,7 @@
       requestAnimationFrame(() => renderVitals());
     }
     if (name === "skills") fetchSkills();
+    if (name === "keys") fetchKeys();
   }
 
   function setTabCount(node, value, alert = false) {
@@ -1733,6 +1773,297 @@
   }
 
   // ============================================================
+  // API keys
+  // ============================================================
+
+  //
+  // Everything Jarvis reads from .env, editable here instead of by hand. The
+  // server owns the list - which variables exist, what each one is for, and
+  // where a value currently lives - so this side is layout and intent only.
+  //
+  // A secret never comes back over the wire: the server answers with a mask and
+  // a length, which is enough to tell a stored key from a truncated paste. The
+  // page can write a value or clear one, and that is the whole vocabulary.
+  //
+
+  const KEY_SOURCES = {
+    file: ["IN .ENV", "saved in the .env file"],
+    vault: ["VAULT", "in the Windows credential vault, not in .env"],
+    environment: ["ENV VAR", "from this process's environment, not from .env"],
+    "": ["NOT SET", "no value configured"],
+  };
+
+  let keyCache = null;
+  let keyBusy = false;
+
+  function sourceMeta(entry) {
+    return KEY_SOURCES[entry.source] || KEY_SOURCES[""];
+  }
+
+  function keyStateLine(entry) {
+    const [, detail] = sourceMeta(entry);
+    if (!entry.set) return `Not set - ${detail}.`;
+    if (!entry.secret) return `${entry.value} - ${detail}`;
+    return `${entry.masked} - ${entry.length} characters, ${detail}`;
+  }
+
+  function keyButton(label, action, title) {
+    const node = document.createElement("button");
+    node.type = "button";
+    node.className = "key-button";
+    node.dataset.action = action;
+    node.textContent = label;
+    node.title = title;
+    return node;
+  }
+
+  function keyItem(entry) {
+    const item = document.createElement("div");
+    item.className = "key-item";
+    item.dataset.key = entry.key;
+    item.dataset.set = entry.set ? "true" : "false";
+    item.dataset.source = entry.source;
+
+    const head = document.createElement("div");
+    head.className = "key-head";
+    const name = document.createElement("span");
+    name.className = "key-name";
+    name.textContent = entry.key;
+    const badge = document.createElement("span");
+    badge.className = "key-source";
+    badge.dataset.source = entry.source;
+    badge.textContent = sourceMeta(entry)[0];
+    head.append(name, badge);
+
+    const help = document.createElement("p");
+    help.className = "key-help";
+    if (entry.label && entry.label !== entry.key) {
+      help.textContent = [entry.label, entry.help].filter(Boolean).join(". ");
+    } else {
+      help.textContent = entry.help
+        || "Not a variable Jarvis documents - it was already in your .env file.";
+    }
+
+    const state = document.createElement("p");
+    state.className = "key-state";
+    state.textContent = keyStateLine(entry);
+
+    const input = document.createElement("input");
+    input.className = "key-input";
+    input.type = "password";
+    input.autocomplete = "new-password";
+    input.spellcheck = false;
+    input.placeholder = entry.set ? "Replace value…" : "Paste the value…";
+    input.setAttribute("aria-label", `New value for ${entry.key}`);
+
+    const reveal = keyButton("SHOW", "reveal", `Show what you typed for ${entry.key}`);
+    reveal.addEventListener("click", () => {
+      const hidden = input.type === "password";
+      input.type = hidden ? "text" : "password";
+      reveal.textContent = hidden ? "HIDE" : "SHOW";
+      reveal.setAttribute("aria-pressed", hidden ? "true" : "false");
+    });
+
+    const controls = document.createElement("div");
+    controls.className = "key-controls";
+    controls.append(input, reveal);
+
+    const save = keyButton("SAVE", "save", `Save ${entry.key} into .env`);
+    const clear = keyButton("CLEAR", "clear", `Remove the stored value of ${entry.key}`);
+    save.addEventListener("click", () => storeKey(entry.key, input.value, save));
+    clear.addEventListener("click", () => {
+      input.value = "";
+      storeKey(entry.key, "", clear);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      storeKey(entry.key, input.value, save);
+    });
+
+    const actions = document.createElement("div");
+    actions.className = "key-controls";
+    actions.append(save, clear);
+    if (entry.custom) {
+      // Only a variable the catalogue does not know can lose its line: the
+      // documented ones stay, blank, as the file's own documentation.
+      const drop = keyButton("REMOVE", "remove", `Delete the ${entry.key} line from .env`);
+      drop.addEventListener("click", () => removeKey(entry.key, drop));
+      actions.append(drop);
+    }
+    if (entry.url) {
+      const link = document.createElement("a");
+      link.className = "key-link";
+      link.href = entry.url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = "GET KEY ↗";
+      actions.append(link);
+    }
+
+    item.append(head, help, state, controls, actions);
+    return item;
+  }
+
+  function renderKeys(filter = "") {
+    const list = elements.keysList;
+    if (!list) return;
+    const needle = filter.trim().toLowerCase();
+    list.innerHTML = "";
+    if (!keyCache) {
+      const loading = document.createElement("p");
+      loading.className = "vital-empty";
+      loading.textContent = "Loading credentials…";
+      list.append(loading);
+      return;
+    }
+    const keys = keyCache.keys.filter((entry) => {
+      if (!needle) return true;
+      return (
+        entry.key.toLowerCase().includes(needle)
+        || (entry.label || "").toLowerCase().includes(needle)
+        || (entry.help || "").toLowerCase().includes(needle)
+        || entry.group.toLowerCase().includes(needle)
+      );
+    });
+    if (!keys.length) {
+      const empty = document.createElement("p");
+      empty.className = "vital-empty";
+      empty.textContent = "No key matches that filter.";
+      list.append(empty);
+      return;
+    }
+    let group = "";
+    keys.forEach((entry) => {
+      if (entry.group !== group) {
+        group = entry.group;
+        const heading = document.createElement("p");
+        heading.className = "keys-group-head";
+        heading.textContent = group.toUpperCase();
+        list.append(heading);
+      }
+      list.append(keyItem(entry));
+    });
+  }
+
+  function renderKeysNote(body) {
+    if (!elements.keysNote) return;
+    elements.keysNote.textContent = "";
+    if (!body) {
+      elements.keysNote.textContent = "The credential list is unavailable.";
+      return;
+    }
+    const count = document.createElement("span");
+    count.textContent = `${body.configured} of ${body.total} configured · `;
+    const path = document.createElement("code");
+    path.textContent = body.env_path;
+    elements.keysNote.append(count, path);
+  }
+
+  function applyKeyResponse(body) {
+    keyCache = body;
+    renderKeys(elements.keyFilter ? elements.keyFilter.value : "");
+    renderKeysNote(body);
+  }
+
+  function savedKeyMessage(key, body, cleared) {
+    if (cleared) return `${key} cleared`;
+    // The vault copy is what makes a key usable in the session that is already
+    // running: the agent loaded .env at startup, and get_secret probes the
+    // vault before the environment. Without it the change waits for a restart,
+    // and the page says so rather than implying it took effect.
+    if ((body.vault_stored || []).includes(key)) return `${key} saved - live now`;
+    return `${key} saved - restart Jarvis to apply`;
+  }
+
+  // Returns whether the value was written, so the add form can leave what the
+  // user typed alone when a save was skipped or refused.
+  async function storeKey(key, value, control) {
+    if (!key || keyBusy) return false;
+    const trimmed = String(value || "").trim();
+    if (control) control.disabled = true;
+    keyBusy = true;
+    try {
+      applyKeyResponse(await api("/api/keys", { updates: { [key]: trimmed } }));
+      toast(savedKeyMessage(key, keyCache, !trimmed), trimmed ? "" : "warning");
+      return true;
+    } catch (error) {
+      toast(error.message || `could not save ${key}`, "error");
+      return false;
+    } finally {
+      keyBusy = false;
+      if (control) control.disabled = false;
+    }
+  }
+
+  async function removeKey(key, control) {
+    if (!key || keyBusy) return;
+    if (control) control.disabled = true;
+    keyBusy = true;
+    try {
+      applyKeyResponse(await api("/api/keys", { remove: [key] }));
+      toast(`${key} removed from .env`, "warning");
+    } catch (error) {
+      toast(error.message || `could not remove ${key}`, "error");
+    } finally {
+      keyBusy = false;
+      if (control) control.disabled = false;
+    }
+  }
+
+  async function fetchKeys() {
+    if (!token) return;
+    // Paint whatever is already known first: the panel is usually opened to
+    // change one value, and a list that blanks out on every visit reads as a
+    // page load rather than a refresh.
+    if (keyCache) renderKeys(elements.keyFilter ? elements.keyFilter.value : "");
+    if (keyBusy) return;
+    keyBusy = true;
+    try {
+      applyKeyResponse(await api("/api/keys"));
+    } catch (error) {
+      if (keyCache) toast(error.message || "could not read the credential list", "error");
+      else renderKeysNote(null);
+    } finally {
+      keyBusy = false;
+    }
+  }
+
+  if (elements.keyFilter) {
+    elements.keyFilter.addEventListener("input", () => renderKeys(elements.keyFilter.value));
+  }
+  if (elements.reloadKeys) {
+    elements.reloadKeys.addEventListener("click", () => {
+      keyCache = null;
+      fetchKeys();
+    });
+  }
+  if (elements.keysAdd) {
+    elements.keysAdd.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = (elements.newKeyName ? elements.newKeyName.value : "")
+        .trim()
+        .toUpperCase();
+      const value = elements.newKeyValue ? elements.newKeyValue.value : "";
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        toast("Use a name like MY_SERVICE_API_KEY", "error");
+        if (elements.newKeyName) elements.newKeyName.focus();
+        return;
+      }
+      if (!value.trim()) {
+        toast("Enter the value to store", "error");
+        if (elements.newKeyValue) elements.newKeyValue.focus();
+        return;
+      }
+      storeKey(name, value, null).then((saved) => {
+        if (!saved) return;
+        if (elements.newKeyName) elements.newKeyName.value = "";
+        if (elements.newKeyValue) elements.newKeyValue.value = "";
+      });
+    });
+  }
+
+  // ============================================================
   // Side panel: a column when it fits, a drawer when it does not
   // ============================================================
 
@@ -1764,6 +2095,111 @@
   }
 
   // ============================================================
+  // Modal focus containment
+  // ============================================================
+
+  // Both dialogs declare aria-modal="true", which promises assistive tech that
+  // everything behind them is inert. Keep that promise for the keyboard too:
+  // the layers behind the open dialog really are made inert, and Tab wraps
+  // inside the dialog instead of walking off to controls sitting under the
+  // backdrop, where focus is invisible.
+  const modalStack = [];
+
+  function modalLayers() {
+    return [
+      document.querySelector(".app-shell"),
+      elements.terminalDrawer,
+      elements.sessionsDrawer,
+      elements.shortcutsBackdrop,
+      elements.paletteBackdrop,
+    ].filter(Boolean);
+  }
+
+  /** Inert every layer behind the dialog's backdrop, remembering what to restore. */
+  function pushModal(backdrop) {
+    const previous = new Map();
+    modalLayers().forEach((layer) => {
+      if (layer === backdrop) return;
+      // Normalised to a boolean so a layer is never left holding a stale value.
+      previous.set(layer, layer.inert === true);
+      layer.inert = true;
+    });
+    modalStack.push(previous);
+  }
+
+  /** Undo one pushModal, putting the layers back exactly as they were. */
+  function popModal() {
+    const previous = modalStack.pop();
+    if (!previous) return;
+    previous.forEach((wasInert, layer) => {
+      layer.inert = wasInert;
+    });
+  }
+
+  const FOCUSABLE_SELECTOR = [
+    "a[href]",
+    "button:not([disabled])",
+    "input:not([disabled])",
+    "select:not([disabled])",
+    "textarea:not([disabled])",
+    "[tabindex]:not([tabindex='-1'])",
+  ].join(", ");
+
+  function focusableWithin(root) {
+    return Array.from(root.querySelectorAll(FOCUSABLE_SELECTOR)).filter((node) => {
+      if (node.hidden || node.closest("[hidden]")) return false;
+      return node.getAttribute("aria-hidden") !== "true";
+    });
+  }
+
+  // Wrap Tab and Shift+Tab at the ends of the dialog so focus can never land
+  // outside it. If focus somehow starts outside, pull it back in.
+  function containFocus(event, root) {
+    if (event.key !== "Tab" || !root) return;
+    const items = focusableWithin(root);
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    if (!root.contains(active)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  // The resting place for focus when no better target survives: the composer,
+  // or the palette button if the composer cannot take focus yet.
+  function primaryFocusTarget() {
+    return elements.prompt.disabled ? elements.paletteToggle : elements.prompt;
+  }
+
+  // Closing a dialog must never drop focus on <body>, which would restart the
+  // next Tab at the top of the page. Prefer the given node, fall back to the
+  // resting place, and ignore nodes that are hidden, inert or disabled.
+  function restoreFocus(node) {
+    const usable =
+      node && typeof node.focus === "function" && node !== document.body &&
+      !node.disabled && document.contains(node) &&
+      !node.closest("[inert]") && !node.closest("[hidden]");
+    const target = usable ? node : primaryFocusTarget();
+    if (target && typeof target.focus === "function") {
+      target.focus({ preventScroll: true });
+    }
+  }
+
+  [".shortcuts", ".palette"].forEach((selector) => {
+    const dialog = document.querySelector(selector);
+    if (!dialog) return;
+    dialog.addEventListener("keydown", (event) => containFocus(event, dialog));
+  });
+
+  // ============================================================
   // Shortcuts overlay
   // ============================================================
 
@@ -1775,13 +2211,19 @@
 
   function toggleShortcuts(force) {
     if (!elements.shortcutsBackdrop) return;
-    const next = force === undefined ? !shortcutsOpen() : Boolean(force);
+    const wasOpen = shortcutsOpen();
+    const next = force === undefined ? !wasOpen : Boolean(force);
     elements.shortcutsBackdrop.hidden = !next;
     if (next) {
-      focusBeforeShortcuts = document.activeElement;
+      if (!wasOpen) {
+        // Read the trigger before inerting the page, which blurs it.
+        focusBeforeShortcuts = document.activeElement;
+        pushModal(elements.shortcutsBackdrop);
+      }
       elements.closeShortcuts?.focus({ preventScroll: true });
-    } else if (focusBeforeShortcuts && focusBeforeShortcuts.focus) {
-      focusBeforeShortcuts.focus({ preventScroll: true });
+    } else {
+      if (wasOpen) popModal();
+      restoreFocus(focusBeforeShortcuts);
       focusBeforeShortcuts = null;
     }
   }
@@ -1801,6 +2243,7 @@
 
   let paletteItems = [];
   let paletteIndex = 0;
+  let focusBeforePalette = null;
 
   function paletteOpen() {
     return !elements.paletteBackdrop.hidden;
@@ -1858,6 +2301,8 @@
         () => selectTab("vitals")],
       ["Show alerts", "warnings and faults this session", "⚠",
         () => selectTab("logs")],
+      ["API keys", "edit the keys and tokens Jarvis reads from .env", "🔑",
+        () => { toggleSidePanel(true); selectTab("keys"); }],
     ];
     actions.forEach(([name, hint, icon, run]) => {
       if (!needle || score(name) >= 0 || score(hint) >= 0) {
@@ -1905,9 +2350,20 @@
     });
   }
 
+  /** The listbox highlights one row at a time; tell the combobox which one. */
+  function syncActiveOption() {
+    const selected = elements.paletteResults.querySelector("[aria-selected='true']");
+    if (selected && selected.id) {
+      elements.paletteInput.setAttribute("aria-activedescendant", selected.id);
+    } else {
+      elements.paletteInput.removeAttribute("aria-activedescendant");
+    }
+  }
+
   function renderPalette() {
     const container = elements.paletteResults;
     container.innerHTML = "";
+    elements.paletteInput.removeAttribute("aria-activedescendant");
     if (!paletteItems.length) {
       const empty = document.createElement("p");
       empty.className = "palette-empty";
@@ -1921,6 +2377,8 @@
         group = item.group;
         const heading = document.createElement("p");
         heading.className = "palette-group";
+        // A listbox may only own options and groups: the caption is decoration.
+        heading.setAttribute("role", "presentation");
         heading.textContent = group;
         container.append(heading);
       }
@@ -1928,6 +2386,8 @@
       button.type = "button";
       button.className = "palette-item";
       button.setAttribute("role", "option");
+      // A stable id is what lets the input point at the active row.
+      button.id = `palette-option-${index}`;
       button.setAttribute("aria-selected", index === paletteIndex ? "true" : "false");
       const icon = document.createElement("span");
       icon.className = "palette-icon";
@@ -1951,9 +2411,11 @@
         paletteIndex = index;
         container.querySelectorAll(".palette-item").forEach((node, i) =>
           node.setAttribute("aria-selected", i === index ? "true" : "false"));
+        syncActiveOption();
       });
       container.append(button);
     });
+    syncActiveOption();
   }
 
   function movePalette(delta) {
@@ -1962,21 +2424,32 @@
     const nodes = elements.paletteResults.querySelectorAll(".palette-item");
     nodes.forEach((node, i) =>
       node.setAttribute("aria-selected", i === paletteIndex ? "true" : "false"));
+    syncActiveOption();
     nodes[paletteIndex]?.scrollIntoView({ block: "nearest" });
   }
 
   function togglePalette(force) {
-    const open = force === undefined ? !paletteOpen() : Boolean(force);
+    const wasOpen = paletteOpen();
+    const open = force === undefined ? !wasOpen : Boolean(force);
     elements.paletteBackdrop.hidden = !open;
     if (open) {
+      if (!wasOpen) {
+        // Read the trigger before inerting the page, which blurs it.
+        focusBeforePalette = document.activeElement;
+        pushModal(elements.paletteBackdrop);
+      }
       elements.paletteInput.value = "";
       paletteIndex = 0;
       paletteItems = buildPaletteItems("");
       renderPalette();
       elements.paletteInput.focus();
       fetchSessions();
-    } else if (!elements.prompt.disabled) {
-      elements.prompt.focus({ preventScroll: true });
+    } else {
+      if (wasOpen) popModal();
+      // The composer is what the user usually wants next; if it cannot take
+      // focus, go back to whatever opened the palette.
+      restoreFocus(elements.prompt.disabled ? focusBeforePalette : elements.prompt);
+      focusBeforePalette = null;
     }
   }
 
@@ -2023,6 +2496,19 @@
     submitDirective();
   }
 
+  /**
+   * Keep a choreography beat's pulse inside the range the stage can render.
+   *
+   * A beat is the tool layer narrating one step of its own work (scanning the
+   * Start Menu index, launching an app, waiting for its window). The power is
+   * authored next to that script, so it is clamped here rather than trusted: an
+   * out-of-range value must not blow out the shockwave rings.
+   */
+  function clampPulse(power) {
+    const value = Number(power);
+    return Number.isFinite(value) ? Math.max(0.6, Math.min(2.4, value)) : 1.0;
+  }
+
   function handleEvent(payload) {
     metrics.events += 1;
     metrics.buckets[metrics.buckets.length - 1] += 1;
@@ -2039,6 +2525,10 @@
         if (payload.alive) fetchSkills({ force: true });
         if (!payload.alive) {
           clearSpeechOverlay();
+          // A dead runtime is not in hands-free mode any more, and STOP must not
+          // outlive the process it would signal.
+          wakeActive = false;
+          autoActive = false;
           // An exit code is the difference between "it ended" and "it crashed
           // with 1" - worth showing instead of a bare "OFFLINE".
           const code = payload.exit_code;
@@ -2048,8 +2538,28 @@
         }
         updateComposer();
         break;
+      case "wake_mode":
+        // The runtime has entered or left hands-free mode. It never asks for
+        // input while it is active, so this is what makes STOP reachable there.
+        wakeActive = Boolean(payload.active);
+        if (wakeActive) {
+          toast('Hands-free mode on — say “Hey Jarvis”. Press STOP to exit.');
+        }
+        updateComposer();
+        break;
+      case "auto_mode":
+        autoActive = Boolean(payload.active);
+        if (autoActive) toast("Auto voice mode on — speak after each reply. Press STOP to exit.");
+        updateComposer();
+        break;
       case "state":
         setState(payload.state, payload.label);
+        break;
+      case "tool_beat":
+        // The accompanying "state" event owns the caption and the orb; this
+        // only makes the stage react, so a tool that takes a second visibly
+        // ticks through its steps instead of sitting on one frame.
+        window.energyCore?.triggerPulse(clampPulse(payload.pulse));
         break;
       case "input_request":
         acceptingInput = true;
@@ -2126,16 +2636,24 @@
       toast("This interface needs a Jarvis session token.", "error");
       return;
     }
-    eventSource = new EventSource(`/api/events?token=${encodeURIComponent(token)}`);
-    eventSource.onopen = async () => {
+    const source = new EventSource(`/api/events?token=${encodeURIComponent(token)}`);
+    eventSource = source;
+    source.onopen = async () => {
+      if (eventSource !== source) return;
+      const linkAtRequest = ++linkGeneration;
+      linkProbeInFlight = false;
+      linkDiag = "";
       setConnected(true, "LINKED");
       const generationAtRequest = eventGeneration;
       try {
         const snapshot = await api("/api/state");
+        if (eventSource !== source || linkAtRequest !== linkGeneration) return;
         applyInterface(snapshot.interface || { mode: interfaceMode });
         fetchSkills({ force: true });
         if (generationAtRequest === eventGeneration) {
           acceptingInput = Boolean(snapshot.accepting_input);
+          wakeActive = Boolean(snapshot.hands_free);
+          autoActive = Boolean(snapshot.auto_mode);
           inputMode = snapshot.input_mode || "command";
           inputPrompt = String(snapshot.input_prompt || "");
           if (snapshot.state) setState(snapshot.state);
@@ -2143,30 +2661,42 @@
           updateComposer(inputPrompt);
         }
       } catch {
-        updateComposer();
+        if (eventSource === source && linkAtRequest === linkGeneration) updateComposer();
       }
     };
-    eventSource.onmessage = (event) => {
+    source.onmessage = (event) => {
+      if (eventSource !== source) return;
       try {
+        const payload = JSON.parse(event.data);
+        // Explicit reconnect creates a new EventSource with no Last-Event-ID.
+        // The broker replays history, which must not duplicate chat or actions.
+        const id = Number(payload.id);
+        if (Number.isSafeInteger(id) && id > 0) {
+          if (id <= lastEventId) return;
+          lastEventId = id;
+        }
         eventGeneration += 1;
-        handleEvent(JSON.parse(event.data));
+        handleEvent(payload);
       } catch (error) {
         console.warn("Ignored malformed Jarvis event", error);
       }
     };
-    eventSource.onerror = async () => {
+    source.onerror = async () => {
+      if (eventSource !== source) return;
       setConnected(false, "RELINKING");
       updateComposer();
       if (linkProbeInFlight) return;
+      const linkAtRequest = ++linkGeneration;
       linkProbeInFlight = true;
       try {
         const diagnosis = await classifyLinkFailure();
+        if (eventSource !== source || linkAtRequest !== linkGeneration) return;
         // A permanent cause never recovers on its own, and EventSource would
         // otherwise retry it forever behind an unchanged "RELINKING".
         if (diagnosis.permanent) closeEvents();
         applyLinkDiagnosis(diagnosis);
       } finally {
-        linkProbeInFlight = false;
+        if (linkAtRequest === linkGeneration) linkProbeInFlight = false;
       }
     };
   }
@@ -2188,6 +2718,9 @@
     if (!text.trim() && !["confirmation", "answer"].includes(inputMode)) return;
 
     const generationAtSubmit = eventGeneration;
+    const draftAtSubmit = elements.prompt.value;
+    const draftVersionAtSubmit = draftVersion;
+    const uploadAtSubmit = uploadVersion;
     acceptingInput = false;
     updateComposer();
 
@@ -2208,9 +2741,13 @@
 
     try {
       await api("/api/input", { text, display_text: displayText });
-      elements.prompt.value = "";
-      autoSizeComposer();
-      clearAttachment();
+      // SSE can open the next prompt before this HTTP response arrives. Only
+      // clear the draft and attachment that belonged to this submission.
+      if (draftVersionAtSubmit === draftVersion && elements.prompt.value === draftAtSubmit) {
+        elements.prompt.value = "";
+        autoSizeComposer();
+      }
+      if (uploadAtSubmit === uploadVersion) clearAttachment();
       if (generationAtSubmit === eventGeneration) acceptingInput = false;
       updateComposer();
     } catch (error) {
@@ -2223,7 +2760,7 @@
   }
 
   async function stopResponse() {
-    if (!isGeneratingResponse() || interruptPending) return;
+    if (!isInterruptible() || interruptPending) return;
 
     interruptPending = true;
     updateSendEnabled();
@@ -2317,7 +2854,7 @@
 
   elements.composer.addEventListener("submit", (event) => {
     event.preventDefault();
-    if (isGeneratingResponse()) {
+    if (isInterruptible()) {
       stopResponse();
     } else {
       submitDirective();
@@ -2325,6 +2862,7 @@
   });
 
   elements.prompt.addEventListener("input", () => {
+    draftVersion += 1;
     autoSizeComposer();
     updateSendEnabled();
   });
@@ -2852,6 +3390,10 @@
       });
       this.motionQuery.addEventListener("change", (event) => {
         this.reducedMotion = event.matches;
+        // The 3D stage reads the preference itself at construction; forwarding it
+        // here is what makes a *live* change stop both visuals together, instead
+        // of the hologram looping on until the page is reloaded.
+        this.holo3d?.setReducedMotion?.(this.reducedMotion);
         if (this.rafId !== null) {
           cancelAnimationFrame(this.rafId);
           this.rafId = null;
@@ -3817,6 +4359,7 @@
       // concurrent callers of it (the #live=true timer and the first click)
       // cannot each open a session.
       this.starting = false;
+      this.startGeneration = 0;
       this.muted = false;
       this.ws = null;
       this.wsConnected = false;
@@ -3944,7 +4487,7 @@
     }
 
     async toggle() {
-      if (this.active) {
+      if (this.active || this.starting) {
         this.stop();
       } else {
         await this.start();
@@ -3959,14 +4502,15 @@
       // before either set it and the page opened *two* sessions - two microphones
       // streaming to the relay, two sets of Google-side minutes spent.
       this.starting = true;
+      const generation = ++this.startGeneration;
       try {
-        return await this.startSession();
+        return await this.startSession(generation);
       } finally {
-        this.starting = false;
+        if (generation === this.startGeneration) this.starting = false;
       }
     }
 
-    async startSession() {
+    async startSession(generation = this.startGeneration) {
       if (this.active) return;
       unlockAudioEngine();
 
@@ -3984,6 +4528,7 @@
       // Fetch live model configuration from backend
       try {
         const liveCfg = await api("/api/live/config").catch(() => null);
+        if (generation !== this.startGeneration) return;
         if (liveCfg && liveCfg.ok) {
           if (liveCfg.ws_url) this.wsUrl = liveCfg.ws_url;
           if (liveCfg.model) this.modelName = liveCfg.model;
@@ -4023,7 +4568,9 @@
       // tools run locally: the delegation tools through /api/live/execute,
       // /api/interrupt and /api/state, everything else through /api/tool/execute.
       if (this.provider === "gemini") {
-        if (await this.startGeminiSession()) {
+        const started = await this.startGeminiSession(generation);
+        if (generation !== this.startGeneration) return;
+        if (started) {
           this.active = true;
           this.muted = false;
           api("/api/live/state", { active: true }).catch(() => {});
@@ -4055,7 +4602,9 @@
       // worker agent through /api/live/execute, /api/interrupt and /api/state.
       this.fishFailure = "";
       if (this.fishAgentId) {
-        if (await this.startFishSession()) {
+        const started = await this.startFishSession(generation);
+        if (generation !== this.startGeneration) return;
+        if (started) {
           this.active = true;
           this.muted = false;
           api("/api/live/state", { active: true }).catch(() => {});
@@ -4093,7 +4642,7 @@
           throw new Error("Microphone access is not supported in this browser.");
         }
 
-        this.audioStream = await navigator.mediaDevices.getUserMedia({
+        const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
             sampleRate: 24000,
@@ -4106,7 +4655,13 @@
             googHighpassFilter: true,
           },
         });
+        if (generation !== this.startGeneration) {
+          stream.getTracks().forEach(track => track.stop());
+          return;
+        }
+        this.audioStream = stream;
       } catch (err) {
+        if (generation !== this.startGeneration) return;
         console.warn("Microphone access notice:", err);
         toast("Microphone access: " + (err.message || "Permission required"), "warning");
         this.stop();
@@ -4135,15 +4690,17 @@
     /// 16kHz PCM in as `realtimeInput.audio`, 24kHz PCM out as
     /// `serverContent.modelTurn.parts[].inlineData`, tool calls answered as
     /// `toolResponse`, and barge-in as `serverContent.interrupted`.
-    async startGeminiSession() {
+    async startGeminiSession(generation = this.startGeneration) {
       this.geminiFailure = "";
       let session;
       try {
         session = await api("/api/voice/session", { provider: "gemini" });
       } catch (err) {
+        if (generation !== this.startGeneration) return false;
         this.geminiFailure = err.message || String(err);
         return false;
       }
+      if (generation !== this.startGeneration) return false;
       if (!session || !session.ok || !session.ws_url) {
         this.geminiFailure =
           (session && (session.error || session.remedy)) ||
@@ -4157,7 +4714,7 @@
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           throw new Error("Microphone access is not supported in this browser.");
         }
-        this.audioStream = await navigator.mediaDevices.getUserMedia({
+        const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
             sampleRate: 16000,
@@ -4170,7 +4727,13 @@
             googHighpassFilter: true,
           },
         });
+        if (generation !== this.startGeneration) {
+          stream.getTracks().forEach(track => track.stop());
+          return false;
+        }
+        this.audioStream = stream;
       } catch (err) {
+        if (generation !== this.startGeneration) return false;
         this.geminiFailure = "microphone: " + (err.message || "permission required");
         console.warn("Microphone access notice:", err);
         toast("Microphone access: " + (err.message || "Permission required"), "warning");
@@ -4291,12 +4854,18 @@
           notice.message || "the live voice session stopped",
           notice.remedy || "",
         );
+        if (notice.code === "rate_limit_guard" || notice.code === "authentication") {
+          this.stop();
+        }
         return;
       }
       if (data.jarvisStatus) {
         const status = data.jarvisStatus || {};
         if (this.gemini && this.gemini.google_search) {
           this.gemini.google_search.active = Boolean(status.grounding);
+        }
+        if (status.screen_share_active) {
+          toast("Screen sharing is active for this Live session; frames are sent about every two seconds", "info");
         }
         if (status.notice) toast(status.notice, "warning");
         return;
@@ -4451,6 +5020,12 @@
           error: "screen sharing is switched off in Jarvis (live_voice.screen_share)",
         };
       }
+      if (cfg.always_on) {
+        return {
+          ok: true,
+          result: "screen sharing is already active for this Live session; fresh frames arrive about every two seconds",
+        };
+      }
       if (this.screenSharing && this.displayStream) {
         return { ok: true, result: "screen sharing is already on; frames are arriving" };
       }
@@ -4550,6 +5125,13 @@
     }
 
     stopScreenShare() {
+      const cfg = (this.gemini && this.gemini.screen_share) || {};
+      if (cfg.always_on && this.active) {
+        return {
+          ok: true,
+          result: "continuous screen sharing stays active until Live Voice ends",
+        };
+      }
       clearInterval(this.screenTimer);
       this.screenTimer = null;
       this.screenSharing = false;
@@ -4817,14 +5399,16 @@
     /// Start a hosted Fish Audio Agents session. Returns false (without
     /// touching the microphone) when the agent or the vendored SDK is missing,
     /// so the caller can fall back to the local realtime path.
-    async startFishSession() {
+    async startFishSession(generation = this.startGeneration) {
       let sdk;
       try {
         sdk = await import("/vendor/fish-agent-client.esm.js");
       } catch (err) {
+        if (generation !== this.startGeneration) return false;
         console.warn("[LiveVoice] Fish Agents SDK is not vendored:", err);
         return false;
       }
+      if (generation !== this.startGeneration) return false;
 
       const clientTools = {
         execute_task: (params) => this.executeToolCall("execute_task", params || {}),
@@ -4844,10 +5428,12 @@
       let sessionToken = null;
       try {
         const resp = await api("/api/voice/session", {});
+        if (generation !== this.startGeneration) return false;
         if (resp && resp.ok && resp.session) {
           sessionToken = resp.session;
         }
       } catch (err) {
+        if (generation !== this.startGeneration) return false;
         // The server already classified this; carry its hint into the UI so a
         // real cause (out of credit, beta access) is not buried in a console.
         const detail = err.message || String(err);
@@ -4866,14 +5452,20 @@
       }
 
       try {
-        this.fishSession = await sdk.AgentSession.start({
+        const session = await sdk.AgentSession.start({
           sessionToken,
           clientTools,
           // Long actions (a build, a download, a browser automation pass) run
           // to their own deadline; the SDK's 15s default would abort them.
           clientToolTimeoutMs: DIRECT_TOOL_TIMEOUT_MS,
         });
+        if (generation !== this.startGeneration) {
+          try { session.end(); } catch (_) {}
+          return false;
+        }
+        this.fishSession = session;
       } catch (err) {
+        if (generation !== this.startGeneration) return false;
         this.fishSession = null;
         const detail = (err && err.message) || String(err);
         this.fishFailure = detail;
@@ -5441,6 +6033,10 @@
     }
 
     stop() {
+      // Pending configuration, permission or SDK promises may finish after
+      // STOP. Invalidate their ownership before releasing the current session.
+      this.startGeneration += 1;
+      this.starting = false;
       this.active = false;
       api("/api/live/state", { active: false }).catch(() => {});
       // Release the screen before anything else: a display track that outlives

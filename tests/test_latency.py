@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +13,8 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+from PIL import Image
+
 from jarvis.agent import loop
 from jarvis.agent.brain import (
     AnthropicBrain,
@@ -20,6 +24,9 @@ from jarvis.agent.brain import (
     OpenAICompatBrain,
 )
 from jarvis.config import BrainConfig, VoiceConfig
+from jarvis.perception import elements as elements_mod
+from jarvis.perception.elements import Element, Observation
+from jarvis.tools import apps, registry
 from jarvis.utils import logging as log
 from jarvis.utils import voice
 
@@ -255,13 +262,23 @@ class BackendTransportRegressionTests(unittest.TestCase):
         self.assertEqual(call.kwargs["headers"]["x-api-key"], "secret")
 
 
+def _agent_with_a_brain(use_vision: bool = True, save_screenshots: bool = False):
+    """An Agent wired the way the real one is: the brain holds the SAME
+    BrainConfig the loop reads, because that object is what the brain mutates
+    when it learns something about vision."""
+    brain = OpenAICompatBrain(BrainConfig(use_vision=use_vision))
+    agent = loop.Agent.__new__(loop.Agent)
+    agent.brain = brain
+    agent.cfg = SimpleNamespace(
+        brain=brain.cfg,
+        perception=SimpleNamespace(save_screenshots=save_screenshots),
+    )
+    return agent, brain
+
+
 class ScreenshotArchivalTests(unittest.TestCase):
     def test_diagnostic_png_is_queued_while_raw_image_returns_immediately(self):
-        agent = loop.Agent.__new__(loop.Agent)
-        agent.cfg = SimpleNamespace(
-            brain=SimpleNamespace(use_vision=True),
-            perception=SimpleNamespace(save_screenshots=True),
-        )
+        agent, _ = _agent_with_a_brain(save_screenshots=True)
         shot_dir = tempfile.TemporaryDirectory(prefix="jarvis-latency-")
         self.addCleanup(shot_dir.cleanup)
         agent._shot_dir = Path(shot_dir.name)
@@ -291,6 +308,60 @@ class ScreenshotArchivalTests(unittest.TestCase):
         self.assertIs(queued_obs, observation)
         self.assertIs(queued_shot, shot)
         self.assertEqual(path.name, "step.png")
+
+    def test_a_paused_brain_is_not_handed_a_screenshot_it_would_discard(self):
+        """The image is dropped on the way out while vision is paused, so the
+        capture and its annotation would only add their cost to every step."""
+        agent, brain = _agent_with_a_brain()
+        brain._vision_paused_until = time.time() + 60
+        brain._vision_pause_reason = "the service was too busy to accept images"
+        self.assertFalse(brain.vision_state().usable)
+
+        with patch.object(loop.screen_mod, "capture") as capture:
+            self.assertIsNone(agent._maybe_image(SimpleNamespace(), 1))
+        capture.assert_not_called()
+
+    def test_a_paused_brain_still_archives_diagnostics_when_asked(self):
+        """Saving screenshots is a separate request from sending them, so the
+        paused brain must not silence the diagnostic archive too."""
+        agent, brain = _agent_with_a_brain(save_screenshots=True)
+        brain._vision_paused_until = time.time() + 60
+        shot_dir = tempfile.TemporaryDirectory(prefix="jarvis-latency-")
+        self.addCleanup(shot_dir.cleanup)
+        agent._shot_dir = Path(shot_dir.name)
+        shot = loop.screen_mod.Screenshot(image=Mock(name="raw-image"),
+                                          width=1920, height=1080)
+
+        with (
+            patch.object(loop.screen_mod, "capture", return_value=shot),
+            patch.object(loop.screen_mod, "timestamped_name", return_value="step.png"),
+            patch.object(loop._SCREENSHOT_ARCHIVER, "submit") as submit,
+        ):
+            self.assertIsNone(agent._maybe_image(SimpleNamespace(), 1))
+        submit.assert_called_once()
+
+    def test_verification_never_captures_a_screenshot_the_brain_would_drop(self):
+        """The completion verdict costs one more capture per task; while vision
+        is paused that image is thrown away, so the verdict has to stand on the
+        element list alone."""
+        agent, brain = _agent_with_a_brain()
+        brain._vision_paused_until = time.time() + 60
+        agent.cfg.data = SimpleNamespace(verify_success=True)
+        agent._perceive = Mock(return_value=SimpleNamespace(
+            active_window="Notepad", screen_size=(800, 600),
+            menu=lambda: "1: File  2: Edit"))
+        complete = Mock(return_value='{"success": true, "reason": "note written"}')
+
+        with (
+            patch.object(loop.screen_mod, "capture") as capture,
+            patch.object(brain, "complete", complete),
+        ):
+            verdict, _ = agent._verify_success("write a note",
+                                               [{"role": "assistant", "content": "ok"}])
+
+        assert verdict is True                 # still judged, from the element list
+        capture.assert_not_called()
+        assert complete.call_args.kwargs["image"] is None
 
     def test_archiver_bounds_pending_frames_before_copying_images(self):
         archiver = loop._ScreenshotArchiver(capacity=2)
@@ -786,6 +857,355 @@ class CompletionCueTests(unittest.TestCase):
             self.assertTrue(cue_finished.wait(1))
 
         self.assertEqual(calls, [(880, 90), (1320, 130)])
+
+
+class _FakeRect:
+    def __init__(self, left, top, right, bottom):
+        self.left, self.top, self.right, self.bottom = left, top, right, bottom
+
+
+class _FakeControl:
+    """One node of a stubbed UI Automation tree."""
+
+    def __init__(self, role, name="", rect=(0, 0, 200, 120)):
+        self.ControlTypeName = role + "Control"
+        self._name = name
+        self.BoundingRectangle = _FakeRect(*rect)
+        self.children = []
+
+    @property
+    def Name(self):
+        # A node whose name changes between reads models a tree the renderer is
+        # still building - the case the retry exists for.
+        if callable(self._name):
+            return self._name()
+        return self._name
+
+    def GetChildren(self):
+        return list(self.children)
+
+
+def _uia_module(root):
+    module = Mock()
+    module.GetForegroundControl.return_value = root
+    return module
+
+
+class PerceptionRetryTests(unittest.TestCase):
+    """The stale-tree retry must not become a tax on every observation.
+
+    Chromium can serve a stale accessibility tree, so a Document whose name
+    disagrees with the window title costs a 0.8s wait and a second full walk.
+    That is worth paying for a tree that is genuinely still settling - but some
+    pages can never agree, and the walk stops at ``max_elements`` before it ever
+    reaches the page's own document: a Discord channel with a YouTube embed
+    reports the VIDEO's title for a channel window, forever. Measured on such a
+    window, that made every observation 1.28s instead of 0.23s - on every step
+    of every task. These pin the policy, not the timing.
+    """
+
+    WINDOW = "Discord | @zovexis_ - Comet"
+
+    def setUp(self):
+        from jarvis.perception import elements
+        self.elements = elements
+        elements._FUTILE_TITLE_RETRY.clear()
+        self.addCleanup(elements._FUTILE_TITLE_RETRY.clear)
+        elements._FUTILE_EMPTY_DOC_RETRY.clear()
+        self.addCleanup(elements._FUTILE_EMPTY_DOC_RETRY.clear)
+        self.slept = []
+
+    def _walk(self, root, window_title=None):
+        from jarvis.perception import _comtypes_fix
+        slept = self.slept
+
+        def fake_sleep(seconds, *a, **k):
+            slept.append(seconds)
+
+        with (
+            patch.dict(sys.modules, {"uiautomation": _uia_module(root)}),
+            patch.object(_comtypes_fix, "ensure", lambda: None),
+            patch.object(time, "sleep", fake_sleep),
+        ):
+            return self.elements._detect_uia(60, (1920, 1080),
+                                             window_title=window_title or self.WINDOW)
+
+    def _mismatching_tree(self, document_name):
+        page = _FakeControl("Document", document_name, rect=(0, 0, 800, 600))
+        page.children = [_FakeControl("Button", "Play", rect=(10, 10, 90, 40))]
+        root = _FakeControl("Window", self.WINDOW)
+        root.children = [page]
+        return root
+
+    def test_a_disagreement_is_waited_out_once_and_then_not_again(self):
+        root = self._mismatching_tree("WALKING STREET IN PATTAYA - YouTube")
+
+        first = self._walk(root)
+        self.assertEqual(self.slept, [0.8], "the first disagreement is still waited out")
+        self.assertTrue(any(e.name == "Play" for e in first))
+
+        self.slept.clear()
+        second = self._walk(root)
+        self.assertEqual(self.slept, [], "waiting again was measured to change nothing")
+        self.assertEqual([(e.role, e.name) for e in second],
+                         [(e.role, e.name) for e in first],
+                         "the skipped wait must not change what the model sees")
+
+    def test_a_wait_that_heals_the_tree_stays_available(self):
+        names = ["STALE TAB - YouTube", self.WINDOW]
+        page = _FakeControl("Document", lambda: names.pop(0) if names else self.WINDOW)
+        # A kept child, so this is the TITLE retry under test and not the
+        # empty-document retry beside it.
+        page.children = [_FakeControl("Button", "Play", rect=(10, 10, 90, 40))]
+        root = _FakeControl("Window", self.WINDOW)
+        root.children = [page]
+
+        self._walk(root)
+        self.assertEqual(self.slept, [0.8], "the renderer was still settling")
+        self.assertEqual(self.elements._FUTILE_TITLE_RETRY, set(),
+                         "a wait that fixed the tree must not be remembered as useless")
+
+    def test_a_new_window_state_still_gets_its_retry(self):
+        root = self._mismatching_tree("WALKING STREET IN PATTAYA - YouTube")
+        self._walk(root)                       # memoised as a futile wait
+        self.slept.clear()
+
+        self._walk(root, window_title="Some Other Tab - Comet")
+        self.assertEqual(self.slept, [0.8],
+                         "a different window/document pair is a different question")
+
+    def test_one_agreeing_document_is_enough(self):
+        page = _FakeControl("Document", "Discord | @zovexis_", rect=(0, 0, 1920, 1080))
+        page.children = [_FakeControl("Button", "General", rect=(10, 10, 90, 40))]
+        embed = _FakeControl("Document", "WALKING STREET - YouTube", rect=(0, 0, 800, 600))
+        root = _FakeControl("Window", self.WINDOW)
+        root.children = [embed, page]          # the embed is walked first
+
+        self._walk(root)
+        self.assertEqual(self.slept, [],
+                         "an embedded player's document must not make the page look stale")
+
+
+
+    # -- the empty-document wait: the same policy, the other half ---------- #
+
+    def _empty_document_tree(self):
+        """A Document whose content never becomes walkable - the shape that
+        cannot heal, and used to cost 0.6s plus a second walk every step."""
+        page = _FakeControl("Document", "", rect=(-5000, -5000, -4900, -4900))
+        root = _FakeControl("Window", self.WINDOW)
+        root.children = [page]
+        return root
+
+    def test_an_empty_document_is_waited_out_once_and_then_not_again(self):
+        root = self._empty_document_tree()
+
+        first = self._walk(root)
+        self.assertEqual(self.slept, [0.6],
+                         "the first empty document is still waited out")
+        self.assertEqual(first, [])
+
+        self.slept.clear()
+        second = self._walk(root)
+        self.assertEqual(self.slept, [],
+                         "the identical empty document must not cost 0.6s on "
+                         "every observation")
+        self.assertEqual(second, first,
+                         "the skipped wait must not change what the model sees")
+
+    def test_a_wait_that_fills_the_document_stays_available(self):
+        empty = _FakeControl("Document", "", rect=(-5000, -5000, -4900, -4900))
+        filled = _FakeControl("Document", "", rect=(0, 0, 800, 600))
+        filled.children = [_FakeControl("Button", "Play", rect=(10, 10, 90, 40))]
+        root = _FakeControl("Window", self.WINDOW)
+        walks = [[empty], [filled]]
+        root.GetChildren = lambda: walks.pop(0) if walks else [filled]
+
+        elements = self._walk(root)
+
+        self.assertEqual(self.slept, [0.6], "the renderer was still building")
+        self.assertTrue(any(e.name == "Play" for e in elements))
+        self.assertEqual(self.elements._FUTILE_EMPTY_DOC_RETRY, set(),
+                         "a wait that healed must not be remembered as useless")
+
+    def test_a_different_window_still_gets_its_own_wait(self):
+        root = self._empty_document_tree()
+        self._walk(root)                      # memoised as a futile wait
+        self.slept.clear()
+
+        self._walk(root, window_title="Some Other Window")
+        self.assertEqual(self.slept, [0.6],
+                         "a different window is a different question")
+
+
+class WaitForPollingTests(unittest.TestCase):
+    """wait_for's whole job is to notice a target the moment it exists.
+
+    It used to sleep a flat second between probes - a window that appeared right
+    after a probe was reported up to a second late, on every wait_for of every
+    task. The window list is a cheap check, so it is polled fast now; the full
+    perception pass, which is not cheap, keeps its own slower cadence.
+    """
+
+    @staticmethod
+    def _cfg():
+        return SimpleNamespace(perception=SimpleNamespace(
+            max_elements=60, use_uia=True, use_ocr=True))
+
+    def test_a_window_is_reported_on_the_poll_after_it_appears(self):
+        titles = [[], [], ["Save As - Notepad"]]
+        slept = []
+        with (
+            patch.object(apps, "list_windows",
+                         side_effect=lambda: titles.pop(0)),
+            patch.object(elements_mod, "observe",
+                         return_value=Observation([], (1920, 1080))),
+            patch.object(registry.time, "sleep", side_effect=slept.append),
+        ):
+            result = registry.execute("wait_for",
+                                      {"target": "save as", "timeout": 5},
+                                      None, self._cfg())
+
+        self.assertTrue(result.ok)
+        self.assertIn("Save As - Notepad", result.message)
+        self.assertEqual(slept, [0.05, 0.05],
+                         "50ms polls, not a flat second between probes")
+
+    def test_an_element_appearing_in_the_tree_is_still_found(self):
+        obs = Observation(
+            elements=[Element(0, "Button", "Save", (0, 0, 40, 30), (20, 15))],
+            screen_size=(1920, 1080))
+        with (
+            patch.object(apps, "list_windows", return_value=[]),
+            patch.object(elements_mod, "observe", return_value=obs),
+        ):
+            result = registry.execute("wait_for",
+                                      {"target": "save", "timeout": 5},
+                                      None, self._cfg())
+
+        self.assertTrue(result.ok)
+        self.assertIn("element 'Save'", result.message)
+
+    def test_a_target_that_never_appears_still_times_out(self):
+        clock = [0.0]
+        with (
+            patch.object(apps, "list_windows", return_value=[]),
+            patch.object(elements_mod, "observe",
+                         return_value=Observation([], (1920, 1080))),
+            patch.object(registry.time, "monotonic",
+                         side_effect=lambda: clock[0]),
+            patch.object(registry.time, "sleep",
+                         side_effect=lambda s: clock.__setitem__(0, clock[0] + s)),
+        ):
+            result = registry.execute("wait_for",
+                                      {"target": "never", "timeout": 1},
+                                      None, self._cfg())
+
+        self.assertFalse(result.ok)
+        self.assertIn("did not appear within 1s", result.message)
+
+
+class VisionPayloadTests(unittest.TestCase):
+    """A screenshot is re-encoded on every step, so its encoding is a step cost.
+
+    The same 1920x1080 frame was a ~80ms PNG encode and a ~1MB upload on every
+    step of every task; JPEG is ~6ms and a third of the size. The dimensions must
+    NOT move: a backend that answers in image pixels would have every click
+    silently rescaled by a resize.
+    """
+
+    @staticmethod
+    def _frame(size=(320, 180)):
+        img = Image.new("RGB", size, (245, 245, 245))
+        for x in range(0, size[0], 4):
+            for y in range(0, size[1], 4):
+                img.putpixel((x, y), (10, 10, 10))
+        return img
+
+    def test_openai_compatible_sends_jpeg_at_the_captured_size(self):
+        brain = OpenAICompatBrain(BrainConfig(
+            backend="openai", model="m", base_url="https://openai.test/v1",
+            api_key="secret"))
+        response = Mock()
+        response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+        brain._http_post = Mock(return_value=response)
+
+        brain.complete("system", [{"role": "user", "content": "task"}],
+                       image=self._frame())
+
+        content = brain._http_post.call_args.kwargs["json"]["messages"][-1]["content"]
+        url = next(part["image_url"]["url"] for part in content
+                   if part.get("type") == "image_url")
+        self.assertTrue(url.startswith("data:image/jpeg;base64,"))
+        img = Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1])))
+        self.assertEqual(img.format, "JPEG")
+        self.assertEqual(img.size, (320, 180),
+                         "the frame keeps the size it was captured at")
+
+    def test_ollama_sends_jpeg_at_the_captured_size(self):
+        brain = OllamaBrain(BrainConfig(backend="ollama", model="m",
+                                        base_url="http://ollama.test"))
+        response = Mock(status_code=200)
+        response.json.return_value = {"message": {"content": "ok"}}
+        brain._http_post = Mock(return_value=response)
+
+        brain.complete("system", [{"role": "user", "content": "task"}],
+                       image=self._frame())
+
+        payload = brain._http_post.call_args.kwargs["json"]
+        img = Image.open(io.BytesIO(base64.b64decode(
+            payload["messages"][-1]["images"][0])))
+        self.assertEqual(img.format, "JPEG")
+        self.assertEqual(img.size, (320, 180))
+
+    def test_anthropic_declares_the_jpeg_it_really_sends(self):
+        brain = AnthropicBrain(BrainConfig(backend="anthropic", model="m",
+                                           api_key="secret"))
+        response = Mock()
+        response.json.return_value = {"content": [{"type": "text", "text": "ok"}]}
+        brain._http_post = Mock(return_value=response)
+
+        brain.complete("system", [{"role": "user", "content": "task"}],
+                       image=self._frame())
+
+        content = brain._http_post.call_args.kwargs["json"]["messages"][-1]["content"]
+        source = next(part["source"] for part in content
+                      if part.get("type") == "image")
+        self.assertEqual(source["media_type"], "image/jpeg")
+        img = Image.open(io.BytesIO(base64.b64decode(source["data"])))
+        self.assertEqual(img.format, "JPEG")
+
+
+class VerdictReuseTests(unittest.TestCase):
+    """The finish verdict must not cost a second read of a screen that cannot differ.
+
+    ``finish`` changes nothing, so the observation and the frame the finishing
+    step already has are what to judge - a fresh perception pass and capture
+    bought nothing on top of them, on every task.
+    """
+
+    def test_the_step_frame_is_judged_instead_of_a_fresh_read(self):
+        agent, brain = _agent_with_a_brain()
+        agent.cfg.data = SimpleNamespace(verify_success=True)
+        frame = Mock(name="step-frame")
+        obs = SimpleNamespace(active_window="Notepad", screen_size=(800, 600),
+                              menu=lambda: '1: Edit "Untitled"')
+        complete = Mock(return_value='{"success": true, "reason": "note written"}')
+
+        with (
+            patch.object(agent, "_perceive") as perceive,
+            patch.object(loop.screen_mod, "capture") as capture,
+            patch.object(brain, "complete", complete),
+        ):
+            verdict, reason = agent._verify_success(
+                "write a note", [{"role": "user", "content": "RESULT: ok"}],
+                obs=obs, image=frame)
+
+        self.assertTrue(verdict)
+        self.assertEqual(reason, "note written")
+        perceive.assert_not_called()
+        capture.assert_not_called()
+        self.assertIs(complete.call_args.kwargs["image"], frame)
 
 
 if __name__ == "__main__":

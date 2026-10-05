@@ -38,7 +38,6 @@ class FloatingMiniHUD:
         on_submit_command: Optional[Callable[[str], None]] = None,
         on_voice_toggle: Optional[Callable[[], None]] = None,
         on_vision_trigger: Optional[Callable[[], None]] = None,
-        on_macro_toggle: Optional[Callable[[], None]] = None,
         on_stop_action: Optional[Callable[[], None]] = None,
         position: str = "bottom_right",
         opacity: float = 0.94,
@@ -46,7 +45,6 @@ class FloatingMiniHUD:
         self.on_submit_command = on_submit_command
         self.on_voice_toggle = on_voice_toggle
         self.on_vision_trigger = on_vision_trigger
-        self.on_macro_toggle = on_macro_toggle
         self.on_stop_action = on_stop_action
         self.default_position = position
         self.opacity = opacity
@@ -54,7 +52,6 @@ class FloatingMiniHUD:
         self.state = "idle"
         self.detail_text = "Neural Link Active · Ready"
         self.is_expanded = True
-        self.is_macro_recording = False
         self.is_voice_active = False
 
         self._visible = True
@@ -191,9 +188,6 @@ class FloatingMiniHUD:
         self._btn_see = tk.Button(self._actions_bar, text="👁️", command=self._handle_vision, **btn_style)
         self._btn_see.pack(side=tk.LEFT, padx=2)
 
-        self._btn_macro = tk.Button(self._actions_bar, text="🔴", command=self._handle_macro, **btn_style)
-        self._btn_macro.pack(side=tk.LEFT, padx=2)
-
         self._btn_stop = tk.Button(self._actions_bar, text="⏹", command=self._handle_stop, **btn_style)
         self._btn_stop.pack(side=tk.LEFT, padx=2)
 
@@ -317,10 +311,6 @@ class FloatingMiniHUD:
     def _handle_vision(self) -> None:
         if self.on_vision_trigger:
             threading.Thread(target=self.on_vision_trigger, daemon=True).start()
-
-    def _handle_macro(self) -> None:
-        if self.on_macro_toggle:
-            threading.Thread(target=self.on_macro_toggle, daemon=True).start()
 
     def _handle_stop(self) -> None:
         if self.on_stop_action:
@@ -473,9 +463,6 @@ class FloatingMiniHUD:
     def set_voice_active(self, active: bool) -> None:
         self._msg_queue.put(("voice", active))
 
-    def set_macro_recording(self, recording: bool) -> None:
-        self._msg_queue.put(("macro", recording))
-
     def _tick_loop(self) -> None:
         if not self._root or not self._running:
             return
@@ -534,11 +521,6 @@ class FloatingMiniHUD:
                         self._btn_voice.config(bg="#00ffdd" if self.is_voice_active else "#071828",
                                                fg="#010610" if self.is_voice_active else "#00f0ff")
 
-                elif item[0] == "macro":
-                    self.is_macro_recording = item[1]
-                    if self._btn_macro and getattr(self._btn_macro, "winfo_exists", lambda: False)():
-                        self._btn_macro.config(bg="#ff4e45" if self.is_macro_recording else "#071828",
-                                               fg="#ffffff" if self.is_macro_recording else "#00f0ff")
             except Exception:
                 break
 

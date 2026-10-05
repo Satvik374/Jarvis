@@ -139,7 +139,14 @@ def _action_reference(actions=ACTIONS) -> str:
 _RULES = """\
 Rules:
   1. Output ONLY the JSON object. No markdown, no code fences, no extra text.
-  2. One action per turn. Do the smallest useful next step.
+  2. One action per turn. Make the most useful progress that one reliable tool
+     call can achieve; do not split known work into unnecessary tiny steps.
+     Prefer key_sequence for a known sequence of keyboard shortcuts and
+     write_files for several already-planned files. Use direct file, browser,
+     app and API tools instead of reproducing the same work with mouse clicks.
+     Only group steps whose targets and inputs are already known: if the next
+     step depends on a changed screen or a tool result, inspect that result first.
+     Keep thought to one short sentence, not a narrated plan.
   3. After an action changes the screen, the new state is shown automatically -
      you do not need to call observe unless you deliberately waited.
   4. If a needed control is off-screen, scroll to find it.
@@ -148,8 +155,11 @@ Rules:
      NEVER click the browser address bar and type a URL by hand.
      To only READ a page (research, summarise, look something up), prefer
      read_url - it returns the page text in ONE step, no browser needed.
-  5b. After launching an app or opening a page, use wait_for with a word you
-     expect in the new window title instead of blind wait/observe retries.
+  5b. After launching an app or opening a page, inspect the returned result and
+     screen first. If the target is already ready, continue immediately. If it
+     is still loading, use wait_for with an expected window title or element
+     instead of blind wait/observe retries. Never wait again for a target the
+     latest result or observation already confirms is present.
   6. Click a text box, message box or search field exactly ONCE. One click
      focuses it even if the screen looks unchanged - clicking it again does
      nothing. Your NEXT action must be type, then press enter to submit.
@@ -170,6 +180,25 @@ Rules:
   10. Never invent element ids that are not in the list.
   11. ALWAYS use element ids to click. NEVER guess x,y from the screenshot.
       The element list coordinates are pixel-perfect; your visual estimates are not.
+  11b. SAVED COORDINATES: when the control you need is one you have located
+     before (a send button, a play button, a composer box, a phone's icon),
+     check the coordinates you already saved rather than starting a new
+     screenshot search - the COORDINATES YOU ALREADY KNOW section lists the ones
+     that fit this task. Click a saved one straight away with
+     {"action":"click","args":{"coord":"whatsapp-send-button"}}: it resolves
+     instantly, with no screenshot and no element hunting, and it still works
+     when the element list cannot name the control at all. Search the rest with
+     coordinates(action="find", query="whatsapp send"). Use the saved name
+     EXACTLY as it is listed.
+  11c. SAVE WHAT YOU FOUND: after you had to search the screen for a control the
+     user is likely to want again, save it once -
+     coordinates(action="save", name="<app>-<control>", kind="pc", x=..., y=...,
+     screen="1920x1080", app="WhatsApp"). Name it YOURSELF: kebab-case,
+     descriptive, one name per real control, e.g. "whatsapp-send-button".
+     A phone-screen target is kind="mobile" with the PHONE's pixel size -
+     the desktop and the phone are unrelated coordinate spaces, so never save
+     one as the other. Saving an existing name moves it, so re-save a control
+     that has moved instead of living with a stale one.
   12. SOFTWARE / CODING TASKS: to build or modify software (a website, web
      app, game, script, refactor, bug fix in code), call code_task ONCE with
      a full description of the requirements. It is a professional coding
@@ -384,8 +413,9 @@ def _normalise(action: str, args: dict) -> tuple[str, dict]:
     a = _SYNONYMS.get(a, a)
 
     # coordinate objects like {"coordinate": [x, y]} or {"position": {...}}
-    if "coordinate" in args and isinstance(args["coordinate"], (list, tuple)):
-        args["x"], args["y"] = args["coordinate"][0], args["coordinate"][1]
+    coordinate = args.get("coordinate")
+    if isinstance(coordinate, (list, tuple)) and len(coordinate) >= 2:
+        args["x"], args["y"] = coordinate[0], coordinate[1]
     if "key" in args and "keys" not in args:
         args["keys"] = args.pop("key")
     if a == "type" and "text" not in args and "value" in args:

@@ -23,6 +23,9 @@ them, and :func:`note` keeps it out of the model's prompt until it works.
     DISCORD_BOT_TOKEN                    - discord.com/developers/applications
     WHATSAPP_TOKEN, WHATSAPP_PHONE_ID    - developers.facebook.com (Cloud API)
     WHATSAPP_INBOX                       - optional JSONL your webhook appends to
+                                           (the away assistant polls the same
+                                           file - jarvis/whatsapp_away.py - so
+                                           one webhook feeds both)
 """
 
 from __future__ import annotations
@@ -465,7 +468,9 @@ def discord_owner_id() -> str:
 # --------------------------------------------------------------------------- #
 # WhatsApp (Meta Cloud API)
 # --------------------------------------------------------------------------- #
-_WHATSAPP_API = "https://graph.facebook.com/v21.0"
+#: The one place the WhatsApp endpoint is written down; the away assistant
+#: sends through the function below rather than repeating it.
+WHATSAPP_API = "https://graph.facebook.com/v21.0"
 _WHATSAPP_HINT = (
     "WhatsApp is not configured. Set WHATSAPP_TOKEN and WHATSAPP_PHONE_ID in "
     ".env from your Meta app at developers.facebook.com (WhatsApp > API Setup).")
@@ -476,6 +481,139 @@ _WHATSAPP_READ_HINT = (
     "JSONL file your webhook appends each message to, and I will read it "
     "instantly; or (2) run a WhatsApp MCP bridge and add it with the mcp "
     "action, which exposes full chat history as MCP tools.")
+
+
+def _wa_text(raw) -> str:
+    """A message body, from either the dict or the flat form."""
+    if isinstance(raw, dict):
+        return str(raw.get("body", ""))
+    return str(raw or "")
+
+
+def _wa_ts(raw) -> int | None:
+    """A Unix timestamp as int, or ``None`` when the payload carried none."""
+    try:
+        return int(str(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def whatsapp_events(payload) -> list[dict]:
+    """Normalize one inbox line into inbound events.
+
+    The only place that knows Meta's payload shape. A caller can reach you two
+    ways and both arrive on the same webhook, so this returns the same dict for
+    either: ``kind`` is ``"message"`` or ``"call"``, with ``sender``, ``name``,
+    ``text``, ``ts``, ``event`` (connect/terminate), ``call_id``, ``duration``
+    and ``message_id``. Field names and the ``calls`` shape follow Meta's
+    user-initiated-calling docs; a caller's number may be omitted there in
+    favour of a business-scoped user id, so ``sender`` falls back to it. An event
+    that carries no number at all is dropped rather than passed on: nothing can be
+    replied to it, and a reply addressed to "?" would be a message to nobody.
+
+    A flat ``{from, text, timestamp}`` line is accepted too, because that is what
+    a hand-written webhook tends to append.
+    """
+    if not isinstance(payload, dict):
+        return []
+    if "from" in payload or "text" in payload:
+        sender = str(payload.get("from") or "").strip()
+        if not sender:
+            return []                    # nothing to attribute, nothing to reply to
+        return [{"kind": "message", "sender": sender, "name": "",
+                 "text": _wa_text(payload.get("text")),
+                 "ts": _wa_ts(payload.get("timestamp")), "event": "",
+                 "call_id": "", "duration": 0, "message_id": ""}]
+
+    events: list[dict] = []
+    for entry in payload.get("entry", []) or []:
+        for change in (entry or {}).get("changes", []) or []:
+            value = (change or {}).get("value", {}) or {}
+            names = {}
+            for contact in value.get("contacts", []) or []:
+                if not isinstance(contact, dict):
+                    continue
+                key = str(contact.get("wa_id") or contact.get("user_id") or "")
+                if key:
+                    names[key] = str((contact.get("profile") or {}).get("name", ""))
+            for msg in value.get("messages", []) or []:
+                if not isinstance(msg, dict):
+                    continue
+                sender = str(msg.get("from") or msg.get("from_user_id") or "").strip()
+                if not sender:
+                    continue                 # no number: not actionable, so not an event
+                events.append({
+                    "kind": "message", "sender": sender,
+                    "name": names.get(sender, ""),
+                    "text": _wa_text(msg.get("text")),
+                    "ts": _wa_ts(msg.get("timestamp")), "event": "",
+                    "call_id": "", "duration": 0,
+                    "message_id": str(msg.get("id", ""))})
+            for call in value.get("calls", []) or []:
+                if not isinstance(call, dict):
+                    continue
+                sender = str(call.get("from") or call.get("from_user_id") or "").strip()
+                if not sender:
+                    continue                 # no number: not actionable, so not an event
+                events.append({
+                    "kind": "call", "sender": sender,
+                    "name": names.get(sender, ""),
+                    "text": "", "ts": _wa_ts(call.get("timestamp")),
+                    "event": str(call.get("event", "")),
+                    "call_id": str(call.get("id", "")),
+                    "duration": int(call.get("duration") or 0),
+                    "message_id": ""})
+    return events
+
+
+def whatsapp_inbox_path():
+    """The JSONL file a webhook (or the local driver) appends events to.
+
+    ``None`` when it is not configured. The away assistant asks for it here so
+    the inbound location has one owner.
+    """
+    (path,) = _env("WHATSAPP_INBOX")
+    return Path(os.path.expanduser(path)) if path else None
+
+
+def whatsapp_can_send() -> bool:
+    """True when a token and phone id are set, so a reply can actually go out."""
+    token, phone_id = _env("WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID")
+    return bool(token and phone_id)
+
+
+def whatsapp_send_text(to: str, body: str) -> str:
+    """Send one free-form text message through the Cloud API.
+
+    Returns the platform's message id when it gives one. Raises
+    :class:`ConnectorError` when nothing is configured, or when Meta refuses -
+    including its 24-hour customer-service-window refusal, which a missed call
+    can produce because a call event is not a message and does not open that
+    window. The refusal is passed on, never swallowed.
+    """
+    token, phone_id = _env("WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID")
+    if not token or not phone_id:
+        raise ConnectorError(_WHATSAPP_HINT)
+    import requests
+    try:
+        r = requests.post(
+            f"{WHATSAPP_API}/{phone_id}/messages",
+            json={"messaging_product": "whatsapp", "to": to, "type": "text",
+                  "text": {"preview_url": False, "body": body}},
+            headers={"Authorization": f"Bearer {token}"}, timeout=20)
+    except Exception as exc:
+        raise ConnectorError(f"could not reach the WhatsApp API: {exc}")
+    if r.status_code == 401:
+        raise ConnectorError("WhatsApp rejected the token (401) - Cloud API "
+                             "tokens from the test flow expire after 24h; "
+                             "generate a permanent System User token.")
+    if r.status_code >= 400:
+        raise ConnectorError(f"WhatsApp send -> HTTP {r.status_code}: "
+                             f"{r.text[:200]}")
+    try:
+        return str(r.json()["messages"][0]["id"])
+    except Exception:
+        return ""
 
 
 def _whatsapp(op: str, query: str = "", target: str = "", limit: int = 10) -> str:
@@ -489,7 +627,7 @@ def _whatsapp(op: str, query: str = "", target: str = "", limit: int = 10) -> st
         import requests
         try:
             r = requests.get(
-                f"{_WHATSAPP_API}/{phone_id}/whatsapp_business_profile",
+                f"{WHATSAPP_API}/{phone_id}/whatsapp_business_profile",
                 params={"fields": "about,address,description,email,vertical,"
                                   "websites"},
                 headers={"Authorization": f"Bearer {token}"}, timeout=20)
@@ -511,10 +649,9 @@ def _whatsapp_inbox(contains: str, limit: int) -> str:
     """Read the webhook-fed JSONL inbox. Each line is one message object; we
     accept either a flat {from,text,timestamp} record or a raw Cloud API webhook
     payload, since which one you get depends on how the webhook was written."""
-    (path,) = _env("WHATSAPP_INBOX")
-    if not path:
+    p = whatsapp_inbox_path()
+    if p is None:
         raise ConnectorError(_WHATSAPP_READ_HINT)
-    p = Path(os.path.expanduser(path))
     if not p.exists():
         raise ConnectorError(f"WHATSAPP_INBOX points at {p}, which does not "
                              "exist yet - no message has been received, or the "
@@ -531,14 +668,12 @@ def _whatsapp_inbox(contains: str, limit: int) -> str:
             rec = json.loads(line)
         except Exception:
             continue
-        for msg in _whatsapp_records(rec):
-            sender = str(msg.get("from", "?"))
-            body = str((msg.get("text") or {}).get("body", "")
-                       if isinstance(msg.get("text"), dict) else msg.get("text", ""))
-            when = str(msg.get("timestamp", ""))
-            if when.isdigit():
-                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(when)))
-            row = f"  {when} {sender}: {' '.join(body.split())}"
+        for ev in whatsapp_events(rec):
+            if ev["kind"] != "message":
+                continue
+            when = (time.strftime("%Y-%m-%d %H:%M", time.localtime(ev["ts"]))
+                    if ev["ts"] else "")
+            row = f"  {when} {ev['sender']}: {' '.join(ev['text'].split())}"
             if not low or low in row.lower():
                 rows.append(row)
     if not rows:
@@ -546,21 +681,6 @@ def _whatsapp_inbox(contains: str, limit: int) -> str:
                 + f" in {p.name}")
     rows = rows[-max(1, limit):]
     return f"whatsapp inbox ({len(rows)} shown):\n" + "\n".join(rows)
-
-
-def _whatsapp_records(rec) -> list[dict]:
-    """Pull message objects out of either shape of inbox line."""
-    if not isinstance(rec, dict):
-        return []
-    if "from" in rec or "text" in rec:
-        return [rec]
-    out: list[dict] = []
-    for entry in rec.get("entry", []) or []:
-        for change in (entry or {}).get("changes", []) or []:
-            value = (change or {}).get("value", {}) or {}
-            out.extend(m for m in value.get("messages", []) or []
-                       if isinstance(m, dict))
-    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -640,16 +760,33 @@ def invalidate(service: str = "") -> None:
                 _cache.pop(key, None)
 
 
+def states() -> dict[str, dict]:
+    """Machine-readable connector state, one row per service.
+
+    ``status`` below renders this for the ':connect' command and the startup
+    briefing reads it for its one-line summary. Before this existed the briefing
+    was handed the *string* ``status`` returns and silently produced nothing,
+    because it was written against a dict.
+    """
+    out: dict[str, dict] = {}
+    for name, spec in _SERVICES.items():
+        out[name] = {
+            "configured": configured(name),
+            "missing": [e for e in spec["env"] if not _env(e)[0]],
+            "ops": spec["ops"],
+        }
+    return out
+
+
 def status() -> str:
     """Human-readable configuration report for the ':connect' console command."""
     rows = []
-    for name, spec in _SERVICES.items():
-        if configured(name):
-            rows.append(f"  {name:<9} ready      (ops: {spec['ops']})")
+    for name, info in states().items():
+        if info["configured"]:
+            rows.append(f"  {name:<9} ready      (ops: {info['ops']})")
         else:
-            missing = [e for e in spec["env"] if not _env(e)[0]]
-            rows.append(f"  {name:<9} not set up (needs {', '.join(missing)} "
-                        "in .env)")
+            rows.append(f"  {name:<9} not set up (needs "
+                        f"{', '.join(info['missing'])} in .env)")
     return "connectors:\n" + "\n".join(rows)
 
 

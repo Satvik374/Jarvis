@@ -81,6 +81,15 @@ EXCLUDED: dict[str, str] = {
     "mouse_control": "screen",
     "observe": "screen",
     "see": "screen",
+    # ``camera`` is the same shape as ``see``: a picture for a model to look at
+    # rather than the screen to be moved. The voice agent is given the resolving
+    # screen tools instead (``look_at_screen``), and its published tool list is
+    # pinned in tests/test_stop_session.py - so the camera stays with the task
+    # loop, which attaches the frame to its own next turn. Putting it in the
+    # voice set is a deliberate act: remove this line, bump the pinned counts in
+    # the same commit, then re-publish the hosted agent
+    # (``python -m jarvis.live.fish_agents``) or the new tool never reaches it.
+    "camera": "screen",
     "take_screenshot": "screen",
     "wait_for": "screen",
     # loop
@@ -104,7 +113,6 @@ EXCLUDED: dict[str, str] = {
     "remote_task": "session",
     "mcp": "session",
     "api_mock": "session",
-    "macro": "session",
     "hud_control": "session",
     "daemon_rule": "session",
     # slow

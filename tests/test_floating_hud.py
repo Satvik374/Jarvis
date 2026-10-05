@@ -19,7 +19,6 @@ def test_hud_config_defaults():
     assert cfg.hud.hotkey_toggle == "ctrl+alt+j"
     assert cfg.hud.hotkey_voice == "alt+v"
     assert cfg.hud.hotkey_vision == "ctrl+alt+s"
-    assert cfg.hud.hotkey_macro == "ctrl+alt+r"
     assert cfg.hud.position == "bottom_right"
 
 
@@ -53,13 +52,9 @@ def test_floating_mini_hud_state_queueing():
     item2 = hud._msg_queue.get_nowait()
     assert item2 == ("voice", True)
 
-    hud.set_macro_recording(True)
-    item3 = hud._msg_queue.get_nowait()
-    assert item3 == ("macro", True)
-
     hud.set_response("hello", "Hello sir")
-    item4 = hud._msg_queue.get_nowait()
-    assert item4 == ("response", "hello", "Hello sir")
+    item3 = hud._msg_queue.get_nowait()
+    assert item3 == ("response", "hello", "Hello sir")
 
 
 def test_hud_controller_lifecycle():

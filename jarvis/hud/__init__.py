@@ -36,6 +36,19 @@ def set_hud_controller(controller: Optional[HudController]) -> None:
     _CONTROLLER = controller
 
 
+def hud_overlay():
+    """The live HUD overlay, or None when the HUD is not running.
+
+    Read-only, unlike :func:`get_hud_controller`: the tool-layer choreography
+    asks whether anything is watching on the path of *every* action, and must
+    not spin up a controller (or its tkinter window) to find out.
+    """
+    controller = _CONTROLLER
+    if controller is None:
+        return None
+    return getattr(controller, "overlay", None)
+
+
 def start_hud(
     cfg: Optional[Config] = None,
     task_runner: Optional[Callable[[str], None]] = None,
@@ -66,6 +79,7 @@ __all__ = [
     "GlobalHotkeyManager",
     "get_hud_controller",
     "set_hud_controller",
+    "hud_overlay",
     "start_hud",
     "stop_hud",
     "toggle_hud",

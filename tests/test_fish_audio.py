@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import io
 import os
+import struct
+import sys
 from unittest.mock import MagicMock, patch
 import urllib.error
+import wave
 import pytest
 
 from jarvis.config import VoiceConfig, load_config
@@ -154,3 +157,75 @@ def test_synthesize_wav_fish_routing_and_fallback():
                 wav = voice._synthesize_wav("Testing Fallback")
                 assert wav == b"RIFF_KOKORO_FALLBACK"
                 mock_kokoro.assert_called_once()
+
+
+def _placeholder_wav(pcm: bytes, rate: int = 44100) -> bytes:
+    """The exact header Fish Audio returns: both sizes still at their stream placeholders."""
+    return (
+        b"RIFF" + (0xFFFFFF24).to_bytes(4, "little") + b"WAVE"
+        + b"fmt " + (16).to_bytes(4, "little")
+        + (1).to_bytes(2, "little") + (1).to_bytes(2, "little")
+        + rate.to_bytes(4, "little") + (rate * 2).to_bytes(4, "little")
+        + (2).to_bytes(2, "little") + (16).to_bytes(2, "little")
+        + b"data" + (0xFFFFFF00).to_bytes(4, "little")
+        + pcm
+    )
+
+
+def test_a_placeholder_wav_is_made_to_describe_the_audio_it_carries():
+    """A stream placeholder header must not be read as fifteen hours of audio."""
+    pcm = b"\x01\x02" * 44100        # one second at 44.1 kHz, mono, 16-bit
+    repaired = voice._repair_wav_sizes(_placeholder_wav(pcm))
+
+    assert struct.unpack("<L", repaired[4:8])[0] == len(repaired) - 8
+    assert struct.unpack("<L", repaired[40:44])[0] == len(pcm)
+    with wave.open(io.BytesIO(repaired), "rb") as handle:
+        assert handle.getnframes() / handle.getframerate() == pytest.approx(1.0)
+    # The audio is untouched, and repairing an already repaired clip changes nothing.
+    assert repaired[44:] == pcm
+    assert voice._repair_wav_sizes(repaired) == repaired
+
+
+def test_repair_leaves_anything_that_is_not_a_sized_wav_alone():
+    assert voice._repair_wav_sizes(b"") == b""
+    assert voice._repair_wav_sizes(b"RIFF_fish_wav") == b"RIFF_fish_wav"
+    # Chunks that do not parse must survive verbatim rather than be guessed at.
+    odd = b"RIFF\x24\x00\x00\x00WAVEfmt mock_wav_bytes"
+    assert voice._repair_wav_sizes(odd) == odd
+
+
+def test_the_api_response_is_repaired_on_its_way_out():
+    cfg = VoiceConfig(engine="fish", fish_audio_key="mock_fish_key")
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = _placeholder_wav(b"\x00\x01" * 22050)
+    mock_resp.__enter__.return_value = mock_resp
+    mock_resp.__exit__.return_value = None
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        audio = voice._synthesize_fish_audio("Hello from Jarvis", cfg)
+
+    assert audio.startswith(b"RIFF")
+    assert struct.unpack("<L", audio[40:44])[0] == len(audio) - 44
+
+
+def test_playback_never_hands_windows_a_placeholder_length():
+    """winsound walks the declared length: an unrepaired header is a crash, not an error."""
+    handed = []
+
+    class FakeWinsound:
+        SND_MEMORY = 4
+        SND_NODEFAULT = 8
+        SND_FILENAME = 0x20000
+        SND_ASYNC = 1
+
+        @staticmethod
+        def PlaySound(sound, flags):
+            if isinstance(sound, bytes):
+                handed.append(sound)
+
+    with patch.dict(sys.modules, {"winsound": FakeWinsound}):
+        voice._play_wav(_placeholder_wav(b"\x00\x01" * 22050), wait=True)
+
+    assert handed, "the clip never reached the player"
+    assert struct.unpack("<L", handed[0][40:44])[0] == len(handed[0]) - 44
+    assert struct.unpack("<L", handed[0][4:8])[0] == len(handed[0]) - 8

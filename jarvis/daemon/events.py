@@ -52,8 +52,8 @@ class EventRule:
     name: str = "Unnamed Rule"
     trigger_type: EventType = EventType.CUSTOM
     condition: Dict[str, Any] = field(default_factory=dict)
-    action_type: str = "notify"  # "notify" (TTS/UI announcement), "task" (agent.run), "macro" (replay macro)
-    action_target: str = ""      # text prompt, macro name, or message template
+    action_type: str = "notify"  # "notify" (TTS/UI announcement), "task" (agent.run)
+    action_target: str = ""      # text prompt or message template
     cooldown_seconds: float = 300.0  # default 5 minute cooldown between repeated triggers
     last_triggered: float = 0.0
     enabled: bool = True

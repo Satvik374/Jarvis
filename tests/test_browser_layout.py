@@ -15,6 +15,13 @@ being severe on a narrow one:
   drawer top. It used to be repeated as literals in five places, so raising it
   for the two-row header left the drawers sitting across it.
 
+* The stage's decoration is painted *above* the core frame (``--z-stage-deco``
+  and ``--z-stage-hud`` exceed ``--z-stage``), and the Live Voice trigger and the
+  hologram toolbar live inside that frame. While those layers still took pointer
+  events, an invisible radar sweep was the topmost element at the trigger's
+  centre and every one of those controls was unclickable - a whole stage of
+  controls dead, with nothing on screen looking wrong.
+
 There is no browser in the test suite, so the stylesheet is read as text: these
 pin the declarations and, more importantly, their *order*. Equal specificity
 means source order decides, and a media query placed before the rule it
@@ -150,3 +157,70 @@ def test_panel_hiding_rule_outranks_the_base_display_declaration():
     assert base_rules, "no base .activity-panel rule found"
     assert hidden > base_rules[-1]
     assert "display: none;" in _rule(".workspace .activity-panel")
+
+
+# --------------------------------------------------------------------------- #
+# stage layering: a decoration must never be the control's click target
+# --------------------------------------------------------------------------- #
+
+STAGE_Z_LEVEL = re.compile(r"--z-(stage[a-z-]*):\s*(\d+);")
+#: The layers that sit above the core frame and must stay inert.
+STAGE_DECORATION = (".stage-grid", ".radar-sweep", ".mode-strip", ".state-readout")
+
+
+def _flat_rules(source: str = STYLES_CSS) -> dict[str, dict[str, str]]:
+    """The *effective* declarations per selector, comments and grouping resolved.
+
+    Grouped selectors are split - the layer's inertness is declared in a shared rule
+    with three others - and a selector's several rules are merged, because the
+    property that matters is what ends up applied, not which block states it.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}",
+                             re.sub(r"/\*.*?\*/", "", source, flags=re.S)):
+        body = {part.split(":", 1)[0].strip(): part.split(":", 1)[1].strip()
+                for part in match.group(2).split(";") if ":" in part}
+        for selector in match.group(1).split(","):
+            selector = " ".join(selector.split())
+            if selector and not selector.startswith("@"):
+                out.setdefault(selector, {}).update(body)
+    return out
+
+
+def test_no_layer_painted_above_the_core_frame_can_swallow_a_click():
+    """The stage's decoration outranks the frame, so it must take no clicks.
+
+    ``--z-stage-deco`` and ``--z-stage-hud`` are above ``--z-stage``, the level the
+    frame and every control inside it (the Live Voice trigger, the hologram
+    toolbar) live on. A layer up there that still takes pointer events is the
+    topmost element at a control's centre, so the control never fires - which is
+    exactly what an invisible ``.radar-sweep`` did to ``#stageVoiceBtn``. Any
+    future layer up there has to be inert for the same reason.
+    """
+    levels = {name: int(value) for name, value in STAGE_Z_LEVEL.findall(STYLES_CSS)}
+    assert "stage" in levels, "--z-stage is gone; the stage's levels moved"
+    above = {f"var(--z-{name})" for name, value in levels.items() if value > levels["stage"]}
+    assert above, "nothing is painted above --z-stage any more; this gate can go"
+
+    offenders = [f"{selector} (z-index: {decls.get('z-index')})"
+                 for selector, decls in _flat_rules().items()
+                 if decls.get("z-index") in above and decls.get("pointer-events") != "none"]
+    assert offenders == [], (
+        "a layer above the core frame takes pointer events, so it can swallow a "
+        f"click meant for a control inside it: {offenders}")
+
+
+def test_the_stage_decorations_and_the_controls_they_cover_are_pinned():
+    """Both halves of the fix: the decoration is inert, the control is not."""
+    effective = _flat_rules()
+    for selector in STAGE_DECORATION:
+        assert effective[selector].get("pointer-events") == "none", selector
+
+    trigger = effective[".stage-voice-trigger"]
+    assert trigger.get("pointer-events") != "none"
+    assert trigger.get("cursor") == "pointer"
+    # The frame is a real surface (the blob is dragged from it), so a control
+    # inside it is reachable as long as nothing above the frame is hittable.
+    frame = effective[".core-frame"]
+    assert frame.get("pointer-events") != "none"
+    assert frame.get("z-index") == "var(--z-stage)"

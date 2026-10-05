@@ -9,8 +9,6 @@ from jarvis.memory.manager import MemoryManager
 from jarvis.agent.memory import (
     remember_fact,
     forget_fact,
-    append_learned_plan,
-    evict_learned_plan,
 )
 from jarvis.tools import registry
 from jarvis.tools.schema import ACTIONS_BY_NAME
@@ -130,18 +128,21 @@ class HybridRAGTests(unittest.TestCase):
         self.knowledge_graph.add_or_update_entity("Peace", entity_type="playlist")
         self.knowledge_graph.add_relation("Spotify", "has_playlist", "Peace")
 
-        # 3. Add learned plan
-        self.vector_store.add_record(
-            "- Learned Task: open Spotify and play music\n  Approach: open Chrome and navigate to Spotify",
-            category="learned_plan",
-            doc_type="learned_plan",
-        )
-
         # Retrieve RAG context for a query
         prompt_block = self.rag.format_prompt_context("Can you play some music on Spotify?")
         self.assertIn("RELEVANT LONG-TERM MEMORY", prompt_block)
         self.assertIn("[rule] Always verify task completion", prompt_block)
         self.assertIn("Peace", prompt_block)
+
+    def test_legacy_learned_plan_rows_never_reach_the_prompt(self):
+        """Old databases still hold rows written by the removed feature."""
+        self.vector_store.add_record(
+            "- Learned Task: open Spotify and play music",
+            category="learned_plan",
+            doc_type="learned_plan",
+        )
+        block = self.rag.format_prompt_context("open Spotify and play music")
+        self.assertNotIn("Learned Task", block)
 
 
 class MemoryManagerIntegrationTests(unittest.TestCase):
@@ -178,19 +179,6 @@ class MemoryManagerIntegrationTests(unittest.TestCase):
         self.assertIn("Forgot", res_forget)
         txt_after = self.txt_path.read_text(encoding="utf-8")
         self.assertNotIn("VS Code", txt_after)
-
-    def test_learned_plan_lifecycle(self):
-        self.manager.append_learned_plan(
-            task="push code to github repository",
-            plan={"name": "Git Push Plan", "description": "Run git add, git commit, and git push."},
-        )
-        txt_content = self.txt_path.read_text(encoding="utf-8")
-        self.assertIn("push code to github repository", txt_content)
-
-        # Evict
-        self.manager.evict_learned_plan("push code to github repository")
-        txt_after = self.txt_path.read_text(encoding="utf-8")
-        self.assertNotIn("push code to github repository", txt_after)
 
     def test_tool_actions(self):
         self.assertIn("memory_search", ACTIONS_BY_NAME)

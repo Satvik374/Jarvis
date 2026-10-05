@@ -1,4 +1,4 @@
-"""Controller linking Agent execution, Voice, Vision, Macros, and the Floating HUD."""
+"""Controller linking Agent execution, Voice, Vision, and the Floating HUD."""
 
 from __future__ import annotations
 
@@ -50,7 +50,6 @@ class HudController:
             on_submit_command=self._on_user_submit,
             on_voice_toggle=self.toggle_voice,
             on_vision_trigger=self.trigger_vision,
-            on_macro_toggle=self.toggle_macro,
             on_stop_action=self.interrupt,
             position=pos,
             opacity=alpha,
@@ -62,7 +61,6 @@ class HudController:
         hk_toggle = getattr(self.hud_cfg, "hotkey_toggle", "ctrl+alt+j")
         hk_voice = getattr(self.hud_cfg, "hotkey_voice", "alt+v")
         hk_vision = getattr(self.hud_cfg, "hotkey_vision", "ctrl+alt+s")
-        hk_macro = getattr(self.hud_cfg, "hotkey_macro", "ctrl+alt+r")
         hk_stop = getattr(self.hud_cfg, "hotkey_stop", "ctrl+alt+x")
 
         if hk_toggle:
@@ -71,8 +69,6 @@ class HudController:
             self.hotkeys.register(hk_voice, self.toggle_voice)
         if hk_vision:
             self.hotkeys.register(hk_vision, self.trigger_vision)
-        if hk_macro:
-            self.hotkeys.register(hk_macro, self.toggle_macro)
         if hk_stop:
             self.hotkeys.register(hk_stop, self.interrupt)
 
@@ -112,19 +108,7 @@ class HudController:
             except Exception:
                 pass
 
-        # 3. Stop active macro recording if one is in progress
-        try:
-            from ..macro import get_macro_recorder
-            rec = get_macro_recorder()
-            if rec.is_recording:
-                rec.stop_recording(save_to_memory=False)
-                log.info("⏹ Active macro recording cancelled.")
-                if self.overlay:
-                    self.overlay.set_macro_recording(False)
-        except Exception:
-            pass
-
-        # 4. Disable camera mouse control if active
+        # 3. Disable camera mouse control if active
         try:
             from ..tools import mouse_control
             if mouse_control.is_enabled():
@@ -132,7 +116,7 @@ class HudController:
         except Exception:
             pass
 
-        # 5. Cancel voice listening
+        # 4. Cancel voice listening
         if self._is_voice_listening:
             self._cancel_voice.set()
             self._is_voice_listening = False
@@ -304,30 +288,6 @@ class HudController:
                 self.set_state("error", detail=f"Vision failed: {exc}")
 
         threading.Thread(target=_do_see, daemon=True, name="jarvis-hud-vision").start()
-
-    def toggle_macro(self) -> None:
-        """Toggle Watch & Learn macro recording."""
-        try:
-            from ..macro import get_macro_manager
-            from ..macro.recorder import get_macro_recorder
-            rec = get_macro_recorder(get_macro_manager())
-
-            if not rec.is_recording:
-                macro_name = f"quick_macro_{int(time.time())}"
-                rec.start_recording(name=macro_name)
-                if self.overlay:
-                    self.overlay.set_macro_recording(True)
-                self.set_state("acting", detail=f"Recording: {macro_name}")
-            else:
-                macro = rec.stop_recording(save_to_memory=True)
-                if self.overlay:
-                    self.overlay.set_macro_recording(False)
-                macro_title = getattr(macro, "name", "Macro") if macro else "Macro"
-                self.set_state("success", detail=f"Learned: {macro_title}")
-        except Exception as exc:
-            if self.overlay:
-                self.overlay.set_macro_recording(False)
-            self.set_state("error", detail=f"Macro error: {exc}")
 
     def toggle_shadow(self) -> bool:
         """Toggle Shadow Desktop & Virtual Workspace mode."""

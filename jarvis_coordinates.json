@@ -1,0 +1,53 @@
+{
+ "version": 1,
+ "entries": [
+  {
+   "name": "instagram-mobile-message-box",
+   "kind": "mobile",
+   "x": 260,
+   "y": 1418,
+   "screen_w": 720,
+   "screen_h": 1560,
+   "app": "Instagram",
+   "note": "",
+   "source": "jarvis",
+   "created": 1790093369.3288946,
+   "updated": 1790093369.3288946,
+   "uses": 0,
+   "successes": 0,
+   "last_used": 0.0
+  },
+  {
+   "name": "instagram-mobile-send-button",
+   "kind": "mobile",
+   "x": 648,
+   "y": 1419,
+   "screen_w": 720,
+   "screen_h": 1560,
+   "app": "Instagram",
+   "note": "",
+   "source": "jarvis",
+   "created": 1790093374.1420825,
+   "updated": 1790093374.1420825,
+   "uses": 0,
+   "successes": 0,
+   "last_used": 0.0
+  },
+  {
+   "name": "spotify-peace-playlist-play-btn",
+   "kind": "pc",
+   "x": 53,
+   "y": 500,
+   "screen_w": 1920,
+   "screen_h": 1080,
+   "app": "Spotify",
+   "note": "Play button for Peace playlist in left library panel",
+   "source": "jarvis",
+   "created": 1790093721.1758766,
+   "updated": 1790093721.1758766,
+   "uses": 2,
+   "successes": 2,
+   "last_used": 1790247347.8987627
+  }
+ ]
+}

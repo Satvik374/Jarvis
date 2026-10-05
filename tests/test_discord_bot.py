@@ -766,6 +766,111 @@ def test_a_url_is_opened_without_the_model(monkeypatch):
     assert tools.launched == []
 
 
+def test_a_search_is_the_one_url_it_is(monkeypatch):
+    """"Open youtube and search for Mr. Beast" is the shape of multi-step command
+    that took minutes: opening a browser, clicking a search box, typing, pressing
+    Enter, each a model turn at ~10.5s. The site's own query string does the same
+    job in one tool call, so these must never reach the agent."""
+    monkeypatch.setenv(discord_bot.AGENT_ENV, "1")
+    tools, agent = FakeTools(), FakeAgent(result="Done.")
+    runner = _fast_runner(agent, tools)
+
+    reply = runner.fast_command("Open youtube and search for Mr. Beast")
+
+    assert tools.urls == [
+        "https://www.youtube.com/results?search_query=Mr.+Beast"]
+    assert "YouTube" in reply and "Mr. Beast" in reply
+
+    # Every phrasing of "search the web for something" that people actually use.
+    for phrase, expected in (
+        ("search youtube for lofi beats",
+         "https://www.youtube.com/results?search_query=lofi+beats"),
+        ("search for lofi beats on youtube",
+         "https://www.youtube.com/results?search_query=lofi+beats"),
+        ("youtube search for cricket highlights",
+         "https://www.youtube.com/results?search_query=cricket+highlights"),
+        ("google python asyncio",
+         "https://www.google.com/search?q=python+asyncio"),
+        ("look up Mr. Beast & friends on YouTube",
+         "https://www.youtube.com/results?search_query=Mr.+Beast+%26+friends"),
+    ):
+        before = len(tools.urls)
+        runner.fast_command(phrase)
+        assert tools.urls[before:] == [expected], phrase
+
+    # No site named is a Google search, which is what a person means.
+    runner.fast_command("search for the best pizza near me")
+    assert tools.urls[-1].startswith("https://www.google.com/search?q=the+best+pizza")
+
+    assert agent.ran == [], "the whole point is not paying for a model turn here"
+
+
+def test_the_speed_switch_still_routes_and_the_agent_still_gets_it(monkeypatch):
+    """"-yolo" is the agent loop's switch, so this listener has to read it without
+    swallowing it. Routing reads the command - "can you open calculator for me"
+    is only recognised once its tail is gone, and a flag after that tail defeats
+    the trim - while the run is handed the flag unchanged, because that is what
+    turns the mode on. Read the other way round, the command falls to the chat
+    path, which is the one place a command must never end up."""
+    monkeypatch.delenv("JARVIS_DISCORD_GUILD", raising=False)
+    monkeypatch.setenv(discord_bot.AGENT_ENV, "1")
+    agent = FakeAgent(router=_real_router(), result="Calculator is open.")
+    bot = _bot(send=Recorder(), runner=_runner(agent))
+
+    reply = bot.handle_message(
+        _message(content="Can you open calculator for me -yolo"))
+
+    assert reply == "Calculator is open."
+    assert agent.ran == ["Can you open calculator for me -yolo"]
+
+
+def test_the_speed_switch_does_not_stop_the_one_tool_call_shortcut(monkeypatch):
+    """"open calculator -yolo" is still one tool call. The shortcut's patterns
+    anchor at the end of the message, so reading the command after the flag is
+    what keeps a yolo command instant instead of turning the flag into part of
+    an app name nobody vouched for."""
+    monkeypatch.setenv(discord_bot.AGENT_ENV, "1")
+    tools, agent = FakeTools(), FakeAgent(result="Done.")
+    runner = _fast_runner(agent, tools)
+    bot = _bot(send=Recorder(), runner=runner)
+
+    bot.handle_message(_message(content="open calculator -yolo"))
+
+    assert tools.launched == ["calculator"]
+    assert agent.ran == [], "the agent is what costs the minutes"
+    assert runner.fast == 1
+
+
+def test_the_flag_is_read_by_the_loop_parser_not_a_second_copy():
+    """A second copy of the rule would drift, and the copy that drifts is never
+    the one that decides the behaviour - so the listener asks the loop."""
+    from jarvis.agent.loop import parse_yolo
+
+    for text in ("open notepad -yolo", "open notepad", "-yolo",
+                 "open the yolo folder", "   -yolo  "):
+        assert discord_bot._split_yolo(text) == parse_yolo(text)
+
+
+def test_a_site_nobody_listed_is_not_guessed_at(monkeypatch):
+    """"search my notes for the invoice" is a different job with different tools,
+    and a search engine would be the wrong answer to it."""
+    monkeypatch.setenv(discord_bot.AGENT_ENV, "1")
+    tools = FakeTools()
+    agent = FakeAgent(result="Found it.")      # the router's answer is its own
+    runner = _fast_runner(agent, tools)
+
+    assert runner.fast_command("search my notes for the invoice") is None
+    assert tools.urls == []
+
+    # And when the router does call it a task, the agent is what gets it - the
+    # shortcut neither answers it nor stands in the way.
+    bot = _bot(send=Recorder(), runner=runner)
+    bot.runner.looks_like_task = lambda text: True
+    assert bot.handle_message(_message(content="search my notes for the invoice")) \
+        == "Found it."
+    assert agent.ran == ["search my notes for the invoice"]
+
+
 def test_a_command_one_tool_call_cannot_answer_goes_to_the_agent(monkeypatch):
     """A file, a plan, or a name nobody vouched for is not this shortcut's
     business: the agent can read a screen where a launch-and-hope cannot."""

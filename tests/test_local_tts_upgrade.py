@@ -90,8 +90,8 @@ class LocalTTSUpgradeTests(unittest.TestCase):
         self.assertIn("the documentation", cleaned)
 
     def test_clean_for_speech_handles_side_agent_and_questions(self):
-        side_msg = "🎙️ [Side Agent]: Initiating plan: Search System Files."
-        self.assertEqual(voice._clean_for_speech(side_msg), "Initiating plan: Search System Files.")
+        side_msg = "🎙️ [Side Agent]: Opening the browser now."
+        self.assertEqual(voice._clean_for_speech(side_msg), "Opening the browser now.")
 
         q_msg = "⚠️ [Worker Question]: Do you want to proceed with deletion?"
         self.assertEqual(voice._clean_for_speech(q_msg), "Do you want to proceed with deletion?")

@@ -82,6 +82,13 @@
       };
       this.zoom = { current: 1.0, target: 1.0, min: 0.65, max: 2.2 };
 
+      // Reduced motion. Read here as well as passed in, so the stage honours the
+      // preference even when nothing wires it up - the same self-contained
+      // approach aurora.js and grainient.js take; blob.js is handed the flag.
+      this.motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+      this.reducedMotion = this.motionQuery.matches;
+      this.frameId = null;
+
       this.initThree();
       this.buildHologram();
       this.bindEvents();
@@ -301,6 +308,7 @@
         this.drag.startY = e.clientY;
         this.drag.mode = (e.button === 2 || e.shiftKey || e.button === 1) ? "pan" : "rotate";
         el.style.cursor = "grabbing";
+        this.renderIfReduced();
       });
 
       // Mouse move / Parallax
@@ -323,11 +331,15 @@
           this.drag.startX = e.clientX;
           this.drag.startY = e.clientY;
         }
+        // Motion the user is asking for still has to show while it happens;
+        // "reduced" means nothing moves on its own, not that dragging is dead.
+        this.renderIfReduced();
       }, { passive: true });
 
       window.addEventListener("pointerup", () => {
         this.drag.isDragging = false;
         el.style.cursor = "grab";
+        this.renderIfReduced();
       });
 
       // Mouse Wheel Zoom
@@ -335,6 +347,7 @@
         e.preventDefault();
         const delta = e.deltaY * 0.0012;
         this.zoom.target = Math.max(this.zoom.min, Math.min(this.zoom.max, this.zoom.target - delta));
+        this.renderIfReduced();
       }, { passive: false });
 
       // Click to Pulse
@@ -345,8 +358,17 @@
       });
 
       // Resize observer
-      this.resizeObserver = new ResizeObserver(() => this.resize());
+      this.resizeObserver = new ResizeObserver(() => {
+        this.resize();
+        // With no loop running, a resize would otherwise leave the last frame
+        // stretched until the next state change.
+        this.renderIfReduced();
+      });
       this.resizeObserver.observe(this.container);
+
+      // The preference can change while the page is open; follow it live rather
+      // than requiring a reload to be respected.
+      this.motionQuery.addEventListener("change", (event) => this.setReducedMotion(event.matches));
     }
 
     resize() {
@@ -380,7 +402,12 @@
      */
     setSuspended(suspended) {
       this.suspended = Boolean(suspended);
-      if (!this.suspended) this.resize();
+      if (!this.suspended) {
+        this.resize();
+        // Nothing was drawn while it was suspended, so the stage would otherwise
+        // come back blank in reduced-motion mode, where no loop is running.
+        this.renderIfReduced();
+      }
     }
 
     setDisplayMode(mode) {
@@ -407,6 +434,8 @@
         this.particleSystem.visible = true;
         this.rings.forEach(r => r.mesh.visible = true);
       }
+
+      this.renderIfReduced();
     }
 
     resetView() {
@@ -421,6 +450,7 @@
     triggerPulse(power = 1.0) {
       const now = performance.now() / 1000;
       this.shocks.push({ born: now, power, duration: 1.2 });
+      this.renderIfReduced();
     }
 
     setSpeaking(payload) {
@@ -435,6 +465,7 @@
       } else {
         this.speechEnvelope = [];
       }
+      this.renderIfReduced();
     }
 
     updateAudio(t, dt) {
@@ -474,10 +505,19 @@
     // -------------------------------------------------------------
 
     startLoop() {
+      // Reduced motion: one settled frame instead of a running loop. Nothing is
+      // rescheduled, so the stage redraws only when something actually changes -
+      // and stopLoop() is the way back out.
+      if (this.reducedMotion) {
+        this.renderStaticFrame();
+        return;
+      }
+      if (this.frameId !== null) return;
+
       let lastTime = performance.now();
 
       const animate = (currentTime) => {
-        requestAnimationFrame(animate);
+        this.frameId = requestAnimationFrame(animate);
 
         // Keep the clock current while paused so resuming does not leap.
         if (this.suspended || document.hidden) {
@@ -501,7 +541,68 @@
         this.renderer.render(this.scene, this.camera);
       };
 
-      requestAnimationFrame(animate);
+      this.frameId = requestAnimationFrame(animate);
+    }
+
+    stopLoop() {
+      if (this.frameId !== null) {
+        cancelAnimationFrame(this.frameId);
+        this.frameId = null;
+      }
+    }
+
+    /**
+     * Follow the motion preference live, without waiting for a reload. Turning it
+     * on draws one settled frame and stops the loop; turning it off resumes the
+     * loop where it left off.
+     */
+    setReducedMotion(reduced) {
+      const next = Boolean(reduced);
+      if (next === this.reducedMotion) return;
+      this.reducedMotion = next;
+      if (!this.isWebGLAvailable) return;
+      if (next) {
+        this.stopLoop();
+        this.renderStaticFrame();
+      } else {
+        this.startLoop();
+      }
+    }
+
+    /**
+     * Draw exactly one frame. Used while motion is reduced, and after each change
+     * in that mode, so the stage still shows what Jarvis is doing - the state
+     * colour, the pose, the rings - with nothing moving on its own.
+     *
+     * The clock is the same wall clock the loop uses, because the speech envelope
+     * and the shockwaves are positioned against it; a fixed pseudo-time would put
+     * them somewhere they never actually are.
+     */
+    renderStaticFrame() {
+      if (!this.renderer || !this.scene || !this.camera) return;
+      if (this.suspended || document.hidden) return;
+
+      // One frame cannot converge a lerp, so the colour snaps to its target
+      // instead of sitting at whatever it was when motion was switched off.
+      this.currentColor = { ...this.targetColor };
+
+      const t = performance.now() / 1000;
+      const dt = 1;
+      this.updateAudio(t, dt);
+      this.updateColors(dt);
+      this.updateTransforms(t, dt);
+      this.updateSingularity(t);
+      this.updateParticles(t, dt);
+      this.updateRings(t, dt);
+      this.updateScanner(t);
+      this.updateShockwaves(t);
+
+      this.renderer.render(this.scene, this.camera);
+    }
+
+    /** Redraw the settled frame after a change, when motion is reduced. */
+    renderIfReduced() {
+      if (this.reducedMotion) this.renderStaticFrame();
     }
 
     updateColors(dt) {
@@ -547,8 +648,10 @@
       this.zoom.current += (this.zoom.target - this.zoom.current) * 0.08 * dt;
       this.camera.position.z = 32 / this.zoom.current;
 
-      // Continuous incremental Auto-Orbit drift (never resets or jumps on release!)
-      if (this.autoOrbit && !this.drag.isDragging) {
+      // Continuous incremental Auto-Orbit drift (never resets or jumps on
+      // release!). Suppressed when motion is reduced: the drift is the loop
+      // moving on its own, which is exactly what the preference asks it not to.
+      if (this.autoOrbit && !this.drag.isDragging && !this.reducedMotion) {
         this.drag.targetRotY += 0.0025 * dt;
       }
 

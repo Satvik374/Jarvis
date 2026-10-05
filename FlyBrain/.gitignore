@@ -1,0 +1,8 @@
+# Downloaded public data (re-fetchable with build/make_circuit.py -- see README §1)
+data/raw/
+
+# Generated artefacts
+web/circuit.bin
+web/circuit.json
+web/channels.json
+web/ablation.json

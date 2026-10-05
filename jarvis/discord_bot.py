@@ -69,6 +69,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import quote_plus
 
 from .utils import logging as log
 
@@ -200,6 +201,46 @@ _FAST_URL = re.compile(
     r"^(?:open|go to|visit)\s+(?P<url>(?:https?://)?(?:[\w-]+\.)+"
     r"(?:com|net|org|io|ai|dev|gg|co|tv|me|app|sh|xyz|edu|gov)(?:/\S*)?)$",
     re.IGNORECASE)
+#: Sites whose *search is a URL*. "Open YouTube and search for Mr. Beast" is the
+#: shape a person sends that the agent answers slowly: five or six turns of
+#: clicking a box, typing and pressing Enter at ~10.5s each. The site's own query
+#: string does the same job in one tool call and ~2s - nothing here guesses what
+#: the page does, it only knows where the search box leads.
+_SEARCH_SITES = {
+    "youtube": ("https://www.youtube.com/results?search_query={}", "YouTube"),
+    "google": ("https://www.google.com/search?q={}", "Google"),
+    "wikipedia": ("https://en.wikipedia.org/w/index.php?search={}", "Wikipedia"),
+    "github": ("https://github.com/search?q={}", "GitHub"),
+    "amazon": ("https://www.amazon.com/s?k={}", "Amazon"),
+    "reddit": ("https://www.reddit.com/search/?q={}", "Reddit"),
+    "spotify": ("https://open.spotify.com/search/{}", "Spotify"),
+    "maps": ("https://www.google.com/maps/search/{}", "Google Maps"),
+    "google maps": ("https://www.google.com/maps/search/{}", "Google Maps"),
+}
+#: Where "search for X" with no site goes. Google is the default a person means.
+_SEARCH_DEFAULT = ("google", _SEARCH_SITES["google"])
+_SEARCH_VERB = r"(?:search|look up|look for|find|pull up)"
+_SEARCH_PATTERNS = (
+    # "open youtube and search for Mr. Beast"
+    re.compile(r"^(?:open|go to|launch|use)\s+(?P<site>[\w .]+?)\s+and\s+"
+               + _SEARCH_VERB + r"\s+(?:for\s+)?(?P<query>.+)$", re.IGNORECASE),
+    # "search youtube for Mr. Beast", "search on youtube for Mr. Beast"
+    re.compile(r"^" + _SEARCH_VERB + r"\s+(?:on\s+)?(?P<site>[\w .]+?)\s+for\s+"
+               r"(?P<query>.+)$", re.IGNORECASE),
+    # "search for Mr. Beast on youtube"
+    re.compile(r"^" + _SEARCH_VERB + r"\s+(?:for\s+)?(?P<query>.+?)\s+on\s+"
+               r"(?P<site>[\w .]+)$", re.IGNORECASE),
+    # "youtube search for Mr. Beast"
+    re.compile(r"^(?P<site>[\w .]+?)\s+" + _SEARCH_VERB + r"\s+(?:for\s+)?"
+               r"(?P<query>.+)$", re.IGNORECASE),
+    # "google Mr. Beast" - the site name alone, which is how people say it
+    re.compile(r"^(?P<site>youtube|google|wikipedia|github|amazon|reddit|spotify|"
+               r"maps|google maps)\s+(?P<query>.+)$", re.IGNORECASE),
+    # "search for Mr. Beast" - no site named, so Google
+    re.compile(r"^" + _SEARCH_VERB + r"\s+(?:for\s+)?(?P<query>.+)$",
+               re.IGNORECASE),
+)
+
 #: Politeness at the *front*, which the router also knows and this path needs too:
 #: "can you open calculator" is the same command as "open calculator"
 #: punctuation".
@@ -231,6 +272,20 @@ def _entries(value: str) -> list[str]:
         if item and item not in out:
             out.append(item)
     return out
+
+
+def _split_yolo(text: str) -> tuple[str, bool]:
+    """``(text, yolo)`` from the agent loop's own parser.
+
+    One parser, not two: the flag is the agent loop's syntax, and this listener
+    only needs to *see* it - to route the command and to keep the one-tool-call
+    shortcut working - while the run itself is handed the flag unchanged,
+    because that is what turns the mode on. A copy of the rule here would drift
+    from the one that actually decides the behaviour.
+    """
+    from .agent.loop import parse_yolo
+
+    return parse_yolo(text)
 
 
 def _plain(text: Any) -> str:
@@ -807,11 +862,16 @@ class DiscordBot:
         it, not to post the call syntax or apologise for having no answer. Both
         are gated on task mode; with it off, Jarvis still only talks.
         """
+        # "-yolo" decides how the run behaves, not what the message means, so
+        # routing reads the command without the flag - a flag is not a verb, and
+        # "open notepad -yolo" has to route as the command it is. The run is
+        # still handed the flag itself: that is what switches the mode on.
+        command, _ = _split_yolo(text)
         if not self._task_mode():
-            return self._compose_chat(message, text)[0]
-        if self._looks_like_task(text):
+            return self._compose_chat(message, command)[0]
+        if self._looks_like_task(command):
             return self._compose_task(message, text)
-        reply, raw = self._compose_chat(message, text)
+        reply, raw = self._compose_chat(message, command)
         if _TOOL_MARKUP.search(raw):
             log.info("Discord: the model reached for a tool rather than answering "
                      "- taking that as the command it clearly is.")
@@ -1120,9 +1180,11 @@ class DiscordRunner:
         body = self._bare(command)
         if not body:
             return None
-        # A URL first: "open youtube.com" also reads as opening something called
-        # youtube.com, and that branch would decide it is not an app and end the
-        # whole shortcut instead of handing it to this one.
+        # A search first, then a URL, then an app: the patterns get narrower, and
+        # "open youtube.com" reads as opening something called youtube.com if the
+        # app branch sees it, which would end the shortcut instead of handing it on.
+        if found := self._search(body):
+            return found
         if match := _FAST_URL.fullmatch(body):
             return _plain(self._tools.open_url(match.group("url")))
         if match := _FAST_OPEN.fullmatch(body):
@@ -1130,6 +1192,31 @@ class DiscordRunner:
         if match := _FAST_CLOSE.fullmatch(body):
             return self._close(match.group("what").strip())
         return None
+
+    def _search(self, body: str) -> Optional[str]:
+        """A search, as the one URL it is, or ``None`` to let the agent look.
+
+        A site nobody listed is not guessed at: "search my notes for the invoice"
+        is a different job, and the agent has the tools for it.
+        """
+        for pattern in _SEARCH_PATTERNS:
+            match = pattern.fullmatch(body)
+            if not match:
+                continue
+            groups = match.groupdict()
+            query = (groups.get("query") or "").strip().strip("'\"")
+            if not query or len(query) > 200:
+                return None
+            site = (groups.get("site") or "").strip().lower()
+            if not site:
+                site, (template, label) = _SEARCH_DEFAULT
+            elif site not in _SEARCH_SITES:
+                return None
+            else:
+                template, label = _SEARCH_SITES[site]
+            url = template.format(quote_plus(query))
+            said = _plain(self._tools.open_url(url))
+            return f"Searching {label} for '{query}' - {said or 'opened in your browser'}."
 
     def _open(self, name: str) -> Optional[str]:
         """Launch an app, and only claim it when a window can be seen for it."""
@@ -1183,7 +1270,10 @@ class DiscordRunner:
                         "not start this as well. Say it again when I am done.")
             started = time.perf_counter()
             try:
-                fast = self.fast_command(command)
+                # The flag would defeat every pattern below (they anchor at the
+                # end), so the shortcut reads the command without it - and the
+                # agent is still handed the flag, one line down.
+                fast = self.fast_command(_split_yolo(command)[0])
             except Exception as exc:      # never let the shortcut break the task
                 log.warn(f"Discord: the fast path failed ({exc}); using the agent.")
                 fast = None

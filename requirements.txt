@@ -15,6 +15,9 @@ pyautogui>=0.9.54
 pygetwindow>=0.0.9
 pyperclip>=1.8
 mediapipe>=1.0.0,<2.0
+# The webcam, for the 'camera' action and 'see' (both import it lazily, so
+# everything else runs without it - the camera action then says so instead).
+opencv-python>=4.8
 
 # --- web search (DuckDuckGo; handles the anti-bot handshake) ---
 ddgs>=6.0

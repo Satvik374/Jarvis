@@ -495,6 +495,219 @@ class RelayProtocolTests(unittest.TestCase):
         self.assertEqual(allowed.status_code, 200)
         respond.assert_called_once_with("What is on screen?", [], "", normalized)
 
+    # ------------------------------------------------------------------ #
+    # OmniRoute: mobile answers through the same gateway as the desktop
+    # ------------------------------------------------------------------ #
+
+    def _claim_mobile_token(self) -> str:
+        controller = remote.create_identity()
+        agent = remote.create_identity()
+        created = self.client.post("/v1/pairings", json={
+            "name": "Laptop", "kx_public": controller.kx_public,
+            "sign_public": controller.sign_public,
+        }).json()
+        claimed = self.client.post("/v1/pairings/claim", json={
+            "code": created["code"], "name": "Pixel", "kx_public": agent.kx_public,
+            "sign_public": agent.sign_public,
+        })
+        self.assertEqual(claimed.status_code, 200)
+        return claimed.json()["mobile_assistant_token"]
+
+    def test_mobile_backend_defaults_to_vertex_and_switches_to_omniroute(self):
+        import relay_server.main as relay_main
+
+        with patch.dict(os.environ, {"JARVIS_MOBILE_BACKEND": ""}, clear=False):
+            self.assertIs(relay_main.mobile_backend(), relay_main.mobile_vertex)
+        with patch.dict(os.environ, {"JARVIS_MOBILE_BACKEND": "omniroute"}, clear=False):
+            self.assertIs(relay_main.mobile_backend(), relay_main.mobile_omniroute)
+        with patch.dict(os.environ, {"JARVIS_MOBILE_BACKEND": "nonsense"}, clear=False):
+            with self.assertRaises(RuntimeError):
+                relay_main.mobile_backend()
+
+    def test_mobile_assistant_rejects_an_unknown_backend(self):
+        token = self._claim_mobile_token()
+
+        with patch.dict(os.environ, {"JARVIS_MOBILE_BACKEND": "nonsense"}, clear=False):
+            denied = self.client.post("/v1/mobile-assistant", headers={
+                "Authorization": f"Bearer {token}"
+            }, json={"prompt": "hello", "history": []})
+
+        self.assertEqual(denied.status_code, 503)
+        self.assertIn("JARVIS_MOBILE_BACKEND", denied.json()["detail"])
+
+    def test_mobile_assistant_routes_to_omniroute_when_configured(self):
+        token = self._claim_mobile_token()
+
+        with patch.dict(os.environ, {"JARVIS_MOBILE_BACKEND": "omniroute"}, clear=False), \
+             patch("relay_server.main.mobile_omniroute.respond",
+                   return_value={"reply": "Via OmniRoute.", "command": ""}) as respond:
+            allowed = self.client.post("/v1/mobile-assistant", headers={
+                "Authorization": f"Bearer {token}"
+            }, json={"prompt": "hello", "history": []})
+
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(allowed.json()["reply"], "Via OmniRoute.")
+        respond.assert_called_once_with("hello", [])
+
+    def test_omniroute_gateway_builds_openai_chat_requests(self):
+        import relay_server.main as relay_main
+
+        captured = {}
+
+        def fake_post_json(url, payload, key):
+            captured.update(url=url, payload=payload, key=key)
+            content = '```json\n{"reply": "Hi", "command": "tap element 3"}\n```'
+            return {"choices": [{"message": {"content": content}}]}
+
+        env = {
+            "JARVIS_MOBILE_OMNIROUTE_BASE_URL": "http://omniroute.test/v1/",
+            "JARVIS_MOBILE_OMNIROUTE_API_KEY": "sk-omni-test",
+            "JARVIS_MOBILE_OMNIROUTE_MODEL": "auto/vision",
+            "JARVIS_MOBILE_OMNIROUTE_TTS_MODEL": "",
+        }
+        with patch.dict(os.environ, env, clear=False), \
+             patch.object(relay_main.MobileOmniRouteGateway, "_post_json",
+                          side_effect=fake_post_json):
+            result = relay_main.MobileOmniRouteGateway().respond(
+                "turn on wifi", [{"role": "user", "content": "hello"}], "STATE", "aW1n")
+
+        self.assertEqual(result["reply"], "Hi")
+        self.assertEqual(result["command"], "tap element 3")
+        self.assertFalse(result["tts_available"])
+        self.assertEqual(captured["url"], "http://omniroute.test/v1/chat/completions")
+        self.assertEqual(captured["key"], "sk-omni-test")
+        payload = captured["payload"]
+        self.assertEqual(payload["model"], "auto/vision")
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["messages"][0]["content"], relay_main.MOBILE_SYSTEM_PROMPT)
+        final = payload["messages"][-1]
+        self.assertIn("CURRENT PHONE STATE:\nSTATE", final["content"][0]["text"])
+        self.assertEqual(final["content"][1]["image_url"]["url"],
+                         "data:image/jpeg;base64,aW1n")
+
+    def test_omniroute_gateway_requires_a_key(self):
+        import relay_server.main as relay_main
+
+        with patch.dict(os.environ, {
+            "JARVIS_MOBILE_OMNIROUTE_API_KEY": "",
+            "OMNIROUTE_API_KEY": "",
+        }, clear=False):
+            with self.assertRaises(RuntimeError) as raised:
+                relay_main.MobileOmniRouteGateway().respond("hello", [])
+
+        self.assertIn("OMNIROUTE_API_KEY", str(raised.exception))
+
+
+    def test_health_reports_the_mobile_gateway_and_its_readiness(self):
+        import relay_server.main as relay_main
+
+        env = {
+            "JARVIS_MOBILE_BACKEND": "omniroute",
+            "JARVIS_MOBILE_OMNIROUTE_API_KEY": "sk-omni-test",
+            "JARVIS_MOBILE_OMNIROUTE_BASE_URL": "http://omniroute.internal.example/v1",
+            "JARVIS_MOBILE_OMNIROUTE_MODEL": "auto/vision",
+        }
+        relay_main._mobile_status.update(at=0.0, value=None)
+        with patch.dict(os.environ, env, clear=False), \
+             patch.object(relay_main.MobileOmniRouteGateway, "probe",
+                          return_value={"ready": True, "detail": "answering with model auto/vision"}):
+            response = self.client.get("/health")
+
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["mobile"], {
+            "backend": "omniroute",
+            "ready": True,
+            "detail": "answering with model auto/vision",
+        })
+        # The public health document must never leak the gateway URL or its key.
+        self.assertNotIn("omniroute.internal.example", response.text)
+        self.assertNotIn("sk-omni-test", response.text)
+
+    def test_unreachable_loopback_omniroute_explains_the_deployment_gap(self):
+        import relay_server.main as relay_main
+
+        env = {
+            "JARVIS_MOBILE_BACKEND": "omniroute",
+            "JARVIS_MOBILE_OMNIROUTE_API_KEY": "sk-omni-test",
+            "JARVIS_MOBILE_OMNIROUTE_BASE_URL": "http://localhost:20128/v1",
+        }
+        with patch.dict(os.environ, env, clear=False), \
+             patch.object(relay_main.urllib.request, "urlopen",
+                          side_effect=OSError("connection refused")):
+            result = relay_main.MobileOmniRouteGateway().probe()
+
+        self.assertFalse(result["ready"])
+        self.assertIn("localhost", result["detail"])
+        self.assertIn("JARVIS_MOBILE_OMNIROUTE_BASE_URL", result["detail"])
+
+    def test_health_explains_a_missing_omniroute_key(self):
+        import relay_server.main as relay_main
+
+        relay_main._mobile_status.update(at=0.0, value=None)
+        with patch.dict(os.environ, {
+            "JARVIS_MOBILE_BACKEND": "omniroute",
+            "JARVIS_MOBILE_OMNIROUTE_API_KEY": "",
+            "OMNIROUTE_API_KEY": "",
+        }, clear=False):
+            body = self.client.get("/health").json()
+
+        self.assertEqual(body["mobile"]["backend"], "omniroute")
+        self.assertFalse(body["mobile"]["ready"])
+        self.assertIn("OMNIROUTE_API_KEY", body["mobile"]["detail"])
+
+    def test_health_reports_an_invalid_mobile_backend(self):
+        import relay_server.main as relay_main
+
+        relay_main._mobile_status.update(at=0.0, value=None)
+        with patch.dict(os.environ, {"JARVIS_MOBILE_BACKEND": "nonsense"}, clear=False):
+            status = relay_main.mobile_gateway_status()
+
+        self.assertIsNone(status["backend"])
+        self.assertFalse(status["ready"])
+        self.assertIn("JARVIS_MOBILE_BACKEND", status["detail"])
+
+    def test_health_defaults_to_vertex_and_reuses_its_cached_probe(self):
+        import relay_server.main as relay_main
+
+        relay_main._mobile_status.update(at=0.0, value=None)
+        with patch.dict(os.environ, {"JARVIS_MOBILE_BACKEND": ""}, clear=False), \
+             patch.object(relay_main.MobileVertexGateway, "probe",
+                          return_value={"ready": True,
+                                        "detail": "credential JSON is configured"}) as probe:
+            first = relay_main.mobile_gateway_status()
+            second = relay_main.mobile_gateway_status()
+
+        self.assertEqual(first, {"backend": "vertex", "ready": True,
+                                 "detail": "credential JSON is configured"})
+        self.assertEqual(second, first)
+        # The dashboard polls /health every 15 seconds; the probe must not rerun.
+        probe.assert_called_once()
+
+
+    def test_unreachable_omniroute_reaches_the_phone_with_the_same_reason(self):
+        import relay_server.main as relay_main
+
+        token = self._claim_mobile_token()
+        env = {
+            "JARVIS_MOBILE_BACKEND": "omniroute",
+            "JARVIS_MOBILE_OMNIROUTE_API_KEY": "sk-omni-test",
+            "JARVIS_MOBILE_OMNIROUTE_BASE_URL": "http://localhost:20128/v1",
+            "JARVIS_MOBILE_OMNIROUTE_TTS_MODEL": "",
+        }
+        with patch.dict(os.environ, env, clear=False), \
+             patch.object(relay_main.urllib.request, "urlopen",
+                          side_effect=OSError("connection refused")):
+            failed = self.client.post("/v1/mobile-assistant", headers={
+                "Authorization": f"Bearer {token}"
+            }, json={"prompt": "hello", "history": []})
+
+        self.assertEqual(failed.status_code, 503)
+        detail = failed.json()["detail"]
+        self.assertIn("localhost", detail)
+        self.assertIn("JARVIS_MOBILE_OMNIROUTE_BASE_URL", detail)
+        self.assertNotIn("sk-omni-test", failed.text)
+
 
 if __name__ == "__main__":
     unittest.main()

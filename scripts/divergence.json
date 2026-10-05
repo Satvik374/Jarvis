@@ -36,7 +36,6 @@
     "take_screenshot": 1,
     "remember": 3,
     "voice_control": 1,
-    "macro": 2,
     "skill": 5,
     "connector": 2,
     "mcp": 5,
@@ -440,20 +439,6 @@
       "param": "value",
       "kind": "undeclared-default",
       "detail": "handler default '0.5', declaration leaves default unset",
-      "line": null
-    },
-    {
-      "action": "macro",
-      "param": "name",
-      "kind": "undeclared-default",
-      "detail": "handler default '', declaration leaves default unset",
-      "line": null
-    },
-    {
-      "action": "macro",
-      "param": "description",
-      "kind": "undeclared-default",
-      "detail": "handler default '', declaration leaves default unset",
       "line": null
     },
     {

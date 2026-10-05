@@ -116,7 +116,6 @@ class AgentTelemetryTests(unittest.TestCase):
 
         event_types = [e["event"] for e in events]
         self.assertIn("task_start", event_types)
-        self.assertIn("plan_start", event_types)
         self.assertIn("step_start", event_types)
         self.assertIn("step_action", event_types)
         self.assertIn("step_result", event_types)
@@ -452,6 +451,64 @@ class LiveVoiceSupervisorTests(unittest.TestCase):
 
             self.assertFalse(supervisor.is_task_running)
             self.assertTrue(mock_narrate.called)
+
+    def test_02b_mouse_control_reaches_the_worker_instead_of_chat(self):
+        """The request that used to be answered by the Communicating Agent.
+
+        "Enable mouse control" is not a task verb and names no UI target, so the
+        supervisor's conversational branch claimed it and the chat prompt - which
+        has no tools at all - replied that Jarvis cannot control the mouse.  The
+        router must hand it to the worker, whose loop then calls the action.
+        """
+        cfg = Config()
+        cfg.data.collect_trajectories = False
+        cfg.data.verify_success = False
+
+        class GateBrain(DummyBrain):
+            """One brain, two callers, exactly as in a real run.
+
+            The chat gate's prompt asks for a chat/task verdict and gets the
+            denial the user actually heard; the task loop's prompt carries the
+            action list and gets the toggle.
+            """
+
+            def complete(self, system: str, messages: list[dict],
+                         image=None) -> str:
+                if "ordinary CONVERSATION" in system:
+                    return json.dumps({
+                        "mode": "chat",
+                        "reply": "I don't have mouse control capabilities.",
+                    })
+                return json.dumps({
+                    "thought": "Turning the hand-mouse control on.",
+                    "action": "mouse_control",
+                    "args": {"enabled": True},
+                })
+
+        agent = Agent(GateBrain(cfg.brain), cfg)
+        supervisor = LiveVoiceSupervisor(cfg, agent=agent)
+
+        with patch.object(agent, "_perceive") as mock_perceive, \
+             patch("jarvis.tools.registry.execute") as mock_exec, \
+             patch.object(supervisor, "_narrate_voice") as mock_narrate:
+            mock_obs = Mock(active_window="Desktop", elements=[], menu=lambda: "",
+                            screen_size=(1920, 1080))
+            mock_perceive.return_value = mock_obs
+            mock_exec.return_value = Mock(
+                ok=True, message="mouse_control is on", finished=True, ask=None,
+                clear_image=False, image_path=None, needs_observe=False)
+
+            launch_res = supervisor.launch_task("Enable mouse control JARVIS")
+            self.assertEqual(launch_res["status"], "started")
+
+            # Wait for background worker to complete
+            if supervisor._active_task_thread:
+                supervisor._active_task_thread.join(timeout=3.0)
+
+        called = [(call.args[0], call.args[1]) for call in mock_exec.call_args_list]
+        toggles = [args for name, args in called if name == "mouse_control"]
+        self.assertTrue(toggles, f"worker never toggled the hand control: {called}")
+        self.assertIs(toggles[0].get("enabled"), True)
 
     def test_03_supervisor_cancellation(self):
         cfg = Config()

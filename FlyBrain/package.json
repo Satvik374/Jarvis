@@ -1,0 +1,11 @@
+{
+  "name": "flybrain",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Flappy Bird played by a spiking simulation of the real FlyWire fruit fly connectome",
+  "scripts": {
+    "physiology": "node tests/physiology.js",
+    "play": "node tests/play.js"
+  }
+}

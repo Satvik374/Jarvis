@@ -64,9 +64,11 @@ def drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.4) -> str:
     x2, y2 = _safe(pg, x2, y2)
     pg.moveTo(x1, y1, duration=0.15)
     pg.mouseDown()
-    time.sleep(0.05)
-    pg.moveTo(x2, y2, duration=duration)
-    pg.mouseUp()
+    try:
+        time.sleep(0.05)
+        pg.moveTo(x2, y2, duration=duration)
+    finally:
+        pg.mouseUp()
     return f"dragged ({x1},{y1}) -> ({x2},{y2})"
 
 

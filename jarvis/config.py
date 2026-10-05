@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
+from .providers import apply_defaults, kind_of, provider_for
 from .utils.paths import project_root
 
 # The project root, from the one module that owns that answer. Import stays
@@ -27,6 +28,7 @@ CONFIG_PATH = ROOT / "config.yaml"
 @dataclass
 class BrainConfig:
     # backend: "gemini" | "ollama" | "hf" | "llamacpp" | "openai" | "anthropic"
+    #          | "omniroute" - the local OpenAI-compatible AI gateway
     #   gemini - Google Cloud Vertex AI (default)
     #   ollama - local server
     #   hf     - load a HuggingFace model + your trained LoRA adapter directly,
@@ -42,6 +44,9 @@ class BrainConfig:
     # Path to a trained LoRA adapter (used by the "hf" backend). Empty = base only.
     adapter_path: str = ""
     base_url: str = ""
+    # Name of the environment variable that holds this backend's key. OmniRoute
+    # overrides it to OMNIROUTE_API_KEY in load_config: the gateway issues its
+    # own keys, so an OpenAI or OpenRouter credential is never the right one.
     api_key_env: str = "OPENAI_API_KEY"   # used by openai/anthropic backends
     api_key: str = ""                     # direct API key value from env/config
     temperature: float = 0.2
@@ -114,6 +119,16 @@ class DataConfig:
     # Conversational memory: how many recent (user prompt, Jarvis response)
     # exchanges to feed back in for continuity across tasks/sessions.
     chat_history_turns: int = 10
+
+
+@dataclass
+class MemoryConfig:
+    # Obsidian vault used as a memory source and sink (jarvis/memory/obsidian.py).
+    # Empty = the integration is off, which is the default: an install that does
+    # not use Obsidian keeps exactly the memory behaviour it already had.
+    obsidian_vault: str = ""
+    # Folder for daily notes, relative to the vault root.
+    obsidian_daily_folder: str = "Journal"
 
 
 @dataclass
@@ -193,13 +208,14 @@ class LiveVoiceConfig:
     # Lets the relay continue a session on a fresh socket after the server's
     # periodic disconnect instead of dropping the conversation.
     session_resumption: bool = True
-    # Screen sharing: the voice agent asks for it (share_screen tool) and the
-    # browser streams ~1 frame/second through the open relay while it is on.
-    # Frames leave the machine, so this is the switch that authorises it.
+    # Gemini may request screen sharing through its share_screen tool.
+    # Continuous frames are opt-in; never start the stream with the session.
     screen_share: bool = True
-    screen_share_interval: float = 1.0
-    screen_share_max_dim: int = 1024
-    screen_share_quality: int = 60
+    screen_share_always_on: bool = False
+    screen_share_interval: float = 2.0
+    screen_share_max_dim: int = 768
+    screen_share_quality: int = 50
+    token_budget_per_minute: int = 50000
     location: str = "us-central1"
     backend: str = "api_key"  # api_key | gcloud
     api_key: str = ""
@@ -292,11 +308,16 @@ class HudConfig:
     hotkey_toggle: str = "ctrl+alt+j"
     hotkey_voice: str = "alt+v"
     hotkey_vision: str = "ctrl+alt+s"
-    hotkey_macro: str = "ctrl+alt+r"
     hotkey_stop: str = "ctrl+alt+x"
     opacity: float = 0.94
     # Default position on desktop: "bottom_right", "top_right", "bottom_left", "top_center", "center"
     position: str = "bottom_right"
+    # Per-action choreography: narrate what a tool is doing (index lookup,
+    # launch, wait for the window) on the HUD, the browser stage and the
+    # terminal while it runs. Off means tools report only their final result.
+    animations: bool = True
+    # Multiplier on each beat's dwell time: 2.0 is twice as slow, 0.5 snappier.
+    animation_speed: float = 1.0
 
 
 @dataclass
@@ -318,6 +339,7 @@ class Config:
     perception: PerceptionConfig = field(default_factory=PerceptionConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     live_voice: LiveVoiceConfig = field(default_factory=LiveVoiceConfig)
     remote: RemoteConfig = field(default_factory=RemoteConfig)
@@ -372,6 +394,7 @@ def load_config(path: Path | str | None = None) -> Config:
         _apply(cfg.perception, data.get("perception", {}))
         _apply(cfg.safety, data.get("safety", {}))
         _apply(cfg.data, data.get("data", {}))
+        _apply(cfg.memory, data.get("memory", {}))
         _apply(cfg.voice, data.get("voice", {}))
         _apply(cfg.live_voice, data.get("live_voice", {}))
         _apply(cfg.remote, data.get("remote", {}))
@@ -394,7 +417,7 @@ def load_config(path: Path | str | None = None) -> Config:
         cfg.brain.backend = v
     if v := env.get("JARVIS_MODEL") or env.get("MODEL_ID") or env.get("MODEL"):
         cfg.brain.model = v
-    elif cfg.brain.backend in {"foundry", "azure", "azure-foundry", "azure_foundry", "foundry-agent"}:
+    elif kind_of(cfg.brain.backend) == "foundry":
         cfg.brain.model = "gpt-6"
     if v := env.get("JARVIS_FOUNDRY_ENDPOINT") or env.get("AZURE_FOUNDRY_ENDPOINT") or env.get("AZURE_AI_ENDPOINT"):
         cfg.brain.foundry_endpoint = v
@@ -477,6 +500,13 @@ def load_config(path: Path | str | None = None) -> Config:
         cfg.live_voice.media_resolution = v
     if v := env.get("JARVIS_LIVE_SCREEN_SHARE"):
         cfg.live_voice.screen_share = v.lower() in {"1", "true", "yes", "on"}
+    if v := env.get("JARVIS_LIVE_SCREEN_SHARE_ALWAYS_ON"):
+        cfg.live_voice.screen_share_always_on = v.lower() in {"1", "true", "yes", "on"}
+    if v := env.get("JARVIS_LIVE_TOKEN_BUDGET_PER_MINUTE"):
+        try:
+            cfg.live_voice.token_budget_per_minute = max(10000, int(v))
+        except (TypeError, ValueError):
+            pass
     if v := env.get("JARVIS_LIVE_VOICE"):
         cfg.live_voice.voice_name = v
     if v := env.get("JARVIS_LIVE_LOCATION"):
@@ -546,11 +576,31 @@ def load_config(path: Path | str | None = None) -> Config:
         except Exception:
             pass
 
-    # OpenRouter defaults
-    if cfg.brain.backend.lower() == "openrouter":
-        if not cfg.brain.base_url:
-            cfg.brain.base_url = "https://openrouter.ai/api/v1"
-        cfg.brain.api_key_env = "OPENROUTER_API_KEY"
+    # Endpoint and key variable come from the one table that knows what a
+    # backend name means (jarvis/providers.py). OmniRoute and OpenRouter each had
+    # a copy of these defaults here AND in brain.py::make_brain, which agree
+    # only until someone edits one of them.
+    apply_defaults(cfg.brain)
+
+    # OmniRoute's key, which the table cannot decide: the gateway mints its own
+    # ``sk-`` keys, so the vault's OPENROUTER_API_KEY (a different provider
+    # entirely) and the compatibility mirror in OPENAI_API_KEY would otherwise
+    # win here and every request would come back 401 while the log still said a
+    # key was configured. The variable name is asked of the table directly - not
+    # read back out of the config the line above just wrote - so this block does
+    # not depend on the order of the two.
+    gateway = provider_for("omniroute")
+    if gateway is not None and provider_for(cfg.brain.backend) is gateway:
+        key_env = gateway.api_key_env
+        omni_key = env.get(key_env, "")
+        if not omni_key:
+            try:
+                from .security import get_secret
+                omni_key = get_secret(key_env) or ""
+            except Exception:
+                omni_key = ""
+        if omni_key:
+            cfg.brain.api_key = omni_key
 
     # Automatic fallback to openai/openrouter backend if custom URL or API key is set
     # but backend is still the default ollama
@@ -560,9 +610,7 @@ def load_config(path: Path | str | None = None) -> Config:
         if has_custom_key or has_custom_url:
             if env.get("OPENROUTER_API_KEY") or (cfg.brain.api_key and cfg.brain.api_key.startswith("sk-or-")):
                 cfg.brain.backend = "openrouter"
-                if not cfg.brain.base_url:
-                    cfg.brain.base_url = "https://openrouter.ai/api/v1"
-                cfg.brain.api_key_env = "OPENROUTER_API_KEY"
+                apply_defaults(cfg.brain)
             elif env.get("GEMINI_API_KEY") or (cfg.brain.api_key and cfg.brain.api_key.startswith("AIzaSy")):
                 cfg.brain.backend = "gemini"
             else:
@@ -580,6 +628,13 @@ def load_config(path: Path | str | None = None) -> Config:
         cfg.wake_enabled = True
     if env.get("JARVIS_CONFIRM") in {"1", "true", "True"}:
         cfg.safety.confirm_each_action = True
+    # Obsidian vault (jarvis/memory/obsidian.py). The environment wins over
+    # config.yaml, and both are read by the memory module at call time, so a
+    # test that patches the environment is not fighting a cached config.
+    if v := env.get("JARVIS_OBSIDIAN_VAULT"):
+        cfg.memory.obsidian_vault = v
+    if v := env.get("JARVIS_OBSIDIAN_DAILY_FOLDER"):
+        cfg.memory.obsidian_daily_folder = v
     return cfg
 
 

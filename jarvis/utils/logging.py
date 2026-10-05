@@ -195,6 +195,25 @@ def error(msg: str) -> None:
     _emit(_glyph("✗", "[x]"), "red", msg, mcolor="red")
 
 
+def _provider_is_busy(exc: BaseException) -> bool:
+    """The brain's verdict on "out of capacity, ask again shortly", borrowed.
+
+    Borrowed rather than re-derived: this module used to judge by exception type
+    alone while the brain judged by type, status code and wording, so a 503 the
+    brain had just waited out still reached the user as a generic "something
+    went wrong". One verdict, read by both.
+
+    Imported lazily because ``jarvis.agent.brain`` imports this module: a
+    module-level import here would be a cycle. No brain installed means no error
+    can be a provider-busy one.
+    """
+    try:
+        from ..agent.brain import is_provider_busy
+    except Exception:
+        return False
+    return is_provider_busy(exc)
+
+
 def friendly_error(exc: BaseException) -> str:
     """Translate a computer error into one plain-English line a person can act on.
 
@@ -224,13 +243,24 @@ def friendly_error(exc: BaseException) -> str:
         missing = text.split("'")[1] if "'" in text else kind
         return (f"A piece of Jarvis isn't installed (missing: {missing}). "
                 f"Run: pip install {missing}")
+    if _provider_is_busy(exc):
+        # One verdict, two shapes, so the sentence names the one that happened: a
+        # route that refused to answer is not the same as one that answered with
+        # nothing, and "ask again" is the remedy for both. (This branch replaced
+        # a separate "rate limit"/429 one, which the verdict now covers - a
+        # message saying "429" or "too many requests" is busy by the same rule.)
+        if getattr(exc, "silent", False):
+            return ("The AI service kept going quiet - it sent back empty "
+                    "replies instead of an answer, which usually means it is "
+                    "overloaded. Wait a minute and ask me again, or switch me "
+                    "to a different model.")
+        return ("The AI service is busy or out of capacity, so it couldn't give "
+                "me an answer. Give it a minute and ask me again, or switch me "
+                "to a different model.")
     if "unauthorized" in low or "401" in low or "invalid api key" in low:
         return ("The service rejected my login - the API key looks wrong or "
                 "expired. Update the key in your config or .env and I'll "
                 "retry.")
-    if "rate limit" in low or "429" in low:
-        return ("The AI service is busy and asked me to slow down. Give it a "
-                "minute, then ask me again.")
     if isinstance(exc, KeyboardInterrupt):
         return "Cancelled - you're the boss."
     if "disk" in low and ("full" in low or "space" in low):

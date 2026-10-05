@@ -220,26 +220,6 @@ class ProactiveDaemon:
 
             threading.Thread(target=_run_task, daemon=True, name=f"jarvis-proactive-{rule.id}").start()
 
-        # 4. Macro Execution
-        elif rule.action_type == "macro":
-            def _run_macro():
-                from ..scheduler import desktop
-                with desktop():
-                    if self._stop_event.is_set():
-                        return
-                    try:
-                        from ..macro.manager import get_macro_manager
-                        from ..macro.player import MacroPlayer
-                        result = MacroPlayer(get_macro_manager()).play(
-                            rule.action_target, cancel_event=self._stop_event,
-                        )
-                        if not result.get("ok"):
-                            log.warn(f"Proactive macro replay error ({rule.name}): {result.get('message', 'Playback failed')}")
-                    except Exception as exc:
-                        log.warn(f"Proactive macro replay error ({rule.name}): {exc}")
-
-            threading.Thread(target=_run_macro, daemon=True, name=f"jarvis-proactive-macro-{rule.id}").start()
-
     def tick(self, now: float | None = None) -> List[Event]:
         """Perform one poll tick across all active watchers."""
         current_time = now if now is not None else time.time()

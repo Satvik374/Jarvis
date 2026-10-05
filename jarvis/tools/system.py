@@ -168,17 +168,18 @@ def open_url(url: str) -> str:
     if not url.startswith(("http://", "https://", "file://")):
         url = "https://" + url
 
-    try:
-        from ..desktop import is_shadow_enabled, get_shadow_manager
-        if is_shadow_enabled():
-            mgr = get_shadow_manager()
-            mgr.spawn_url(url)
-            return f"opened {url} in Shadow Workspace"
+    from ..desktop import is_shadow_enabled, get_shadow_manager
+    if is_shadow_enabled():
+        try:
+            pid = get_shadow_manager().spawn_url(url)
+            if pid:
+                return f"opened {url} in Shadow Workspace"
+            return f"could not open {url} in Shadow Workspace"
+        except Exception as exc:
+            return f"could not open {url} in Shadow Workspace: {exc}"
 
-    except Exception:
-        pass
-
-    webbrowser.open(url)
+    if not webbrowser.open(url):
+        return f"could not open {url}: no browser accepted the request"
     return f"opened {url}"
 
 

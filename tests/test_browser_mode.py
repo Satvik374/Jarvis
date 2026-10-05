@@ -114,6 +114,41 @@ class TerminalBridgeInputTests(unittest.TestCase):
         self.assertEqual(bridge.process.signal, expected_signal)
 
 
+    def test_hands_free_mode_is_relayed_to_the_page_and_remembered(self):
+        bridge = self.bridge()
+        bridge.accepting_input = False
+
+        bridge._handle_structured({"event": "wake_mode", "active": True})
+
+        # Remembered because the shutdown path below has to know about it, and
+        # relayed because the page is what offers STOP while the mode runs.
+        self.assertTrue(bridge.wake_active)
+        subscriber, history = bridge.broker.subscribe()
+        bridge.broker.unsubscribe(subscriber)
+        self.assertIn("wake_mode", [item["event"] for item in history])
+
+        bridge._handle_structured({"event": "wake_mode", "active": False})
+        self.assertFalse(bridge.wake_active)
+
+    def test_shutdown_breaks_a_hands_free_wait_instead_of_only_queueing(self):
+        """The child is parked on the microphone, not at a prompt: a queued :quit
+        on its own would sit there until the next spoken phrase, which the user
+        ending the session has no reason to ever say."""
+        bridge = self.bridge()
+        bridge.accepting_input = False
+        bridge._handle_structured({"event": "wake_mode", "active": True})
+
+        ok, message = bridge.request_shutdown()
+
+        expected_signal = (
+            getattr(signal, "CTRL_BREAK_EVENT", signal.SIGINT)
+            if sys.platform == "win32"
+            else signal.SIGINT
+        )
+        self.assertTrue(ok)
+        self.assertEqual(bridge.process.signal, expected_signal)
+        self.assertEqual(message, "shutdown queued")
+
     def test_interrupt_rejects_when_jarvis_is_ready(self):
         bridge = self.bridge()
         self.assertFalse(bridge.request_interrupt()[0])
@@ -522,6 +557,122 @@ print(json.dumps({"value": input("answer > ")}, ensure_ascii=False))
                 bridge.stop()
 
 
+class BrowserWakeModeTests(unittest.TestCase):
+    """Hands-free ("Hey Jarvis") mode as the *browser* runs it.
+
+    ``/wake`` was reachable from the page and unusable from there: the runtime
+    parked on an unbounded wait for the phrase that the page could neither see
+    nor stop. These pin both halves of the fix - the mode announces itself in the
+    words the page turns into a real listening state, and it can be ended from
+    outside the loop.
+
+    The seam is installed by ``install_event_bridge``, which rewires the shared
+    console and logger for the life of a process, so it runs in a child: the same
+    reason the wire-decoding test above does.
+    """
+
+    def _reported(self, script: str) -> dict:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for line in reversed(result.stdout.splitlines()):
+            if line.strip().startswith("{"):
+                return json.loads(line.strip())
+        self.fail(f"the worker reported nothing: {result.stdout!r} {result.stderr!r}")
+
+    def test_wake_mode_announces_itself_reports_listening_and_stops_cleanly(self):
+        script = r"""
+import json
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import jarvis.browser_worker as browser_worker
+from jarvis import console
+from jarvis.config import Config
+
+events = []
+browser_worker.install_event_bridge()
+browser_worker.emit = lambda event, **payload: events.append((event, dict(payload)))
+
+handed = {}
+
+def cancelling_wait_for_wake(*_args, **kwargs):
+    # What the interrupt handler does to the child while it waits.
+    handed["stop_event"] = kwargs.get("stop_event") is browser_worker._wake_stop
+    browser_worker._wake_stop.set()
+    return False
+
+with patch.object(console.voice, "wait_for_wake", side_effect=cancelling_wait_for_wake), \
+     patch.object(console.voice, "speak"):
+    console._wake_loop(SimpleNamespace(), Config())
+
+print(json.dumps({
+    "first": events[0],
+    "last": events[-1],
+    "states": [payload.get("state") for event, payload in events if event == "state"],
+    "labels": [payload.get("label") for event, payload in events if event == "state"],
+    "handed_stop_event": handed.get("stop_event"),
+    "stop_still_set": browser_worker._wake_stop.is_set(),
+}))
+"""
+        reported = self._reported(script)
+
+        self.assertEqual(reported["first"], ["wake_mode", {"active": True}])
+        self.assertEqual(reported["last"], ["wake_mode", {"active": False}])
+        # The console's wait line is what the page reads as LISTENING; without it
+        # the stage would keep whatever state the previous task left behind.
+        self.assertIn("listening", reported["states"])
+        self.assertTrue(
+            any("Hey Jarvis" in str(label) for label in reported["labels"]),
+            reported["labels"],
+        )
+        # The stop must reach the listener itself, not just the loop's next turn.
+        self.assertTrue(reported["handed_stop_event"])
+        # And it is released on the way out, or the next /wake would end instantly.
+        self.assertFalse(reported["stop_still_set"])
+
+
+class LauncherExitCodeTests(unittest.TestCase):
+    """The launcher's own exit path has to survive whatever a faulting worker returns.
+
+    A worker that dies of an access violation comes back as the Windows status
+    0xC0000005, which does not fit the C int ``os._exit`` takes. That used to
+    raise *inside* the shutdown path, so a crashed runtime was reported as
+    "Fatal error: Python int too large to convert to C int" - naming neither the
+    fault nor the code behind it.
+    """
+
+    def test_a_faulting_worker_code_becomes_a_plain_failure(self):
+        self.assertEqual(run.exit_status(0xC0000005), 1)
+        self.assertEqual(run.exit_status(0xFFFFFFFF), 1)
+        self.assertEqual(run.exit_status(-0x80000000), -0x80000000)
+
+    def test_ordinary_codes_pass_through_untouched(self):
+        for code in (0, 1, 2, 130):
+            self.assertEqual(run.exit_status(code), code)
+        self.assertEqual(run.exit_status(None), 0)
+        self.assertEqual(run.exit_status("1"), 0)
+
+    def test_the_launcher_can_exit_with_a_faulting_workers_code(self):
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import os, run; os._exit(run.exit_status(0xC0000005))"],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn("Fatal error", result.stderr)
+
+
 class _HTTPFakeBridge:
     def __init__(self):
         self.token = "secret-token"
@@ -603,6 +754,8 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertTrue(body["accepting_input"])
         self.assertFalse(body["speech"]["active"])
         self.assertEqual(body["interface"]["mode"], "console")
+        # A reconnect has to restore hands-free mode's STOP, not just its state.
+        self.assertFalse(body["hands_free"])
 
     def test_skills_endpoint_requires_token_and_lists_the_library(self):
         from jarvis.skills import SkillManager

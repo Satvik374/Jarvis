@@ -169,12 +169,11 @@ class ShadowDesktopManager:
     def spawn_process(self, command: str, cwd: Optional[str] = None) -> Optional[int]:
         """Spawn a process attached directly to the shadow desktop session."""
         if not self._is_windows or not self.enabled:
-            import subprocess
-            proc = subprocess.Popen(command, shell=True, cwd=cwd)
-            self._tracked_pids.append(proc.pid)
-            return proc.pid
+            log.warn("Shadow process launch refused: isolated desktop is unavailable or disabled.")
+            return None
 
-        self.ensure_desktop()
+        if not self.ensure_desktop():
+            return None
 
         try:
             # Use Win32 CreateProcess with STARTUPINFO.lpDesktop
@@ -247,17 +246,11 @@ class ShadowDesktopManager:
                 return pid
             else:
                 err = ctypes.GetLastError()
-                log.warn(f"Failed to spawn shadow process: win32 error {err}. Falling back to standard spawn.")
-                import subprocess
-                proc = subprocess.Popen(command, shell=True, cwd=cwd)
-                self._tracked_pids.append(proc.pid)
-                return proc.pid
+                log.warn(f"Failed to spawn shadow process: win32 error {err}; no primary-desktop fallback.")
+                return None
         except Exception as exc:
             log.warn(f"Exception spawning shadow process: {exc}")
-            import subprocess
-            proc = subprocess.Popen(command, shell=True, cwd=cwd)
-            self._tracked_pids.append(proc.pid)
-            return proc.pid
+            return None
 
     def spawn_url(self, url: str) -> Optional[int]:
         """Spawn an isolated browser instance inside the shadow desktop session."""

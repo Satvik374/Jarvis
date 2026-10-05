@@ -78,7 +78,6 @@ class LiveVoiceSupervisor:
         self._current_task = ""
         self._current_step = 0
         self._total_steps = self.cfg.safety.max_steps
-        self._current_plan_name = ""
         self._is_task_running = False
         self._task_lock = threading.Lock()
         # Task launches can arrive concurrently from a live tool call and the
@@ -196,7 +195,6 @@ class LiveVoiceSupervisor:
                 self._active_task_cancel = cancel_event
                 self._current_task = task
                 self._current_step = 0
-                self._current_plan_name = "Initializing"
                 self._is_task_running = True
                 self._waiting_for_answer = False
                 self._pending_question = ""
@@ -367,17 +365,7 @@ class LiveVoiceSupervisor:
 
         ev_type = event.get("event", "")
 
-        if ev_type == "plan_start":
-            self._current_plan_name = event.get("plan_name", "Executing")
-            desc = event.get("plan_description", "")
-            log.info(f"⚡ [Telemetry] Plan: {self._current_plan_name}")
-            if self.cfg.live_voice.narrate_steps:
-                narration = f"Plan initiated: {self._current_plan_name}."
-                if desc:
-                    narration += f" {desc[:90]}."
-                self._narrate_voice(narration)
-
-        elif ev_type == "step_action":
+        if ev_type == "step_action":
             self._current_step = event.get("step", self._current_step + 1)
             thought = (event.get("thought") or "").strip()
             action = event.get("action", "")
@@ -586,7 +574,6 @@ class LiveVoiceSupervisor:
             summary["running"] = self._is_task_running
             summary["task"] = self._current_task
             summary["step"] = self._current_step
-            summary["plan"] = self._current_plan_name
             summary["recent_narration"] = list(self._narration_history)[-3:]
             return summary
 

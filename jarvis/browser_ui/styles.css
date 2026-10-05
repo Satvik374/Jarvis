@@ -446,6 +446,67 @@ button:disabled {
   border-bottom: 1px solid var(--line);
 }
 
+/*
+ * The way past the chrome. The brand, the panel toggle and the seven controls
+ * beside it all precede the composer in the tab order, so a keyboard user pays
+ * nine stops to reach the one thing they came for; this is the standard link
+ * around them, first in the DOM so it is also the first thing announced.
+ *
+ * Absolutely positioned inside the relative topbar: out of flow, so it can never
+ * change the measured header height that `--header-h` and every drawer anchor
+ * to, and hidden while unfocused so it costs the layout nothing.
+ *
+ * Deliberately no z-index. The stage's levels start at --z-stage, and anything
+ * painted above the core frame has to stay inert or it swallows clicks meant for
+ * the controls inside it (see test_browser_layout.py). A positioned element with
+ * no z-index still paints above the static controls beside it, which is all this
+ * needs - so it stays on the near side of that line rather than crossing it.
+ */
+.skip-link {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  box-shadow: var(--elev-2), var(--glow-soft);
+  font: 600 11px/1 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  text-decoration: none;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(-140%);
+  transition: transform var(--dur-fast) var(--ease-out),
+              opacity var(--dur-fast) var(--ease-out);
+}
+
+/* Hidden until focused, and unmistakably visible the moment it is. `:focus` as
+ * well as `:focus-visible`, because a focused-but-invisible control is worse
+ * than no control at all. */
+.skip-link:focus,
+.skip-link:focus-visible {
+  opacity: 1;
+  transform: translateY(0);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/*
+ * The skip link's destination is the composer, not the textarea: the textarea is
+ * `disabled` until the terminal link connects, and a disabled control cannot
+ * take focus at all. Focus landing with nothing to show for it is
+ * indistinguishable from a broken control, so the whole composer takes the
+ * interface's focus ring. `:focus` rather than `:focus-visible`, because
+ * arriving here is always deliberate.
+ */
+#composer:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
 /* Accent ticks that mark the two ends of the header rule. */
 .topbar::before,
 .topbar::after {
@@ -892,19 +953,28 @@ html[data-connected="false"] .connection-dot {
   background: rgba(0, 0, 0, 0.2);
 }
 
+/*
+ * Six tabs share a panel that is 290px wide at 1600px of viewport, which is
+ * 48px a tab. Measured there: at the five-tab spacing the sixth label was down
+ * to 9px and "LOGS" lost its last letter, so the padding, the gap and the
+ * tracking below are what pay for the extra tab. The two labels that still clip
+ * at that width (STREAM and SKILLS, both carrying a count badge) clipped before
+ * this tab existed - a badge is ~17px of a 48px tab and the label cannot have
+ * it back.
+ */
 .panel-tab {
   position: relative;
   display: flex;
   flex: 1 1 0;
-  gap: var(--space-2);
+  gap: var(--space-1);
   align-items: center;
   justify-content: center;
   min-width: 0;
-  padding: 11px 5px 10px;
+  padding: 11px 3px 10px;
   color: var(--dim);
   background: transparent;
   font: 650 8px/1 var(--mono);
-  letter-spacing: 0.14em;
+  letter-spacing: 0.1em;
   transition: color var(--dur-fast) ease, background var(--dur-fast) ease;
 }
 
@@ -929,8 +999,14 @@ html[data-connected="false"] .connection-dot {
   position: absolute;
   bottom: -1px;
   left: 0;
-  /* One fifth: STREAM / VITALS / CMDS / SKILLS / LOGS. */
-  width: 20%;
+  /*
+   * Six tabs: STREAM / VITALS / CMDS / SKILLS / LOGS / KEYS. The width is one
+   * tab, and app.js translates by whole multiples of it, so a seventh tab only
+   * needs this number changed - the indicator follows automatically. It has to
+   * be stated as a division rather than a rounded percentage: 16.66% would drift
+   * visibly by the last tab.
+   */
+  width: calc(100% / 6);
   height: 2px;
   border-radius: var(--radius-pill);
   background: var(--accent);
@@ -1546,6 +1622,231 @@ html[data-connected="false"] .connection-dot {
   background: rgba(var(--accent-rgb), 0.18);
 }
 
+/* ── API keys ── */
+
+.keys-note {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--space-3) 13px;
+  color: var(--dim);
+  border-bottom: 1px solid var(--line-soft);
+  font: 500 8.5px/1.55 var(--body);
+}
+
+.keys-note code {
+  color: var(--muted);
+  font: 600 8.5px/1 var(--mono);
+}
+
+.keys-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-2) 0 var(--space-3);
+}
+
+.keys-group-head {
+  padding: var(--space-3) 13px var(--space-1);
+  color: var(--dim);
+  font: 650 7px/1 var(--mono);
+  letter-spacing: 0.16em;
+}
+
+.key-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 13px;
+  /* The left edge carries the state: a configured key is lit, an unset one is
+     not, so a long list can be scanned without reading every row. */
+  border-top: 1px solid var(--line-soft);
+  border-left: 2px solid transparent;
+}
+
+.key-item[data-set="true"] {
+  border-left-color: rgba(var(--accent-rgb), 0.55);
+}
+
+.key-item[data-source="vault"] {
+  border-left-color: rgba(255, 180, 84, 0.6);
+}
+
+.key-head {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.key-name {
+  color: var(--accent-bright);
+  font: 650 9px/1.25 var(--mono);
+  letter-spacing: 0.04em;
+  overflow-wrap: anywhere;
+}
+
+.key-source {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  font: 650 6.5px/1 var(--mono);
+  letter-spacing: 0.12em;
+}
+
+.key-source[data-source="file"] {
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.35);
+  background: rgba(var(--accent-rgb), 0.08);
+}
+
+.key-source[data-source="vault"] {
+  color: var(--warn);
+  border-color: rgba(255, 180, 84, 0.35);
+  background: rgba(255, 180, 84, 0.08);
+}
+
+.key-help {
+  margin: 0;
+  color: var(--muted);
+  font: 500 8.5px/1.5 var(--body);
+}
+
+.key-state {
+  margin: 0;
+  color: var(--dim);
+  font: 500 7.5px/1.45 var(--mono);
+  letter-spacing: 0.02em;
+  overflow-wrap: anywhere;
+}
+
+.key-controls {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.key-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 7px 8px;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: rgba(0, 0, 0, 0.3);
+  font: 500 9px/1 var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.key-input::placeholder {
+  color: var(--dim);
+}
+
+.key-input:focus-visible {
+  border-color: var(--accent);
+  outline-offset: 1px;
+}
+
+.key-button {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  font: 650 7px/1 var(--mono);
+  letter-spacing: 0.12em;
+  transition: color var(--dur-fast) ease, background var(--dur-fast) ease,
+    border-color var(--dur-fast) ease;
+}
+
+.key-button:hover,
+.key-button:focus-visible {
+  color: var(--muted);
+  background: rgba(var(--accent-rgb), 0.08);
+}
+
+.key-button[data-action="save"] {
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.35);
+  background: rgba(var(--accent-rgb), 0.08);
+}
+
+.key-button[data-action="save"]:hover,
+.key-button[data-action="save"]:focus-visible {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.18);
+}
+
+.key-button[data-action="clear"]:hover,
+.key-button[data-action="clear"]:focus-visible,
+.key-button[data-action="remove"]:hover,
+.key-button[data-action="remove"]:focus-visible {
+  color: var(--danger);
+  background: rgba(255, 90, 79, 0.1);
+}
+
+.key-link {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font: 650 7px/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-decoration: none;
+}
+
+.key-link:hover,
+.key-link:focus-visible {
+  text-decoration: underline;
+}
+
+.keys-add {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 13px;
+  border-top: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.keys-add-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.keys-add-name,
+.keys-add-value {
+  min-width: 0;
+  padding: 7px 8px;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: rgba(0, 0, 0, 0.3);
+  font: 500 9px/1 var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.keys-add-name {
+  text-transform: uppercase;
+}
+
+.keys-add-value {
+  flex: 1 1 auto;
+}
+
+.keys-add-name::placeholder,
+.keys-add-value::placeholder {
+  color: var(--dim);
+  text-transform: none;
+}
+
+.keys-add-name:focus-visible,
+.keys-add-value:focus-visible {
+  border-color: var(--accent);
+  outline-offset: 1px;
+}
+
 /* Follow-output pills, shared by the stream, messages and terminal. */
 .follow-output {
   position: absolute;
@@ -1595,6 +1896,23 @@ html[data-connected="false"] .connection-dot {
   background:
     radial-gradient(circle at center, rgba(var(--accent-rgb), 0.075), transparent 53%),
     radial-gradient(ellipse at center, rgba(10, 34, 51, 0.4), transparent 70%);
+}
+
+/*
+ * Everything above the core frame is decoration: the grid, the radar sweep and
+ * the read-outs are painted at `--z-stage-deco` / `--z-stage-hud`, which sit
+ * *above* `--z-stage`, the level the frame and its controls live on. Left
+ * hit-testable they swallowed every click meant for the controls inside that
+ * frame - the Live Voice trigger and the hologram toolbar - because the topmost
+ * element at their centre was the invisible radar sweep (it is only visible
+ * while perceiving/verifying). None of these layers has a handler, so they take
+ * no pointer events at all, and a click reaches the control underneath.
+ */
+.stage-grid,
+.radar-sweep,
+.mode-strip,
+.state-readout {
+  pointer-events: none;
 }
 
 .stage-grid {

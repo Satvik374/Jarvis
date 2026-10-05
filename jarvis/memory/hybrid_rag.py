@@ -2,7 +2,7 @@
 
 Combines Vector Semantic Search, Knowledge Graph Subgraph Expansion, and
 Keyword/Exact matching using Reciprocal Rank Fusion (RRF). Formats a token-efficient
-prompt context block for both agent loop planning and conversational chat.
+prompt context block for the agent loop and for conversational chat.
 """
 
 from __future__ import annotations
@@ -21,14 +21,12 @@ class RAGResult:
     graph_relations: List[Relation] = field(default_factory=list)
     mentioned_entities: List[Entity] = field(default_factory=list)
     core_rules: List[MemoryRecord] = field(default_factory=list)
-    learned_plans: List[MemoryRecord] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         return (
             not self.vector_records
             and not self.graph_relations
             and not self.core_rules
-            and not self.learned_plans
         )
 
 
@@ -61,12 +59,14 @@ class HybridRAG:
             min_score=min_vector_score,
         )
 
-        # Split vector results into facts and learned plans
+        # Vector results are memory records: facts, preferences, rules, notes.
+        # Legacy rows written by the removed learned-plan feature are skipped
+        # rather than surfaced: an existing database still holds them, and a
+        # recipe the agent wrote for itself must never read back as a fact.
         for rec, score in raw_vec_results:
             if rec.doc_type == "learned_plan":
-                result.learned_plans.append(rec)
-            else:
-                result.vector_records.append((rec, score))
+                continue
+            result.vector_records.append((rec, score))
 
         # 2. Knowledge Graph Entity & Subgraph Expansion
         mentioned_entities = self.knowledge_graph.find_mentioned_entities(query_str)
@@ -85,7 +85,6 @@ class HybridRAG:
 
         # 4. Limit vector records to top_k
         result.vector_records = result.vector_records[:top_k]
-        result.learned_plans = result.learned_plans[:3]
 
         return result
 
@@ -137,12 +136,6 @@ class HybridRAG:
             for rel in rag_data.graph_relations:
                 ctx_note = f" (context: {rel.context[:60]}...)" if rel.context and len(rel.context) > 20 else ""
                 sections.append(f"- {rel.source_name} --[{rel.relation_type}]--> {rel.target_name}{ctx_note}")
-
-        # Section 4: Relevant Learned Plans
-        if rag_data.learned_plans:
-            sections.append("\n[Relevant Learned Plans]")
-            for plan in rag_data.learned_plans:
-                sections.append(f"{plan.content}")
 
         sections.append("=================================================================")
         formatted = "\n".join(sections)

@@ -65,6 +65,8 @@ def press_sequence(keys) -> str:
         keys = [keys]
     done = []
     for combo in keys:
-        press(str(combo))
+        result = press(str(combo))
+        if not result.startswith("pressed "):
+            return result
         done.append(str(combo))
     return "pressed sequence: " + " -> ".join(done)

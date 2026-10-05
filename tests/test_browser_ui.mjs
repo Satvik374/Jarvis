@@ -238,6 +238,89 @@ test("Escape closes the palette", () => {
   assert.equal($("#paletteBackdrop").hidden, true);
 });
 
+// --- A dialog that claims aria-modal must own the keyboard while it is open. ---
+const openPalette = () => {
+  document.dispatchEvent(new window.KeyboardEvent("keydown", {
+    key: "k", ctrlKey: true, bubbles: true,
+  }));
+  assert.equal($("#paletteBackdrop").hidden, false);
+};
+const closePalette = () => {
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal($("#paletteBackdrop").hidden, true);
+};
+
+test("an open dialog really makes the page behind it inert", () => {
+  openPalette();
+  const shell = document.querySelector(".app-shell");
+  assert.equal(shell.inert, true, "the header and stage behind the dialog must be inert");
+  assert.equal($("#terminalDrawer").inert, true);
+  closePalette();
+  assert.equal(shell.inert, false, "inert has to be undone when the dialog closes");
+});
+
+test("Tab cannot leave the open dialog", () => {
+  openPalette();
+  const items = document.querySelectorAll(".palette-item");
+  const last = items[items.length - 1];
+  last.focus();
+  last.dispatchEvent(new window.KeyboardEvent("keydown", {
+    key: "Tab", bubbles: true, cancelable: true,
+  }));
+  assert.equal(
+    document.activeElement, $("#paletteInput"),
+    "Tab off the last row wraps to the first control, not into the hidden page",
+  );
+  $("#paletteInput").dispatchEvent(new window.KeyboardEvent("keydown", {
+    key: "Tab", shiftKey: true, bubbles: true, cancelable: true,
+  }));
+  assert.equal(
+    document.activeElement, items[items.length - 1],
+    "Shift+Tab off the first control wraps to the last row",
+  );
+  closePalette();
+});
+
+test("the palette announces which row is highlighted", () => {
+  openPalette();
+  const input = $("#paletteInput");
+  const selected = () => document.querySelector(".palette-item[aria-selected='true']");
+  assert.equal(input.getAttribute("aria-activedescendant"), selected().id);
+  input.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  assert.notEqual(selected().id, "palette-option-0", "the selection moved");
+  assert.equal(input.getAttribute("aria-activedescendant"), selected().id);
+  closePalette();
+});
+
+test("closing a dialog returns focus rather than dropping it on <body>", () => {
+  const toggle = $("#paletteToggle");
+  toggle.focus();
+  toggle.dispatchEvent(new window.Event("click"));
+  assert.equal($("#paletteBackdrop").hidden, false);
+  closePalette();
+  const active = document.activeElement;
+  assert.notEqual(active, document.body, "focus must land on a visible control");
+  assert.ok(
+    active.closest(".app-shell"),
+    `expected focus back inside the shell, got ${active.id || active.tagName}`,
+  );
+});
+
+test("the shortcuts panel keeps focus on its own controls", () => {
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "?", bubbles: true }));
+  assert.equal($("#shortcutsBackdrop").hidden, false);
+  assert.equal(document.querySelector(".app-shell").inert, true);
+  const close = $("#closeShortcuts");
+  assert.equal(document.activeElement, close);
+  close.dispatchEvent(new window.KeyboardEvent("keydown", {
+    key: "Tab", bubbles: true, cancelable: true,
+  }));
+  assert.equal(document.activeElement, close, "the only control, so Tab stays on it");
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal($("#shortcutsBackdrop").hidden, true);
+  assert.equal(document.querySelector(".app-shell").inert, false);
+});
+
 // --- The same surface becomes a read-mostly remote-agent dashboard. ---
 test("remote-agent session switches the interface mode", () => {
   fire({ event: "session", alive: true, interface_mode: "remote-agent" });
@@ -420,6 +503,108 @@ try {
   results.push(["FAIL", `live cancellation acknowledges request, not completion -> ${error.message}`]);
 } finally {
   $("#voiceExitBtn").click();
+}
+
+// --------------------------------------------------------------------------- //
+// Reduced motion: the 3D stage must stop, not keep animating on its own.
+// --------------------------------------------------------------------------- //
+
+try {
+  // app.js is what the harness boots; the stage module loads beside it in the
+  // real page, so load it here too (defining the class needs no WebGL).
+  window.eval(readFileSync(join(UI, "hologram.js"), "utf8"));
+  const { HolographicCore3D } = window;
+  assert.ok(HolographicCore3D, "hologram.js should be loaded");
+
+  // jsdom has no WebGL, so a real instance bails out before it can animate.
+  // Drive the prototype with stubs instead: the loop logic is what is under test.
+  const queued = [];
+  const pending = () => queued.filter(Boolean).length;
+  const realRaf = window.requestAnimationFrame;
+  const realCancel = window.cancelAnimationFrame;
+  window.requestAnimationFrame = (callback) => { queued.push(callback); return queued.length; };
+  window.cancelAnimationFrame = (id) => { queued[id - 1] = null; };
+
+  const makeStage = (reduced) => {
+    const stage = Object.create(HolographicCore3D.prototype);
+    Object.assign(stage, {
+      isWebGLAvailable: true,
+      reducedMotion: reduced,
+      frameId: null,
+      suspended: false,
+      shocks: [],
+      frames: 0,
+      scene: {},
+      // Enough of a stage for resize() to run: it measures the container and
+      // re-sizes the renderer, which the resume path depends on.
+      container: { getBoundingClientRect: () => ({ width: 600, height: 600 }) },
+      camera: { updateProjectionMatrix() {} },
+      renderer: { render() { stage.frames += 1; }, setSize() {} },
+      updateAudio() {}, updateColors() {}, updateTransforms() {}, updateSingularity() {},
+      updateParticles() {}, updateRings() {}, updateScanner() {}, updateShockwaves() {},
+    });
+    return stage;
+  };
+
+  try {
+    const animated = makeStage(false);
+    animated.startLoop();
+    assert.equal(pending(), 1, "the loop should queue exactly one frame");
+
+    animated.setReducedMotion(true);
+    assert.equal(animated.frames, 1, "switching the preference on draws one settled frame");
+    assert.equal(pending(), 0, "and leaves nothing queued behind it");
+    assert.equal(animated.frameId, null, "the loop is fully stopped, not just paused");
+
+    animated.frames = 0;
+    animated.setState("thinking");
+    assert.equal(animated.frames, 1, "a state change still redraws, so the stage reports state");
+
+    animated.frames = 0;
+    animated.setSuspended(true);
+    animated.setSuspended(false);
+    assert.equal(animated.frames, 1, "resuming redraws instead of leaving a blank stage");
+
+    animated.setReducedMotion(false);
+    assert.equal(pending(), 1, "turning the preference off resumes the loop");
+
+    // The load-time path, and the one that regressed: the preference is already
+    // on before the stage ever starts, which is the common case (the user set it
+    // in their operating system long ago). Nothing may be queued at all.
+    queued.length = 0;
+    const settled = makeStage(true);
+    settled.startLoop();
+    assert.equal(settled.frames, 1, "a stage starting reduced draws one settled frame");
+    assert.equal(pending(), 0, "and never queues a loop in the first place");
+    assert.equal(settled.frameId, null);
+  } finally {
+    window.requestAnimationFrame = realRaf;
+    window.cancelAnimationFrame = realCancel;
+  }
+  results.push(["PASS", "reduced motion stops the 3D loop and still reports state"]);
+} catch (error) {
+  results.push(["FAIL", `reduced motion stops the 3D loop and still reports state -> ${error.message}`]);
+}
+
+// --------------------------------------------------------------------------- //
+// The skip link: first in the tab order, and aimed at something focusable.
+// --------------------------------------------------------------------------- //
+
+try {
+  const focusable = [...document.querySelectorAll(
+    'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )];
+  const skip = document.querySelector(".skip-link");
+  assert.ok(skip, "the skip link should be in the shell");
+  assert.equal(focusable[0], skip, "and it should be the first focusable element");
+
+  const target = document.querySelector(skip.getAttribute("href"));
+  assert.ok(target, "its target should exist");
+  assert.ok(target.hasAttribute("tabindex"), "and it must be able to take focus");
+  assert.equal(target.id, "composer");
+  results.push(["PASS", "skip link is first in the tab order and targets a focusable composer"]);
+} catch (error) {
+  results.push(["FAIL", `skip link is first in the tab order and targets a focusable composer -> ${error.message}`]);
 }
 
 let failed = 0;

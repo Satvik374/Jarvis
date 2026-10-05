@@ -16,20 +16,26 @@ import time
 @contextmanager
 def _hide_hud_for_capture():
     """Temporarily hide the Floating HUD so screen captures never capture the HUD overlay."""
+    restore = None
     try:
         from ..hud import get_hud_controller
         controller = get_hud_controller()
         if controller and controller.overlay and controller.overlay._running:
             if controller.is_hud_visible():
+                restore = controller
                 controller.hide_hud_sync(timeout=0.08)
-                try:
-                    yield
-                finally:
-                    controller.show_hud_sync(timeout=0.08)
-                return
     except Exception:
         pass
-    yield
+    # Yield exactly once. Catching exceptions across yield would swallow the
+    # caller's error and attempt a second yield, breaking contextmanager.
+    try:
+        yield
+    finally:
+        if restore is not None:
+            try:
+                restore.show_hud_sync(timeout=0.08)
+            except Exception:
+                pass  # an optional HUD must not break screenshot capture
 
 
 @dataclass
@@ -70,13 +76,11 @@ def capture(monitor: int = 1) -> Screenshot:
     Temporarily hides the Floating HUD overlay so screenshots never capture it.
     If Shadow Desktop mode is active, captures the isolated shadow workspace.
     """
-    try:
-        from ..desktop import is_shadow_enabled, get_shadow_capture
-        if is_shadow_enabled():
-            img = get_shadow_capture().capture_shadow_desktop()
-            return Screenshot(image=img, width=img.width, height=img.height)
-    except Exception:
-        pass
+    from ..desktop import is_shadow_enabled, get_shadow_capture
+    if is_shadow_enabled():
+        # A failed isolated capture must never leak the primary desktop.
+        img = get_shadow_capture().capture_shadow_desktop()
+        return Screenshot(image=img, width=img.width, height=img.height)
 
     with _hide_hud_for_capture():
         try:
@@ -93,15 +97,15 @@ def capture(monitor: int = 1) -> Screenshot:
         except Exception:
             pass
 
-    try:
-        from PIL import ImageGrab  # type: ignore
+        try:
+            from PIL import ImageGrab  # type: ignore
 
-        img = ImageGrab.grab().convert("RGB")
-        return Screenshot(image=img, width=img.width, height=img.height)
-    except Exception:
-        from PIL import Image  # type: ignore
-        img = Image.new("RGB", (1920, 1080), color=(18, 24, 38))
-        return Screenshot(image=img, width=img.width, height=img.height)
+            img = ImageGrab.grab().convert("RGB")
+            return Screenshot(image=img, width=img.width, height=img.height)
+        except Exception:
+            from PIL import Image  # type: ignore
+            img = Image.new("RGB", (1920, 1080), color=(18, 24, 38))
+            return Screenshot(image=img, width=img.width, height=img.height)
 
 
 def capture_to(path: str | Path, monitor: int = 1) -> Screenshot:

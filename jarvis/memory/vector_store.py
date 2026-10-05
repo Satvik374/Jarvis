@@ -25,7 +25,7 @@ class MemoryRecord:
     id: str
     content: str
     category: str = "fact"
-    doc_type: str = "fact"  # 'fact', 'learned_plan', 'chat', 'system'
+    doc_type: str = "fact"  # 'fact', 'note', 'chat', 'system'
     metadata: dict[str, Any] = field(default_factory=dict)
     embedding: Optional[List[float]] = None
     created_at: str = ""

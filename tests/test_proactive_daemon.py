@@ -231,78 +231,27 @@ class ProactiveDaemonEngineTests(unittest.TestCase):
         self.assertEqual(len(fired), 1)
         self.assertEqual(fired[0].id, "task_rule")
 
-    def test_macro_dispatch_uses_player_and_reports_failure(self):
-        from jarvis.macro import MacroManager, MacroPlayer
-
+    def test_stop_cancels_actions_waiting_for_desktop(self):
+        runner = Mock()
         daemon = ProactiveDaemon(
             cfg=Config(daemon=DaemonConfig(voice_announcements=False)),
-            rules_path=self.rules_file,
+            task_runner=runner, rules_path=self.rules_file,
         )
-        manager = MacroManager(Path(self.tmp_dir.name) / "macros")
         rule = EventRule(
-            id="macro", name="Macro", trigger_type=EventType.FILE_DROPPED,
-            action_type="macro", action_target="saved_macro",
+            id="queued", name="Queued", trigger_type=EventType.FILE_DROPPED,
+            action_type="task", action_target="must not run",
         )
+
+        @contextmanager
+        def desktop_after_stop():
+            daemon.stop()
+            yield
+
         with patch("jarvis.browser_worker.emit"), \
-             patch("jarvis.macro.manager.get_macro_manager", return_value=manager), \
-             patch.object(MacroPlayer, "play", return_value={"ok": False, "message": "Macro not found"}) as play, \
-             patch("jarvis.daemon.engine.log.warn") as warn:
+             patch("jarvis.scheduler.desktop", desktop_after_stop):
             daemon._dispatch_action(rule, Event(type=EventType.FILE_DROPPED, title="Test", message="Test event"))
             self.thread.call_args.kwargs["target"]()
-            play.assert_called_once_with("saved_macro", cancel_event=daemon._stop_event)
-            self.assertIn("Macro not found", warn.call_args.args[0])
-
-    def test_macro_dispatch_loads_saved_macro_by_name(self):
-        from jarvis.macro import Macro, MacroManager, MacroPlayer, MacroStep
-
-        daemon = ProactiveDaemon(
-            cfg=Config(daemon=DaemonConfig(voice_announcements=False)),
-            rules_path=self.rules_file,
-        )
-        manager = MacroManager(Path(self.tmp_dir.name) / "macros")
-        manager.save_macro(Macro(
-            name="saved_macro", description="Test macro",
-            steps=[MacroStep(action="type", args={"text": "test"})],
-        ), sync_memory=False)
-        with patch("jarvis.browser_worker.emit"), \
-             patch("jarvis.macro.manager.get_macro_manager", return_value=manager), \
-             patch.dict("sys.modules", {"pyautogui": Mock(PAUSE=0.1)}), \
-             patch("jarvis.macro.player.time.sleep"), \
-             patch.object(MacroPlayer, "_execute_step") as execute:
-            daemon._dispatch_action(
-                EventRule(id="saved", name="Saved", trigger_type=EventType.FILE_DROPPED,
-                          action_type="macro", action_target="saved_macro"),
-                Event(type=EventType.FILE_DROPPED, title="Test", message="Test event"),
-            )
-            self.thread.call_args.kwargs["target"]()
-            execute.assert_called_once()
-            self.assertEqual(execute.call_args.args[0].args, {"text": "test"})
-
-    def test_stop_cancels_actions_waiting_for_desktop(self):
-        for action_type in ("task", "macro"):
-            with self.subTest(action_type=action_type):
-                runner = Mock()
-                daemon = ProactiveDaemon(
-                    cfg=Config(daemon=DaemonConfig(voice_announcements=False)),
-                    task_runner=runner, rules_path=self.rules_file,
-                )
-                rule = EventRule(
-                    id="queued", name="Queued", trigger_type=EventType.FILE_DROPPED,
-                    action_type=action_type, action_target="must not run",
-                )
-
-                @contextmanager
-                def desktop_after_stop():
-                    daemon.stop()
-                    yield
-
-                with patch("jarvis.browser_worker.emit"), \
-                     patch("jarvis.scheduler.desktop", desktop_after_stop), \
-                     patch("jarvis.macro.manager.get_macro_manager") as get_manager:
-                    daemon._dispatch_action(rule, Event(type=EventType.FILE_DROPPED, title="Test", message="Test event"))
-                    self.thread.call_args.kwargs["target"]()
-                    runner.assert_not_called()
-                    get_manager.assert_not_called()
+            runner.assert_not_called()
 
     def test_stopped_daemon_does_not_dispatch(self):
         daemon = ProactiveDaemon(

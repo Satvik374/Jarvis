@@ -8,6 +8,7 @@ Usage:
   python run.py --check              # environment / dependency check
   python run.py --backend ollama --model ornith:9b "..."
   python run.py --wake               # hands-free: say "Hey Jarvis" to command
+  python run.py --gemini-live        # browser + Gemini 3.8 Live voice (Gemini API key)
 """
 
 from __future__ import annotations
@@ -59,13 +60,29 @@ import os
 
 
 from jarvis.config import load_config
+from jarvis.providers import kind_of, label_for, provider_for, same_provider
 from jarvis.utils import logging as log
+
+
+def exit_status(code: object) -> int:
+    """A status ``os._exit`` can actually take, for whatever ``code`` came back.
+
+    Windows reports a faulting child as an NTSTATUS code - ``0xC0000005`` for an
+    access violation - and ``os._exit`` takes a C int, so passing 3221225477
+    raised ``OverflowError`` *inside the shutdown path*: a crashed runtime
+    surfaced as "Fatal error: Python int too large to convert to C int", which
+    named neither the fault nor the code that caused it.  Anything a C int
+    cannot hold becomes a plain 1 - still a failure, just one we can report.
+    """
+    if not isinstance(code, int):
+        return 0
+    return code if -0x80000000 <= code <= 0x7FFFFFFF else 1
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Jarvis - local agentic desktop assistant")
     parser.add_argument("task", nargs="*", help="a task to run once, then exit")
-    parser.add_argument("--backend", help="override brain backend (ollama/openai/openrouter/anthropic/llamacpp)")
+    parser.add_argument("--backend", help="override brain backend (ollama/openai/openrouter/omniroute/anthropic/llamacpp)")
     parser.add_argument("--model", help="override model name")
     parser.add_argument("--adapter", help="path to a trained LoRA adapter (hf backend)")
     parser.add_argument("--base-url", dest="base_url", help="override backend base URL")
@@ -79,6 +96,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--live-voice", dest="live_voice", help="override live voice name (Aoede/Puck/Charon/Kore/Fenrir)")
     parser.add_argument("--terminal-live", dest="terminal_live", action="store_true",
                         help="launch Live Voice Supervisor in the terminal console rather than the browser")
+    parser.add_argument("--gemini-live", dest="gemini_live", action="store_true",
+                        help="open the browser straight into Gemini Live voice on the Gemini 3.8 "
+                             "live model, authenticating with a Gemini API key rather than Vertex ADC")
+    parser.add_argument("--gemini-live-key", dest="gemini_live_key", metavar="KEY",
+                        help="with --gemini-live: use this Gemini API key instead of the one in .env")
 
     parser.add_argument("--wake", action="store_true", help='launch straight into hands-free mode: say "Hey Jarvis" to command')
     parser.add_argument("--confirm", action="store_true", help="confirm each action")
@@ -132,6 +154,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="with --remote-agent, force unattended execution for this launch")
     args = parser.parse_args(argv)
 
+    if args.gemini_live and args.terminal_live:
+        # Both answer "where does live voice run", and the browser and the
+        # terminal client are different transports, not two settings of one.
+        parser.error("--gemini-live opens the browser; drop --terminal-live")
+
     remove_device = args.remote_remove_pair
     if args.remove:
         operation, device = args.remove
@@ -162,12 +189,36 @@ def main(argv: list[str] | None = None) -> int:
         set_shadow_enabled(True)
     if args.voice:
         cfg.voice_enabled = True
-    if args.live:
+    if args.live or args.gemini_live:
         cfg.live_voice.enabled = True
+    if args.gemini_live:
+        # One flag for the shipped experience: Gemini Live voice in the browser,
+        # on the 3.8 live model, authenticated with a Developer API key rather
+        # than Vertex ADC. The explicit --live-model / --live-voice overrides
+        # below still win over what is pinned here.
+        from jarvis.live import gemini_live
+
+        cfg.live_voice.provider = "gemini"
+        cfg.live_voice.backend = "api_key"
+        cfg.live_voice.model = gemini_live.DEFAULT_MODEL
+        if args.gemini_live_key:
+            cfg.live_voice.api_key = args.gemini_live_key
     if args.live_model:
         cfg.live_voice.model = args.live_model
     if args.live_voice:
         cfg.live_voice.voice_name = args.live_voice
+    if args.gemini_live:
+        # Export the pinned session. Setting them on this cfg is not enough:
+        # the page and the live relay each re-read the config from the
+        # environment, and .env outranks config.yaml - which ships the Fish
+        # engine. Without this the terminal would announce a Gemini session
+        # while the browser opened a different engine entirely.
+        os.environ["JARVIS_LIVE_PROVIDER"] = cfg.live_voice.provider
+        os.environ["JARVIS_LIVE_BACKEND"] = cfg.live_voice.backend
+        os.environ["JARVIS_LIVE_MODEL"] = cfg.live_voice.model
+        os.environ["JARVIS_LIVE_VOICE"] = cfg.live_voice.voice_name
+        if args.gemini_live_key:
+            os.environ["JARVIS_LIVE_API_KEY"] = args.gemini_live_key
 
     if args.wake:
         cfg.wake_enabled = True
@@ -281,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
             log.error(f"Azure Speech synthesis failed: {exc}")
             return 1
 
-    if args.browser:
+    if args.browser and not args.gemini_live:
         # The browser is a presentation layer over the regular terminal REPL.
         # Rebuild only the existing runtime overrides for the child session;
         # positional words are submitted as its first interactive task.
@@ -306,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         initial_task = " ".join(args.task).strip() or None
         return run_browser(child_args=child_args, initial_task=initial_task)
 
-    if (args.live or cfg.live_voice.enabled) and not getattr(args, "terminal_live", False):
+    if (args.live or args.gemini_live or cfg.live_voice.enabled) and not getattr(args, "terminal_live", False):
         child_args: list[str] = []
         for flag, value in (
             ("--backend", args.backend),
@@ -325,6 +376,8 @@ def main(argv: list[str] | None = None) -> int:
 
         from jarvis.browser import run_browser
         initial_task = " ".join(args.task).strip() or None
+        if args.gemini_live:
+            _announce_gemini_live(cfg)
         return run_browser(child_args=child_args, initial_task=initial_task, live_voice=True)
 
     if args.live or cfg.live_voice.enabled:
@@ -379,6 +432,33 @@ def main(argv: list[str] | None = None) -> int:
 
     from jarvis.console import repl
     return repl(cfg)
+
+
+def _announce_gemini_live(cfg) -> None:
+    """Say which live session is about to open, and with which credential.
+
+    The page repeats this once it loads, but the terminal is where the command
+    was typed: an .env that overrides the model, or a key that is missing
+    altogether, is worth one line before the browser takes the screen. The model
+    named here is the one that will *open*, not the configured one: a model
+    measured ignoring audio on this key is stepped over by the relay, and
+    promising the configured name would be a small lie the user cannot check.
+    """
+    from jarvis.live import gemini_live, readiness
+
+    live = cfg.live_voice
+    key = readiness.gemini_api_key(cfg)
+    opening = gemini_live.preferred_model(live, key)
+    log.info(f"Gemini Live voice in your browser: {opening} (voice {live.voice_name})")
+    if key and opening != live.model:
+        log.info(
+            f"  {live.model} is configured but ignored audio on this key; "
+            f"opening {opening} instead"
+        )
+    if not key:
+        log.warn("No Gemini API key found for live voice.")
+        log.info("  create a free key at https://aistudio.google.com/apikey, then set")
+        log.info("  JARVIS_LIVE_API_KEY in .env, or pass --gemini-live-key <key>")
 
 
 def _run_remote_mode(args, cfg) -> int:
@@ -465,29 +545,39 @@ def run_check(cfg) -> int:
 
     print()
     log.info(f"backend = {cfg.brain.backend}, model = {cfg.brain.model}")
-    if cfg.brain.backend == "gemini":
+    # Every alias question is answered by the provider table: spelling, which
+    # family a name belongs to, and whether it has a key to report. The sets
+    # that used to be written out here had already drifted - the foundry one
+    # omitted "gpt-6", which the factory accepts, so --check said nothing at
+    # all about that backend.
+    provider = provider_for(cfg.brain.backend)
+    kind = kind_of(cfg.brain.backend)
+    if kind == "gemini":
         if cfg.brain.api_key:
             log.ok(f"Gemini API key configured for model {cfg.brain.model}")
         else:
             log.info(f"Gemini Vertex AI ADC backend for model {cfg.brain.model}")
-    elif cfg.brain.backend in {"openrouter", "openai"}:
+    elif provider is not None and provider.kind == "openai" and provider.api_key_env:
+        label = label_for(cfg.brain.backend)
         if cfg.brain.api_key:
             masked = cfg.brain.api_key[:8] + "..." + cfg.brain.api_key[-4:] if len(cfg.brain.api_key) > 12 else "***"
-            log.ok(f"{cfg.brain.backend.title()} API key configured ({masked}) for model {cfg.brain.model}")
+            log.ok(f"{label} API key configured ({masked}) for model {cfg.brain.model}")
         else:
-            log.warn(f"No API key configured for {cfg.brain.backend} backend.")
-        if cfg.brain.backend == "openrouter":
+            log.warn(f"No API key configured for {label} backend.")
+        if same_provider(cfg.brain.backend, "openrouter"):
             _check_openrouter(cfg)
-    elif cfg.brain.backend == "ollama":
+        elif same_provider(cfg.brain.backend, "omniroute"):
+            _check_omniroute(cfg)
+    elif kind == "ollama":
         _check_ollama(cfg)
-    elif cfg.brain.backend in {"codex", "openai-codex", "chatgpt"}:
+    elif kind == "codex":
         from jarvis.auth import codex_oauth
         tokens = codex_oauth.load_tokens()
         if tokens.get("access_token"):
             log.ok(f"OpenAI Codex OAuth session active (Account: {tokens.get('chatgpt_account_id') or 'detected'}) for model {cfg.brain.model}")
         else:
             log.warn("OpenAI Codex session not found. Run 'python run.py --codex-login' to sign in with ChatGPT.")
-    elif cfg.brain.backend in {"foundry", "azure", "azure-foundry", "azure_foundry", "foundry-agent"}:
+    elif kind == "foundry":
         endpoint = getattr(cfg.brain, "foundry_endpoint", None) or cfg.brain.base_url or "https://satviksingh-resource.services.ai.azure.com/api/projects/satviksingh"
         agent = getattr(cfg.brain, "foundry_agent_name", None) or cfg.brain.model or "gpt-6"
         version = getattr(cfg.brain, "foundry_agent_version", None) or "1"
@@ -659,20 +749,20 @@ def _check_openrouter(cfg) -> None:
     slug that OpenRouter has retired all look equally healthy in config.yaml.
     Both answers are one unauthenticated-friendly GET away.
     """
-    import requests
+    from jarvis.providers import (label_for, probe, provider_error_message,
+                                  provider_for, report_model)
 
-    from jarvis.agent.brain import provider_error_message
-
-    base = (cfg.brain.base_url or "https://openrouter.ai/api/v1").rstrip("/")
-    key = cfg.brain.api_key or os.environ.get("OPENROUTER_API_KEY", "")
+    provider = provider_for(cfg.brain.backend) or provider_for("openrouter")
+    base = (cfg.brain.base_url or provider.base_url).rstrip("/")
+    key = cfg.brain.api_key or os.environ.get(provider.api_key_env, "")
     if not key:
-        log.info("set OPENROUTER_API_KEY in .env, or ':secret set OPENROUTER_API_KEY sk-or-...'")
+        log.info(f"set {provider.api_key_env} in .env, or "
+                 f"':secret set {provider.api_key_env} sk-or-...'")
         return
 
-    try:
-        r = requests.get(f"{base}/key", headers={"Authorization": f"Bearer {key}"}, timeout=15)
-    except Exception as exc:
-        log.warn(f"OpenRouter unreachable at {base}: {exc}")
+    r, why = probe(f"{base}/key", headers={"Authorization": f"Bearer {key}"}, timeout=15)
+    if r is None:
+        log.warn(f"OpenRouter unreachable at {base}: {why}")
         return
     if r.status_code == 401:
         log.warn("OpenRouter rejected the key (401) - it is wrong, revoked, or truncated")
@@ -689,20 +779,21 @@ def _check_openrouter(cfg) -> None:
     else:
         log.ok(f"OpenRouter key accepted ({tier})")
 
+    cat, why = probe(f"{base}/models", timeout=15)
+    if cat is None:
+        log.warn(f"could not read the OpenRouter model catalogue: {why}")
+        return
     try:
-        catalogue = requests.get(f"{base}/models", timeout=15).json().get("data", [])
+        catalogue = cat.json().get("data", [])
     except Exception as exc:
         log.warn(f"could not read the OpenRouter model catalogue: {exc}")
         return
 
-    match = next((m for m in catalogue if str(m.get("id")) == cfg.brain.model), None)
-    if match is None:
-        close = [str(m.get("id")) for m in catalogue if cfg.brain.model.split("/")[-1].split(":")[0] in str(m.get("id"))]
-        log.warn(f"model '{cfg.brain.model}' is not in OpenRouter's catalogue "
-                 f"({len(catalogue)} models). Did the slug change?")
-        if close:
-            log.info(f"similar: {', '.join(sorted(close)[:6])}")
+    if not report_model(cfg.brain.model, catalogue,
+                        label=label_for(cfg.brain.backend),
+                        tail=". Did the slug change?"):
         return
+    match = next(m for m in catalogue if str(m.get("id")) == cfg.brain.model)
 
     arch = match.get("architecture") or {}
     inputs = arch.get("input_modalities") or ["text"]
@@ -714,11 +805,61 @@ def _check_openrouter(cfg) -> None:
                  f"screenshot would be rejected. Set JARVIS_VISION=0 (or '/vision off').")
 
 
-def _check_ollama(cfg) -> None:
-    try:
-        import requests  # type: ignore
+def _check_omniroute(cfg) -> None:
+    """Ask the local OmniRoute gateway whether it is up, whether this key is
+    accepted, and whether the configured model (usually an ``auto/*`` combo) is
+    one it actually routes.
 
-        r = requests.get(f"{cfg.brain.base_url}/api/tags", timeout=3)
+    A dead gateway is the one failure a *local* provider adds over a hosted one:
+    the endpoint is on this machine, so "the key is configured" would otherwise
+    be reported for a brain that cannot answer a single question.
+    """
+    from jarvis.providers import label_for, probe, provider_for, report_model
+
+    provider = provider_for(cfg.brain.backend) or provider_for("omniroute")
+    base = (cfg.brain.base_url or provider.base_url).rstrip("/")
+    key = cfg.brain.api_key or os.environ.get(provider.api_key_env, "")
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    r, why = probe(f"{base}/models", headers=headers, timeout=8)
+    if r is None:
+        log.warn(f"OmniRoute gateway unreachable at {base}: {why}")
+        log.info("  start OmniRoute, then re-run: python run.py --check")
+        return
+    if r.status_code == 401:
+        log.warn("OmniRoute rejected the key (401) - create one in the OmniRoute "
+                 "dashboard and set OMNIROUTE_API_KEY in .env")
+        return
+    if not r.ok:
+        log.warn(f"OmniRoute {base}/models returned {r.status_code}")
+        return
+
+    try:
+        catalogue = (r.json() or {}).get("data", []) or []
+    except Exception as exc:
+        # A 200 whose body is not JSON - a proxy or captive portal answering for
+        # the gateway. The openrouter checker wraps this same parse; without the
+        # guard a --check run dies with a traceback instead of a warning.
+        log.warn(f"OmniRoute {base}/models answered 200 with a body that is not JSON: {exc}")
+        return
+    log.ok(f"OmniRoute gateway up at {base} ({len(catalogue)} models)")
+    if not key:
+        log.warn(f"no {provider.api_key_env} set - the gateway may reject the "
+                 f"brain's requests")
+    report_model(cfg.brain.model, catalogue,
+                 label=label_for(cfg.brain.backend))
+
+
+def _check_ollama(cfg) -> None:
+    from jarvis.providers import probe
+
+    try:
+        # The reachability step is the shared one; only Ollama's answer - a list
+        # of pulled tags - is Ollama's own. The wording below is unchanged: an
+        # unreachable server and a reply that cannot be read were always
+        # reported as the same thing here.
+        r, why = probe(f"{cfg.brain.base_url}/api/tags", timeout=3)
+        if r is None:
+            raise OSError(why)
         tags = [m["name"] for m in r.json().get("models", [])]
         log.ok(f"Ollama up at {cfg.brain.base_url}; models: {tags or '(none pulled)'}")
         if cfg.brain.model not in tags and not any(
@@ -736,7 +877,7 @@ if __name__ == "__main__":
         import os, sys
         sys.stdout.flush()
         sys.stderr.flush()
-        os._exit(code if isinstance(code, int) else 0)
+        os._exit(exit_status(code))
     except KeyboardInterrupt:
         print()
         import os, sys
@@ -747,7 +888,7 @@ if __name__ == "__main__":
         import os, sys
         sys.stdout.flush()
         sys.stderr.flush()
-        os._exit(exc.code if isinstance(exc.code, int) else 0)
+        os._exit(exit_status(exc.code))
     except Exception as exc:
         log.error(f"Fatal error: {exc}")
         import os, sys

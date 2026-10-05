@@ -1,4 +1,4 @@
-"""Unit tests for Jarvis Stop / Cancellation functionality across Agent, HUD, and Macros."""
+"""Unit tests for Jarvis Stop / Cancellation functionality across Agent and HUD."""
 
 import threading
 import time
@@ -8,8 +8,6 @@ from unittest.mock import Mock, patch
 from jarvis.config import Config
 from jarvis.agent.loop import Agent, cancel_active_agent, get_active_agent
 from jarvis.hud.controller import HudController
-from jarvis.macro.manager import Macro, MacroStep, MacroManager
-from jarvis.macro.player import MacroPlayer
 
 
 class StopCancellationTests(unittest.TestCase):
@@ -57,35 +55,6 @@ class StopCancellationTests(unittest.TestCase):
 
         self.assertIn("cancelled", res.lower())
         self.assertEqual(step_count, 1)
-
-    def test_03_agent_cancellation_during_fast_path_macro(self):
-        """Test that fast-path macro playback aborts immediately when cancel_event is set."""
-        brain = Mock()
-        agent = Agent(brain, self.cfg)
-
-        macro_mgr = Mock(spec=MacroManager)
-        macro = Macro(
-            name="long_macro",
-            description="open app and perform macro",
-            steps=[MacroStep(action="wait", args={"seconds": 5.0}) for _ in range(10)]
-        )
-        macro_mgr.find_matching_macro.return_value = (macro, {}, 0.99)
-        agent.macro_mgr = macro_mgr
-
-        player = Mock(spec=MacroPlayer)
-
-        def mock_play(m, speed=1.0, params=None, cancel_event=None):
-            if cancel_event:
-                cancel_event.set()
-            return {"ok": False, "message": "Playback interrupted by user cancel.", "steps_executed": 1}
-
-        player.play = mock_play
-        agent.macro_player = player
-
-        res = agent.run("open app and perform macro")
-
-
-        self.assertIn("cancelled", res.lower())
 
     def test_04_hud_interrupt_stops_active_agent_and_silences_voice(self):
         """Test that HudController.interrupt() cancels the active agent and silences speech."""

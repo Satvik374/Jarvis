@@ -53,14 +53,6 @@ class TaskTelemetryTrackerTests(unittest.TestCase):
         self.assertEqual(self.tracker.status, "running")
         self.assertEqual(self.tracker.active_task, "create snake game")
 
-        # Plan event
-        self.tracker.update_event({
-            "event": "plan_start",
-            "plan_name": "Direct Attempt",
-            "plan_description": "Write HTML and JavaScript",
-        })
-        self.assertEqual(self.tracker.current_plan, "Direct Attempt")
-
         # Action event
         self.tracker.update_event({
             "event": "step_action",

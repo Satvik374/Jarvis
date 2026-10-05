@@ -33,6 +33,11 @@ INPUT_PREFIX = "__JARVIS_BROWSER_INPUT64__:"
 TOOL_PREFIX = "__JARVIS_BROWSER_TOOL__:"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _bridge_installed = False
+#: Set from the browser interrupt path to leave microphone-only modes. The
+#: capture loop checks these events between short microphone reads so STOP and
+#: END SESSION can return the child to its REPL prompt.
+_wake_stop = threading.Event()
+_auto_stop = threading.Event()
 _emit_lock = threading.Lock()
 _speech_lock = threading.Lock()
 _speech_generation = 0
@@ -389,8 +394,11 @@ def _install_speech_bridge(voice_module: Any) -> None:
         if getattr(voice_module, "is_live_mode_active", lambda: False)():
             return None
         duration, envelope = _wav_profile(data)
-        audio_b64 = f"data:audio/wav;base64,{base64.b64encode(data).decode('ascii')}" if data else ""
-        generation = _begin_speech(duration, envelope, _wav_spectrogram(data), audio=audio_b64)
+        # This machine's own speaker is the voice: ``original_play`` below plays
+        # the WAV. The page only gets the envelope and spectrum to animate - not
+        # the audio, because handing it the WAV as well made every reply sound
+        # twice, once from the terminal runtime and once from the browser tab.
+        generation = _begin_speech(duration, envelope, _wav_spectrogram(data))
         try:
             result = original_play(data, wait)
         except Exception:
@@ -663,6 +671,49 @@ def install_event_bridge() -> None:
 
     console._command = _browser_command
 
+    # Hands-free mode ("/wake") runs the console's wake loop in this runtime, but
+    # the page cannot read the console's text and has no Ctrl+C to leave it with.
+    # So the mode announces itself as an event (which is what the page needs to
+    # offer STOP at all) and the loop is handed the stop event the interrupt path
+    # sets - without it a `/wake` from the page parks the session on the
+    # microphone with no way back to a prompt.
+    _original_wake_loop = console._wake_loop
+
+    def _browser_wake_loop(agent: Any, cfg: Any, announce: bool = True) -> None:
+        _wake_stop.clear()
+        emit("wake_mode", active=True)
+        emit(
+            "activity",
+            kind="phase",
+            message='Hands-free mode on - say "Hey Jarvis" (STOP to exit)',
+        )
+        try:
+            _original_wake_loop(agent, cfg, announce=announce, stop_event=_wake_stop)
+        finally:
+            _wake_stop.clear()
+            emit("wake_mode", active=False)
+
+    console._wake_loop = _browser_wake_loop
+
+    _original_voice_loop = console._voice_loop
+
+    def _browser_voice_loop(agent: Any, cfg: Any, announce: bool = True, **kwargs: Any) -> None:
+        if not kwargs.get("auto_mode"):
+            return _original_voice_loop(agent, cfg, announce=announce, **kwargs)
+        _auto_stop.clear()
+        emit("auto_mode", active=True)
+        emit("activity", kind="phase",
+             message="Auto voice mode on - speak after each reply (STOP to exit)")
+        try:
+            return _original_voice_loop(
+                agent, cfg, announce=announce, stop_event=_auto_stop, **kwargs
+            )
+        finally:
+            _auto_stop.clear()
+            emit("auto_mode", active=False)
+
+    console._voice_loop = _browser_voice_loop
+
     # The agent can end its own session. The REPL notices that request on its
     # next turn, but in browser mode that turn may be a long way off: the REPL
     # is parked on a blocking read of its input pipe, which only the parent can
@@ -693,6 +744,10 @@ def install_event_bridge() -> None:
             voice.interrupt_speech()
         except Exception:
             pass
+        # Microphone-only loops need an event as well as the interrupt signal;
+        # they are not parked at the REPL prompt where stdin can stop them.
+        _wake_stop.set()
+        _auto_stop.set()
         emit("activity", kind="warn", message="Task execution stopped by user")
 
     if hasattr(signal, "SIGBREAK"):

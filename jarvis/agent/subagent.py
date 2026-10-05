@@ -241,7 +241,11 @@ def run_loop(brain: Brain, cfg: Config, system: str, initial_user: str,
     for step_i in range(1, max_steps + 1):
         try:
             with log.spinner(f"{label} (step {step_i}/{max_steps})"):
-                raw = complete_with_retry(brain, system, messages)
+                # Task-critical like the parent loop: a sub-agent that gives up
+                # early costs the whole task, so it waits out a capacity window
+                # too. No screenshot is attached here, so only the wait applies.
+                raw = complete_with_retry(brain, system, messages,
+                                          task_patience=True)
         except Exception as exc:
             return f"{label} sub-agent brain error: {exc}", False
 

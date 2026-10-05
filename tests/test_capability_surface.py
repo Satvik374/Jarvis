@@ -102,8 +102,12 @@ def test_every_declared_default_is_schema_visible():
 
 
 def test_schema_entry_count_is_stable():
-    """89 actions; adding is fine, losing one is always an incident."""
-    assert len(to_json_schema()) >= 89
+    """90 actions; adding is fine, losing one is always an incident.
+
+    The macro action was deliberately removed and the floor raised to match
+    the resulting count; any further loss still fails this test.
+    """
+    assert len(to_json_schema()) >= 90
 
 
 # --------------------------------------------------------------------------- #

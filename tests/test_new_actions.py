@@ -602,18 +602,6 @@ class CodingRoutingBugTests(unittest.TestCase):
                     "can you scroll down memory lane with me"):
             self.assertFalse(a._looks_like_task(msg), msg)
 
-    def test_memory_matches_titles_only(self):
-        memory = ("- Learned Task: Build a typing-speed test game\n"
-                  "  Successful Plan: Direct Attempt\n"
-                  "  Approach: open the editor and write the code\n")
-        # exact/fuzzy title hit -> reuse
-        self.assertTrue(Agent._memory_has(
-            "build a typing-speed test game", memory))
-        # substring of the PROSE (not the title) must NOT trigger reuse
-        self.assertFalse(Agent._memory_has("open the editor", memory))
-        self.assertFalse(Agent._memory_has("write the code", memory))
-        self.assertFalse(Agent._memory_has("", memory))
-
 
 class CharInputTests(unittest.TestCase):
     """The character-level reader: paste absorption, slash menu, Tab."""

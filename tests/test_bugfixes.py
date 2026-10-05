@@ -66,30 +66,6 @@ def test_numeric_args_still_parse_and_clamp(monkeypatch):
     assert seen["dy"] == 50          # still clamped
 
 
-# --- an unverified finish must not be written to permanent memory --------- #
-
-def test_unverified_finish_is_not_learned(tmp_path, monkeypatch):
-    from jarvis.agent.loop import Agent
-
-    cfg = Config()
-    cfg.data.collect_trajectories = False
-    agent = Agent.__new__(Agent)          # no brain/IO needed for this path
-    agent.cfg = cfg
-    agent.memory_path = tmp_path / "memory.txt"
-
-    written = []
-    monkeypatch.setattr(agent, "_append_memory",
-                        lambda *a, **k: written.append(a))
-
-    # Mirrors the reward gate in run(): only a True verdict is rewardable.
-    for verdict, expect_reward in [(True, True), (None, False), (False, False)]:
-        rewardable = verdict is True
-        if rewardable:
-            agent._append_memory("task", {"name": "p"})
-        assert bool(written) is expect_reward
-        written.clear()
-
-
 # --- chat_history_turns=0 means none, not everything ---------------------- #
 
 def test_zero_chat_history_turns_returns_nothing(tmp_path):
@@ -164,7 +140,8 @@ def test_live_vision_builds_a_brain_when_brain_is_none(monkeypatch):
     monkeypatch.setattr(brain_mod, "make_brain", fake_make_brain)
     monkeypatch.setattr(
         brain_mod, "complete_with_retry",
-        lambda brain, system, messages, image=None: "a timeline with three clips",
+        lambda brain, system, messages, image=None, **kwargs:
+            "a timeline with three clips",
     )
 
     engine = vision_mod.LiveVisionEngine()

@@ -18,6 +18,7 @@ import datetime
 import json
 from typing import Any, Dict, List, Optional
 
+from ..agent.brain import VisionState
 from . import logging as log
 from .logging import _c
 
@@ -57,12 +58,11 @@ def _last_interaction(cfg: Any, agent: Any = None) -> Optional[datetime.datetime
 
 
 def _memory_stats(agent: Any) -> Dict[str, Any]:
-    """Facts learned and plans remembered; {} when memory is unavailable."""
+    """Facts learned and graph size; {} when memory is unavailable."""
     try:
         stats = agent.memory_mgr.get_stats()
         return {
             "facts": int(stats.get("facts_count", 0)),
-            "plans": int(stats.get("learned_plans_count", 0)),
             "entities": int(stats.get("graph_entities", 0)),
             "relations": int(stats.get("graph_relations", 0)),
         }
@@ -112,28 +112,41 @@ def _proactive_rules() -> List[str]:
 
 
 def _connector_lines() -> List[str]:
-    """One human line per messenger connector; [] when unavailable."""
+    """One human line per messenger connector; [] when unavailable.
+
+    Asks for the machine-readable state, not the wording ``status()`` returns:
+    the old version was written for a dict and handed that string, so this line
+    could never render anything. It says "ready" rather than "connected"
+    because all that is known here is that the credentials are present.
+    """
     try:
         from ..tools import connectors
 
-        status = connectors.status()  # tolerant of dead connectors
+        states = connectors.states()  # tolerant of dead connectors
     except Exception as exc:
         log.debug(f"briefing: connectors unavailable: {exc}")
         return []
-    lines: List[str] = []
-    if isinstance(status, dict):
-        for name, info in status.items():
-            try:
-                unread = info.get("unread", 0) if isinstance(info, dict) else 0
-                connected = bool(info.get("connected", False)) if isinstance(info, dict) else bool(info)
-                label = str(name).replace("_", " ").title()
-                if connected and unread:
-                    lines.append(f"{unread} unread on {label}")
-                elif connected:
-                    lines.append(f"{label} connected")
-            except Exception:
-                continue
-    return lines
+    try:
+        return [f"{name} ready" for name, info in states.items()
+                if info.get("configured")]
+    except Exception:
+        return []
+
+
+def _away_report() -> str:
+    """What WhatsApp callers left word about; "" when there is nothing to say.
+
+    Reads and consumes the away assistant's report - the startup briefing is the
+    "you are back" moment, so it is the right place to say it, once. Read here
+    rather than pushed in, so a broken assistant degrades to a quiet note.
+    """
+    try:
+        from ..whatsapp_away import report
+
+        return report(mark=True)
+    except Exception as exc:
+        log.debug(f"briefing: away report unavailable: {exc}")
+        return ""
 
 
 def _friendly_delta(dt: datetime.datetime, now: datetime.datetime) -> str:
@@ -182,7 +195,36 @@ def build_briefing(cfg: Any, agent: Any = None) -> str:
     if mail:
         lines.append("Mail: " + "; ".join(mail[:2]) + ".")
 
+    away = _away_report()
+    if away:
+        lines.append(away)
+
     return " ".join(lines).strip()
+
+
+def _vision_view(cfg: Any, agent: Any) -> VisionState:
+    """The live answer, from its owner, with the setting as a fallback.
+
+    The brain is the authority - it is what pauses screenshots after a refusal -
+    so reporting ``cfg.brain.use_vision`` here would print a setting as though it
+    were a measurement. The fallback only covers the no-agent case.
+    """
+    brain = getattr(agent, "brain", None) if agent is not None else None
+    if brain is not None and hasattr(brain, "vision_state"):
+        return brain.vision_state()
+    on = bool(getattr(getattr(cfg, "brain", None), "use_vision", False))
+    return VisionState(on, on)
+
+
+def _vision_label(view: VisionState) -> str:
+    """Plain words for on / off / paused-for-a-bit, for a two-word field."""
+    if view.usable:
+        return "on"
+    if not view.configured:
+        return "off"
+    wait = (f"~{max(1, round(view.retry_in / 60))} min" if view.retry_in >= 60
+            else f"{view.retry_in}s")
+    return f"paused {wait} ({view.reason})" if view.reason else f"paused {wait}"
 
 
 def format_status_report(cfg: Any, agent: Any = None, color: bool = True) -> List[str]:
@@ -195,6 +237,7 @@ def format_status_report(cfg: Any, agent: Any = None, color: bool = True) -> Lis
     grey = (lambda s: _c(s, "grey")) if color else (lambda s: s)
     cyan = (lambda s: _c(s, "cyan")) if color else (lambda s: s)
     green = (lambda s: _c(s, "green")) if color else (lambda s: s)
+    yellow = (lambda s: _c(s, "yellow")) if color else (lambda s: s)
     out: List[str] = []
     now = datetime.datetime.now()
 
@@ -213,7 +256,6 @@ def format_status_report(cfg: Any, agent: Any = None, color: bool = True) -> Lis
     if mem:
         parts = [
             f"{mem['facts']} fact{'' if mem['facts'] == 1 else 's'}",
-            f"{mem['plans']} learned plan{'' if mem['plans'] == 1 else 's'}",
         ]
         if mem.get("entities"):
             parts.append(f"{mem['entities']} graph entities")
@@ -246,16 +288,32 @@ def format_status_report(cfg: Any, agent: Any = None, color: bool = True) -> Lis
     else:
         out.append(f"  {dim('Connections'):16}{grey('none available  (:connect)')}")
 
+    # --- While you were away ----------------------------------------------
+    try:
+        from ..whatsapp_away import report as _away, session_report as _session
+
+        # What this session has already told you (the greeting, and any live
+        # notice) plus anything not consumed yet. Read both so the dashboard shows
+        # the same caller facts the greeting showed instead of an empty line,
+        # which is all that would be left once the greeting had consumed them.
+        away = " ".join(p for p in (_session(), _away(mark=False)) if p)
+    except Exception as exc:
+        log.debug(f"status: away report unavailable: {exc}")
+        away = ""
+    if away:
+        out.append(f"  {dim('While away'):16}{away}")
+
     # --- Voice / vision / safety -----------------------------------------
     out.append("")
     voice_on = getattr(cfg, "voice_enabled", False)
-    vision_on = getattr(getattr(cfg, "brain", None), "use_vision", False)
+    vision = _vision_view(cfg, agent)
     steps = getattr(getattr(cfg, "safety", None), "max_steps", "?")
     voice_state = "on" if voice_on else "off"
-    vision_state = "on" if vision_on else "off"
+    vision_state = _vision_label(vision)
+    vision_paint = green if vision.usable else (grey if not vision.configured else yellow)
     if color:
         out.append(f"  {dim('Voice'):16}{green(voice_state) if voice_on else grey(voice_state)}"
-                   f"   {dim('Vision'):12}{green(vision_state) if vision_on else grey(vision_state)}"
+                   f"   {dim('Vision'):12}{vision_paint(vision_state)}"
                    f"   {dim('Max steps'):12}{steps}")
     else:
         # Plain-text surfaces collapse runs of spaces, so separate with dots.

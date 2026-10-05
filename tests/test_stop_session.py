@@ -376,9 +376,23 @@ def test_the_voice_tool_set_did_not_grow():
     """Excluding it keeps the published Fish agent's 65 tools valid.
 
     A new callable action here would silently make the hosted voice agent's
-    tool list stale, so the count is pinned rather than assumed.
+    tool list stale, so the count is pinned rather than assumed. Growing the
+    set is a deliberate act: bump these numbers in the same commit, then
+    re-publish the hosted agent (`python -m jarvis.live.fish_agents`) so the
+    new tool reaches the model instead of sitting in the schema unadvertised.
+
+    63/68 since `coordinates` joined - naming and finding saved click targets
+    is a one-hop lookup the voice model can use directly, and it becomes
+    voice-callable by default like any other action (see the EXCLUDED table).
+
+    64/69 since `notes` joined - reading and appending Obsidian notes is local,
+    bounded and fast, with the same shape as `memory_search` and `remember`, so
+    the EXCLUDED table has no caller-based reason to hold it back. The hosted
+    Fish agent keeps advertising its previous list until it is re-published
+    (`python -m jarvis.live.fish_agents`), which is the step that makes the new
+    tool reach the model rather than sit in the schema unadvertised.
     """
     from jarvis.live import screen_tools
 
-    assert len(direct_tools.names()) == 62
-    assert len(direct_tools.names()) + len(screen_tools.names()) == 67
+    assert len(direct_tools.names()) == 64
+    assert len(direct_tools.names()) + len(screen_tools.names()) == 69

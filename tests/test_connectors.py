@@ -328,5 +328,140 @@ class TestRegistryHandler(unittest.TestCase):
         self.assertEqual(result.message, "messages|#general|3")
 
 
+class TestWhatsAppEvents(unittest.TestCase):
+    """The inbound shapes the away assistant reads.
+
+    Field names and the ``calls`` shape are Meta's, from the user-initiated-
+    calling docs: a connect event carries the caller and an SDP offer, a
+    terminate event carries the duration, and the caller's number may be
+    omitted in favour of a business-scoped user id.
+    """
+
+    def test_a_call_connect_payload_becomes_one_call_event(self):
+        payload = {"object": "whatsapp_business_account", "entry": [
+            {"id": "1", "changes": [{"field": "calls", "value": {
+                "messaging_product": "whatsapp",
+                "contacts": [{"wa_id": "13175551399",
+                              "profile": {"name": "Ravi"}}],
+                "calls": [{"id": "wacid.ABGG", "to": "16315553601",
+                           "from": "13175551399", "event": "connect",
+                           "timestamp": "1671644824",
+                           "session": {"sdp_type": "offer", "sdp": "..."}}]}}]}]}
+
+        events = connectors.whatsapp_events(payload)
+
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event["kind"], "call")
+        self.assertEqual(event["event"], "connect")
+        self.assertEqual(event["sender"], "13175551399")
+        self.assertEqual(event["name"], "Ravi")
+        self.assertEqual(event["call_id"], "wacid.ABGG")
+        self.assertEqual(event["ts"], 1671644824)
+        self.assertEqual(event["text"], "")
+
+    def test_a_call_terminate_payload_keeps_the_duration(self):
+        payload = {"entry": [{"changes": [{"field": "calls", "value": {
+            "calls": [{"id": "wacid.1", "from": "1", "event": "terminate",
+                       "timestamp": "1749197480", "duration": 480}]}}]}]}
+
+        event = connectors.whatsapp_events(payload)[0]
+
+        self.assertEqual(event["event"], "terminate")
+        self.assertEqual(event["duration"], 480)
+
+    def test_a_message_payload_becomes_one_message_event(self):
+        payload = {"entry": [{"changes": [{"value": {
+            "contacts": [{"wa_id": "4477", "profile": {"name": "Mumma"}}],
+            "messages": [{"from": "4477", "id": "wamid.1",
+                          "timestamp": "1700000001", "type": "text",
+                          "text": {"body": "how are you?"}}]}}]}]}
+
+        event = connectors.whatsapp_events(payload)[0]
+
+        self.assertEqual(event["kind"], "message")
+        self.assertEqual(event["text"], "how are you?")
+        self.assertEqual(event["name"], "Mumma")
+        self.assertEqual(event["message_id"], "wamid.1")
+
+    def test_a_caller_identified_only_by_user_id_is_still_reachable(self):
+        payload = {"entry": [{"changes": [{"value": {
+            "contacts": [{"user_id": "BSUID", "profile": {"name": "Ravi"}}],
+            "calls": [{"id": "wacid.2", "from_user_id": "BSUID",
+                       "event": "connect", "timestamp": "1671644824"}]}}]}]}
+
+        event = connectors.whatsapp_events(payload)[0]
+
+        self.assertEqual(event["sender"], "BSUID")
+        self.assertEqual(event["name"], "Ravi")
+
+    def test_messages_and_calls_on_one_payload_both_survive(self):
+        payload = {"entry": [{"changes": [{"value": {
+            "messages": [{"from": "1", "id": "wamid.9",
+                          "timestamp": "1700000001", "text": {"body": "hi"}}],
+            "calls": [{"id": "wacid.9", "from": "1", "event": "connect",
+                       "timestamp": "1700000002"}]}}]}]}
+
+        kinds = [e["kind"] for e in connectors.whatsapp_events(payload)]
+
+        self.assertEqual(kinds, ["message", "call"])
+
+    def test_the_flat_record_a_hand_written_webhook_makes_still_works(self):
+        events = connectors.whatsapp_events(
+            {"from": "919", "text": "hi", "timestamp": "1700000000"})
+
+        self.assertEqual(events[0]["kind"], "message")
+        self.assertEqual(events[0]["text"], "hi")
+        self.assertEqual(events[0]["ts"], 1700000000)
+
+
+class TestWhatsAppTransport(unittest.TestCase):
+    """Sending, and the machine-readable state the briefing reads."""
+
+    def setUp(self):
+        connectors.invalidate()
+        self._secret_patcher = mock.patch("jarvis.security.get_secret", return_value="")
+        self._secret_patcher.start()
+
+    def tearDown(self):
+        self._secret_patcher.stop()
+
+    def test_send_refuses_without_credentials_and_names_the_variables(self):
+        with mock.patch.dict("os.environ", _NO_ENV):
+            with self.assertRaises(connectors.ConnectorError) as ctx:
+                connectors.whatsapp_send_text("1", "hello")
+        self.assertIn("WHATSAPP_TOKEN", str(ctx.exception))
+
+    def test_sending_needs_both_the_token_and_the_phone_id(self):
+        with mock.patch.dict("os.environ", dict(_NO_ENV, WHATSAPP_TOKEN="t")):
+            self.assertFalse(connectors.whatsapp_can_send())
+        with mock.patch.dict("os.environ", dict(_NO_ENV, WHATSAPP_TOKEN="t",
+                                                WHATSAPP_PHONE_ID="9")):
+            self.assertTrue(connectors.whatsapp_can_send())
+
+    def test_the_inbox_path_comes_from_here_so_the_location_has_one_owner(self):
+        with mock.patch.dict("os.environ", _NO_ENV):
+            self.assertIsNone(connectors.whatsapp_inbox_path())
+        with mock.patch.dict("os.environ", dict(_NO_ENV, WHATSAPP_INBOX="x.jsonl")):
+            self.assertEqual(connectors.whatsapp_inbox_path(), Path("x.jsonl"))
+
+    def test_states_is_machine_readable_and_agrees_with_status(self):
+        with mock.patch.dict("os.environ", _NO_ENV):
+            states = connectors.states()
+            report = connectors.status()
+        self.assertIsInstance(states, dict)
+        self.assertIn("whatsapp", states)
+        self.assertFalse(states["whatsapp"]["configured"])
+        self.assertIn("WHATSAPP_TOKEN", states["whatsapp"]["missing"])
+        self.assertIn("WHATSAPP_TOKEN", report)      # same facts, rendered
+        self.assertIn("not set up", report)
+
+    def test_states_agrees_with_configured_for_an_inbox_only_setup(self):
+        with mock.patch.dict("os.environ", dict(_NO_ENV, WHATSAPP_INBOX="x.jsonl")):
+            states = connectors.states()
+        self.assertTrue(states["whatsapp"]["configured"])
+        self.assertFalse(connectors.whatsapp_can_send())   # reading, not sending
+
+
 if __name__ == "__main__":
     unittest.main()

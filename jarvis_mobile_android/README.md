@@ -37,6 +37,15 @@ Redeploy the relay, then pair the phone again once. The claim response supplies
 the new phone-only capability. Open **Mobile Jarvis**, type a message or tap
 **Voice**. The paired computer is not contacted for these requests.
 
+To answer through the same local OmniRoute gateway the main Jarvis brain uses
+instead of Vertex, set `JARVIS_MOBILE_BACKEND=omniroute`, `OMNIROUTE_API_KEY`,
+and `JARVIS_MOBILE_OMNIROUTE_BASE_URL` on the relay (see `relay_server/README.md`).
+The phone keeps the same pairing and capability; no app rebuild is needed. Open
+the relay's `/health` afterwards: `mobile.backend` must read `omniroute` and
+`mobile.ready` must be `true`, with any failure explained there. A relay deployed
+away from the Jarvis computer cannot reach an OmniRoute on `localhost`; give it a
+reachable address or tunnel.
+
 Mobile Jarvis automatically takes a compact screen observation and accessibility
 element map at every control step. It can open apps or URLs; inspect the screen;
 tap/click; long-press; type; scroll; swipe; navigate back/home; and, only as a

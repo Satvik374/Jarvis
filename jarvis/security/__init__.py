@@ -1,8 +1,10 @@
 """Security and Credential Management for Jarvis.
 
-Exports Windows Credential Manager and DPAPI vault primitives.
+Exports Windows Credential Manager and DPAPI vault primitives, and the
+``.env`` credential catalogue the browser interface edits.
 """
 
+from . import api_keys
 from .vault import (
     CredentialVault,
     delete_secret,
@@ -15,6 +17,7 @@ from .vault import (
 )
 
 __all__ = [
+    "api_keys",
     "CredentialVault",
     "get_credential_vault",
     "get_secret",

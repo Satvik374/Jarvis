@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .config import load_config, Config
 from .agent.brain import make_brain, BrainError
+from . import providers
 from .utils import logging as log
 from .utils import voice
 from .utils.paths import state_root
@@ -42,12 +43,12 @@ _SLASH_COMMANDS = (
     ("/enhance", "AI-rewrite a rough prompt, confirm, then run it"),
     ("/paste", "attach the clipboard image/screenshot (Ctrl+V works too)"),
     ("/remember", "[fact] - store a fact in permanent memory forever"),
-    ("/memory", "list permanent memories and learned plans"),
+    ("/memory", "list permanent memories"),
     ("/status", "dashboard: last chat, memory, schedules, watchers, connections"),
     ("/help", "show all commands"),
     ("/live", "launch Real-Time Gemini 3.1 Flash Live Voice model supervisor"),
     ("/voice", "voice-ONLY mode: talk instead of typing"),
-    ("/macro", "watch & learn: record, list, or replay desktop workflows"),
+    ("/auto", "continuous listen, agent, spoken reply mode"),
     ("/secret", "Windows Credential Manager / DPAPI vault: set/get/list/migrate"),
     ("/see", "[question] - multimodal live screen & webcam visual perception"),
     ("/cam", "[snap|inspect] - physical webcam vision tools"),
@@ -410,17 +411,22 @@ def _startup(on: bool) -> None:
 
 def _preflight(cfg: Config) -> None:
     """Warn early about the most common setup gaps, with fixes."""
-    if cfg.brain.backend == "ollama":
-        try:
-            import requests  # type: ignore
-
-            requests.get(f"{cfg.brain.base_url}/api/tags", timeout=3)
-        except Exception:
+    # Reachability is one step, owned by jarvis/providers.py: the preflight and
+    # the --check path each used to carry their own request and their own idea of
+    # what a failure was.
+    backend = cfg.brain.backend
+    if providers.kind_of(backend) == "ollama":
+        if providers.probe(f"{cfg.brain.base_url}/api/tags", timeout=3)[0] is None:
             log.warn(f"Ollama not reachable at {cfg.brain.base_url}.")
             log.warn("  1) install: https://ollama.com/download")
             log.warn(f"  2) pull the model:  ollama pull {cfg.brain.model}")
             log.warn("  3) it serves automatically; then restart Jarvis.")
-    elif cfg.brain.backend in {"foundry", "azure", "azure-foundry", "azure_foundry", "foundry-agent"}:
+    elif providers.same_provider(backend, "omniroute"):
+        if providers.probe(f"{cfg.brain.base_url.rstrip('/')}/models", timeout=3)[0] is None:
+            log.warn(f"OmniRoute gateway not reachable at {cfg.brain.base_url}.")
+            log.warn(f"  start OmniRoute (it serves "
+                     f"{providers.provider_for('omniroute').base_url}), then restart Jarvis.")
+    elif providers.kind_of(backend) == "foundry":
         try:
             from azure.ai.projects import AIProjectClient
         except ImportError:
@@ -549,7 +555,7 @@ def _handle_side_agent_chat(query: str, tracker: Any, brain: Any, cfg: Config) -
         if summary["status"] == "idle":
             return "I am currently idle and ready for your next directive, sir."
         step_info = f"Step {summary['current_step']}/{summary['total_steps']}" if summary['current_step'] > 0 else "initializing"
-        act_info = f"executing '{summary['current_action']}'" if summary['current_action'] else "planning"
+        act_info = f"executing '{summary['current_action']}'" if summary['current_action'] else "getting started"
         thought_info = f" ({summary['current_thought']})" if summary['current_thought'] else ""
         return f"The Main Worker is currently executing '{summary['active_task']}' ({step_info}). It is {act_info}{thought_info}."
 
@@ -644,6 +650,16 @@ def _shutdown_repl(
             active_worker_cancel.set()
         if active_worker_thread is not None and active_worker_thread.is_alive():
             active_worker_thread.join(timeout=0.05)
+    except Exception:
+        pass
+
+    # First, before speech, the HUD or the daemon: this is the only part that
+    # talks to the outside world, so nothing new should be picked up while the
+    # rest is tearing down.
+    try:
+        from .whatsapp_away import stop_watch
+
+        stop_watch()
     except Exception:
         pass
 
@@ -755,6 +771,17 @@ def repl(cfg: Config | None = None) -> int:
         from . import daemon
         daemon.start_daemon(cfg=cfg, task_runner=_cron_runner)
 
+        # Away assistant, live: a caller who arrives while this is running gets
+        # the busy reply within seconds, and you hear about what they wanted as
+        # it happens rather than at the next start. Nothing is started when no
+        # inbound file is configured - there would be nothing to watch.
+        try:
+            from .whatsapp_away import start_watch
+
+            start_watch(cfg, getattr(agent, "brain", None))
+        except Exception as exc:
+            log.debug(f"away watch unavailable: {exc}")
+
         # Floating Mini HUD: Always-On-Top global capsule overlay & hotkeys
         def _hud_task_runner(command: str) -> str:
             log.rule(f"HUD › {command[:60]}", "cyan")
@@ -805,10 +832,22 @@ def repl(cfg: Config | None = None) -> int:
         connectors.warm(background=True)
 
         greeting = _greeting()
-        log.jarvis(f"{greeting} (':help' for commands, ':voice on' to talk, "
-                   "':wake' for hands-free, ':cron' to schedule, ':quit' to exit)")
+        log.jarvis(f"{greeting} (':help' for commands, ':auto on' for turn-based voice, "
+                   "':voice on' for full-duplex voice, ':wake' for wake-word mode, "
+                   "':cron' to schedule, ':quit' to exit)")
         # Jarvis always speaks, in every mode; voice mode only adds the mic (STT).
         voice.speak(greeting, wait=cfg.voice_enabled or cfg.wake_enabled)
+        # The away assistant: whoever called or wrote while you were out gets an
+        # answer now, in the brain's own words, and the briefing below reports
+        # who they were and what they wanted. Nobody waiting means nothing runs.
+        try:
+            from .whatsapp_away import poll_and_answer
+
+            answered = poll_and_answer(cfg, getattr(agent, "brain", None))
+            if answered:
+                log.info(answered)
+        except Exception as exc:
+            log.debug(f"away assistant unavailable: {exc}")
         # The informed part: what a real assistant would add after the hello -
         # when you last talked and what is on the schedule. Printed and spoken
         # after the hello; skipped entirely when there is nothing to report.
@@ -873,11 +912,6 @@ def repl(cfg: Config | None = None) -> int:
                 if not voice.is_live_mode_active():
                     log.jarvis(f"🎙️ [Side Agent]: {narration}")
                     voice.speak(narration, wait=False)
-            elif ev == "plan_start":
-                pname = event.get("plan_name", "")
-                if not voice.is_live_mode_active():
-                    log.jarvis(f"🎙️ [Side Agent]: Initiating plan: {pname}.")
-                    voice.speak(f"Initiating plan: {pname}.", wait=False)
             elif ev == "ask":
                 q = event.get("question", "")
                 waiting_for_user_answer[0] = True
@@ -1034,8 +1068,7 @@ def repl(cfg: Config | None = None) -> int:
                     summary = tracker.get_status_summary()
                     status_msg = (
                         f"Main Worker: {summary['status'].upper()} (Step {summary['current_step']}/{summary['total_steps']}) | "
-                        f"Action: {summary['current_action'] or 'None'} | "
-                        f"Plan: {summary['plan']}"
+                        f"Action: {summary['current_action'] or 'None'}"
                     )
                     log.info(status_msg)
                     # The full dashboard: memory, schedules, watchers,
@@ -1055,6 +1088,19 @@ def repl(cfg: Config | None = None) -> int:
                                 print(line)
                     except Exception as exc:
                         log.warn(f"status dashboard unavailable: {exc}")
+                    continue
+                if c in {"auto", "auto on", "auto off"}:
+                    if c == "auto off":
+                        log.ok("auto mode is off (typed prompt).")
+                        continue
+                    if c == "auto":
+                        log.info("usage: :auto on|off")
+                        continue
+                    try:
+                        _voice_loop(agent, cfg, full_duplex=False, auto_mode=True)
+                    except KeyboardInterrupt:
+                        print()
+                        log.ok("auto mode off; back to the prompt.")
                     continue
                 if c == "wake":
                     try:
@@ -1272,27 +1318,43 @@ def _voice_asker_for(agent: Agent):
 
 
 _VOICE_EXIT_PHRASES = {"exit voice mode", "stop voice mode", "voice off",
-                       "stop listening", "goodbye jarvis"}
+                       "stop listening", "goodbye jarvis", "auto off",
+                       "stop auto mode"}
 
 
-def _voice_loop(agent: Agent, cfg: Config, announce: bool = True) -> None:
-    """Voice-ONLY mode: Full-duplex with real-time interruption (Barge-in).
+def _voice_loop(
+    agent: Agent, cfg: Config, announce: bool = True, *,
+    full_duplex: bool | None = None, auto_mode: bool = False,
+    stop_event: threading.Event | None = None,
+) -> None:
+    """Voice-ONLY mode, optionally in strict listen-then-speak turns.
     Exit with Ctrl+C or by saying one of the exit phrases."""
-    duplex_on = getattr(cfg.voice, "full_duplex", True)
+    duplex_on = (getattr(cfg.voice, "full_duplex", True)
+                 if full_duplex is None else bool(full_duplex))
+    mode_name = "auto mode" if auto_mode else "voice mode"
     duplex_label = " (Full-Duplex Barge-in ON)" if duplex_on else ""
-    log.ok(f'voice mode ON{duplex_label} - just speak. Say "exit voice mode" or press Ctrl+C to go back.')
+    stop_hint = 'Say "stop listening" or press Ctrl+C to go back.' if auto_mode else 'Say "exit voice mode" or press Ctrl+C to go back.'
+    log.ok(f'{mode_name} ON{duplex_label} - just speak. {stop_hint}')
     if announce:
-        voice.speak("Voice mode on. I am listening.", wait=True)
+        greeting = "Auto mode on. I am listening." if auto_mode else "Voice mode on. I am listening."
+        voice.speak(greeting, wait=True)
 
     pending_wav: bytes | None = None
     while True:
+        if stop_event is not None and stop_event.is_set():
+            break
         if pending_wav:
             wav = pending_wav
             pending_wav = None
         else:
             log.info("listening...")
-            wav = voice.listen(start_timeout=30.0)
+            if stop_event is None:
+                wav = voice.listen(start_timeout=30.0)
+            else:
+                wav = voice.listen(start_timeout=30.0, stop_event=stop_event)
 
+        if stop_event is not None and stop_event.is_set():
+            break
         if not wav:
             continue                      # silence - keep waiting
         with log.spinner("transcribing"):
@@ -1302,18 +1364,20 @@ def _voice_loop(agent: Agent, cfg: Config, announce: bool = True) -> None:
             continue
         log.info(f'heard: "{task}"')
         if task.strip().lower().rstrip(".!,") in _VOICE_EXIT_PHRASES:
-            voice.speak("Voice mode off.", wait=True)
+            voice.speak("Auto mode off." if auto_mode else "Voice mode off.", wait=True)
             return
         log.rule(task[:60], "blue")
         started = time.time()
 
-        # Instant Speculative Fast Filler acknowledgment
-        from .live.speculative import get_fast_filler
+        # Keep auto mode strictly turn-based: only the completed agent reply
+        # is spoken before the microphone opens for the next user turn.
         from .live.telemetry_state import TaskTelemetryTracker
-        fast_filler = get_fast_filler(task)
-        if not voice.is_live_mode_active():
-            log.jarvis(f"🎙️ [Communicating Agent]: {fast_filler}")
-            voice.speak(fast_filler, wait=False)
+        if not auto_mode:
+            from .live.speculative import get_fast_filler
+            fast_filler = get_fast_filler(task)
+            if not voice.is_live_mode_active():
+                log.jarvis(f"🎙️ [Communicating Agent]: {fast_filler}")
+                voice.speak(fast_filler, wait=False)
 
         tracker = TaskTelemetryTracker()
         tracker.reset_for_new_task(task, max_steps=cfg.safety.max_steps)
@@ -1343,24 +1407,45 @@ def _voice_loop(agent: Agent, cfg: Config, announce: bool = True) -> None:
             voice.speak(result, wait=True)
 
 
-def _wake_loop(agent: Agent, cfg: Config, announce: bool = True) -> None:
+def _wake_loop(agent: Agent, cfg: Config, announce: bool = True,
+               stop_event: threading.Event | None = None) -> None:
     """Hands-free mode: wait for "hey jarvis", ask what's needed, listen,
     act, speak a summary - then go straight back to listening for the wake
-    word. Ctrl+C (handled by the caller) exits back to the typed prompt."""
+    word. Ctrl+C (handled by the caller) exits back to the typed prompt.
+
+    ``stop_event`` is that same exit requested from elsewhere: the browser
+    frontend has no console to press Ctrl+C in, so its STOP button and its END
+    SESSION set this event, and the loop leaves hands-free mode at the next
+    checkpoint - including mid-wait, which otherwise has no exit at all.
+    """
+    def _stopped() -> bool:
+        return stop_event is not None and stop_event.is_set()
+
     log.ok('hands-free mode ON - say "Hey Jarvis" to give a command '
            "(Ctrl+C to exit)")
     if announce:
         voice.speak("Hands free mode on. Say hey jarvis when you need me.",
                     wait=True)
     while True:
-        log.info('waiting for "Hey Jarvis"...')
-        if not voice.wait_for_wake():
+        if _stopped():
+            break
+        # Read the words, not just the meaning: the browser bridge turns this
+        # line into the LISTENING state, which is exactly what is happening - the
+        # page would otherwise sit on the last state a task left behind.
+        log.info('listening for "Hey Jarvis"...')
+        if not voice.wait_for_wake(stop_event=stop_event):
+            if _stopped():
+                break
             log.warn("wake-word listener unavailable; leaving hands-free mode.")
             return
         # sync so Jarvis's own voice never bleeds into the mic it's about to open
         voice.speak("Yes? What would you like me to do?", wait=True)
         log.info("listening... speak your command")
         wav = voice.listen(start_timeout=8.0)
+        if _stopped():
+            # A stop arriving mid-capture means the user wants out, not the
+            # half-heard command this just recorded.
+            break
         if not wav:
             voice.speak("I didn't catch that. Say hey jarvis to try again.")
             continue
@@ -1386,6 +1471,8 @@ def _wake_loop(agent: Agent, cfg: Config, announce: bool = True) -> None:
         # the wake word, so Jarvis's own summary can't trigger a false wake.
         voice.speak(result, wait=True)
         log.rule(f"done in {time.time() - started:.1f}s")
+
+    log.ok("hands-free mode off; back to the prompt.")
 
 
 def _command(cmd: str, cfg: Config) -> bool:
@@ -1545,13 +1632,13 @@ def _command(cmd: str, cfg: Config) -> bool:
             log.rule()
 
         elif sub == "sync":
-            f_count, p_count = mgr.sync_from_file()
-            log.ok(f"Synchronized memory database: {f_count} facts, {p_count} learned plans.")
+            f_count = mgr.sync_from_file()
+            log.ok(f"Synchronized memory database: {f_count} facts.")
 
         else:
             stats = mgr.get_stats()
             log.rule("JARVIS LONG-TERM MEMORY (VECTOR + GRAPH RAG)", "cyan")
-            print(f"  {_c('• Vectors / Embeddings:', 'yellow')} {stats['total_vectors']} records ({stats['facts_count']} facts, {stats['learned_plans_count']} plans)")
+            print(f"  {_c('• Vectors / Embeddings:', 'yellow')} {stats['total_vectors']} records ({stats['facts_count']} facts)")
             print(f"  {_c('• Knowledge Graph:    ', 'yellow')} {stats['graph_entities']} entities, {stats['graph_relations']} relations")
             print(f"  {_c('• SQLite DB:          ', 'grey')} {stats['db_path']}")
             print(f"  {_c('• Commands:           ', 'grey')} :memory search <q> | :memory graph [ent] | :memory sync\n")
@@ -1560,21 +1647,13 @@ def _command(cmd: str, cfg: Config) -> bool:
             p = get_default_memory_path()
             if p.exists():
                 text = p.read_text(encoding="utf-8")
-                facts, plans = parse_memory_text(text)
+                facts = parse_memory_text(text)
                 log.rule("PERMANENT FACTS", "cyan")
                 if facts:
                     for f in facts:
                         print(f"  {_c('•', 'cyan')} {f}")
                 else:
                     print(_c("  (No permanent memories stored)", "grey"))
-                log.rule("LEARNED TASK PLANS", "cyan")
-                if plans:
-                    for plan in plans[:5]:
-                        print(_c(plan, "grey"))
-                    if len(plans) > 5:
-                        print(_c(f"  ... and {len(plans) - 5} more learned plans (search with :memory search <task>)", "grey"))
-                else:
-                    print(_c("  (No learned task plans)", "grey"))
                 log.rule()
 
     elif c == "browser" or c.startswith("browser "):
@@ -1584,8 +1663,6 @@ def _command(cmd: str, cfg: Config) -> bool:
         run_live_mode(cfg)
     elif c == "voice" or c.startswith("voice "):
         _voice_command(cmd, cfg)
-    elif c == "macro" or c.startswith("macro "):
-        _macro_command(cmd, cfg)
     elif c == "secret" or c.startswith("secret ") or c == "vault" or c.startswith("vault "):
         _secret_command(cmd, cfg)
     elif c == "see" or c.startswith("see "):
@@ -1607,94 +1684,6 @@ def _command(cmd: str, cfg: Config) -> bool:
     else:
         log.warn(f"unknown command '{cmd}' (':help' for the list)")
     return False
-
-
-def _macro_command(raw: str, cfg: Config) -> None:
-    """Handle ':macro [record <name> [desc] | stop | play <name> [speed] | list | show <name> | delete <name>]'."""
-    parts = raw.strip().split(maxsplit=2)
-    sub = parts[1].lower() if len(parts) > 1 else "list"
-    arg = parts[2].strip() if len(parts) > 2 else ""
-
-    from .macro import get_macro_manager, MacroPlayer
-    from .macro.recorder import get_macro_recorder
-
-    mgr = get_macro_manager()
-    rec = get_macro_recorder(mgr)
-
-    if sub in {"record", "start", "rec"}:
-        if not arg:
-            log.warn("usage: :macro record <name> [optional description]")
-            return
-        arg_parts = arg.split(maxsplit=1)
-        name = arg_parts[0]
-        desc = arg_parts[1] if len(arg_parts) > 1 else ""
-        rec.start_recording(name=name, description=desc)
-        log.rule(f"WATCH & LEARN MACRO RECORDER: '{name}'", "yellow")
-        print("  • Jarvis is now watching your mouse clicks, keyboard typing, and window focus.")
-        print("  • Perform your desired actions across any app or desktop window.")
-        print("  • When finished, run ':macro stop' to save and learn this workflow.\n")
-
-    elif sub in {"stop", "end", "save"}:
-        if not rec.is_recording:
-            log.warn("Macro recorder is not active. Use ':macro record <name>' first.")
-            return
-        log.info("Synthesizing recorded actions into optimized macro steps...")
-        macro = rec.stop_recording(save_to_memory=True)
-        log.rule(f"LEARNED MACRO: {macro.name}", "green")
-        print(macro.format_plan())
-        log.rule()
-
-    elif sub in {"play", "run", "exec"}:
-        if not arg:
-            log.warn("usage: :macro play <name> [speed multiplier (e.g. 1.5)]")
-            return
-        arg_parts = arg.split(maxsplit=1)
-        name = arg_parts[0]
-        speed = 1.0
-        if len(arg_parts) > 1:
-            try:
-                speed = float(arg_parts[1])
-            except ValueError:
-                pass
-
-        player = MacroPlayer(mgr)
-        res = player.play(name, speed=speed)
-        if not res.get("ok"):
-            log.error(res.get("message", "Playback failed."))
-
-    elif sub in {"show", "view", "info"}:
-        if not arg:
-            log.warn("usage: :macro show <name>")
-            return
-        macro = mgr.load_macro(arg)
-        if not macro:
-            log.warn(f"Macro '{arg}' not found.")
-            return
-        log.rule(f"MACRO: {macro.name}", "cyan")
-        print(macro.format_plan())
-        log.rule()
-
-    elif sub in {"delete", "remove", "rm"}:
-        if not arg:
-            log.warn("usage: :macro delete <name>")
-            return
-        ok = mgr.delete_macro(arg)
-        if ok:
-            log.ok(f"Macro '{arg}' deleted.")
-        else:
-            log.warn(f"Macro '{arg}' not found.")
-
-    else:  # list
-        macros = mgr.list_macros()
-        log.rule("SAVED WORKFLOW MACROS (WATCH & LEARN)", "cyan")
-        if not macros:
-            print(_c("  (No macros recorded yet. Use ':macro record <name>' to record one)", "grey"))
-        else:
-            for m in macros:
-                apps = f" [{', '.join(m.target_apps)}]" if m.target_apps else ""
-                print(f"  {_c('• ' + m.name, 'yellow')}{_c(apps, 'cyan')} ({len(m.steps)} steps) - {_c(m.description or 'Custom Macro', 'grey')}")
-        print(f"\n  {_c('Commands:', 'grey')} :macro record <name> | :macro stop | :macro play <name> [speed] | :macro show <name>\n")
-        log.rule()
 
 
 def _secret_command(raw: str, cfg: Config) -> None:
@@ -2042,7 +2031,6 @@ def _hud_command(raw: str, cfg: Config) -> None:
         print(f"  • Global Toggle:  {_c(getattr(hud_cfg, 'hotkey_toggle', 'ctrl+alt+j'), 'yellow')}")
         print(f"  • Push-To-Talk:   {_c(getattr(hud_cfg, 'hotkey_voice', 'alt+v'), 'yellow')}")
         print(f"  • Live Vision:    {_c(getattr(hud_cfg, 'hotkey_vision', 'ctrl+alt+s'), 'yellow')}")
-        print(f"  • Macro Record:   {_c(getattr(hud_cfg, 'hotkey_macro', 'ctrl+alt+r'), 'yellow')}")
         print(f"\n  {_c('Commands:', 'grey')} :hud show | :hud hide | :hud toggle | :hud status\n")
         log.rule()
 

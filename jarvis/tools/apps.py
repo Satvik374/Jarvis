@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 
+from . import app_index
 
 # Common friendly names -> launch command on Windows.
 _KNOWN = {
@@ -33,13 +35,127 @@ _KNOWN = {
 }
 
 
+#: How long ``open_app`` waits for the launched app's own window to show up.
+#: Bounded, because this is spent *after* the app has started: a quick app is
+#: confirmed in ~60 ms and a slow one is reported as "still starting" rather
+#: than slept through for a second and then claimed as settled.
+_WINDOW_WAIT = 1.5
+_WINDOW_POLL = 0.06
+
+#: Names that must not be matched against the index, because their launch target
+#: needs the special handling below (browser executables, the Store Spotify).
+_SPECIAL = frozenset({"spotify", "chrome", "google chrome", "edge", "msedge",
+                      "microsoft edge"})
+
+
+def _evidence_words(*names: str) -> tuple[str, ...]:
+    """Words worth matching a window title against - long enough to be a signal.
+
+    "the", "app" and two-letter fragments appear in dozens of unrelated window
+    titles, so they would report a launch as settled on the strength of the
+    wrong window.
+    """
+    words: list[str] = []
+    for text in names:
+        for word in re.split(r"[^\w]+", str(text or "").lower()):
+            if len(word) > 2 and word not in words:
+                words.append(word)
+    return tuple(words)
+
+
+def _window_evidence(names: tuple[str, ...], timeout: float = _WINDOW_WAIT) -> str:
+    """Title of a window matching one of ``names``, or "" if none appeared.
+
+    This replaces the unconditional ``time.sleep(1.0)`` ``open_app`` used to do.
+    The window list is the only honest proof a launch worked, so the wait is
+    spent *looking* rather than sleeping: it returns the instant the window
+    exists, and gives up (returning nothing) after ``timeout``.
+    """
+    try:
+        import pygetwindow  # type: ignore  # noqa: F401
+    except Exception:
+        return ""          # no window list on this machine: nothing to wait for
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            titles = list_windows()
+        except Exception:
+            return ""
+        for title in titles:
+            lowered = title.lower()
+            if any(word in lowered for word in names):
+                return title
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(_WINDOW_POLL)
+
+
+def _shadow_evidence(mgr, words: tuple[str, ...], timeout: float = 1.0) -> str:
+    """Title of a shadow-desktop window matching one of ``words``, or "".
+
+    The shadow-desktop twin of :func:`_window_evidence`: the launch is reported
+    the moment its window exists, instead of after a flat one-second sleep, and
+    the caller's next observation is that much less likely to look at a desktop
+    that has not caught up yet. Best-effort like the rest of this path - an
+    enumeration failure simply returns nothing.
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            titles = [w.title for w in mgr.list_windows() if w.title]
+        except Exception:
+            return ""
+        for title in titles:
+            lowered = title.lower()
+            if any(word in lowered for word in words):
+                return title
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(_WINDOW_POLL)
+
+
+def _launch_report(name: str, match: "app_index.Match | None", evidence: str,
+                   verb: str = "launched") -> str:
+    """The result line: what was launched, how it was found, what proved it.
+
+    ``how`` matters to the model - "resolved via Start Menu" tells it the name it
+    chose was understood, while an unqualified "launched" on a name that resolved
+    nowhere is the failure it used to be handed as a success.
+    """
+    how = f" ({app_index.describe(match)})" if match is not None else ""
+    if evidence:
+        return f"{verb} '{name}'{how}; window '{evidence}' is up"
+    return (f"{verb} '{name}'{how}; no matching window has appeared yet - it may "
+            f"still be starting, so check the screen before acting on it")
+
+
 def open_app(name: str) -> str:
-    """Launch (or bring up) an application by friendly name or executable."""
+    """Launch (or bring up) an application by friendly name or executable.
+
+    Resolution goes through the shell's own index first (App Paths registry +
+    Start Menu shortcuts, see :mod:`jarvis.tools.app_index`): that is the list a
+    user is looking at when they search the Start menu, so a name they would
+    recognise resolves in one call and the entry that matched is named in the
+    result. The old alias table stays underneath as the fallback.
+    """
     from ..desktop import is_shadow_enabled, get_shadow_manager, ShadowDesktopManager
     from .system import open_url
 
     key = name.strip().lower()
 
+    # 1. What would this name launch? The shell's own index (App Paths registry +
+    #    Start Menu shortcuts) is tried first for every ordinary name: it is the
+    #    list Windows search shows for that name, so it resolves an installed app
+    #    in one lookup instead of the model hunting the Start menu over turns.
+    match = None
+    if key and key not in _SPECIAL:
+        try:
+            match = app_index.resolve(key)
+        except Exception:
+            match = None
+
+    # 2. The classic targets, kept for what needs them: the Store Spotify, the
+    #    browser executables, and the hand-written alias table.
     if key == "spotify":
         appdata = os.environ.get("APPDATA", "")
         localappdata = os.environ.get("LOCALAPPDATA", "")
@@ -58,30 +174,66 @@ def open_app(name: str) -> str:
     else:
         target = _KNOWN.get(key, name)
 
-    # Shadow Desktop execution
-    try:
-        if is_shadow_enabled():
+    # Shadow Desktop launches a *process*, so it gets the executable/alias
+    # target: a Start Menu shortcut is a shell object, not something to spawn in
+    # an isolated desktop.
+    shadow_target = target
+
+    if match is not None:
+        target = match.target
+
+    # Failure in the isolated workspace must never launch on the host.
+    if is_shadow_enabled():
+        try:
             mgr = get_shadow_manager()
-            if target.startswith(("http://", "https://")):
-                mgr.spawn_url(target)
+            if shadow_target.startswith(("http://", "https://")):
+                pid = mgr.spawn_url(shadow_target)
             else:
-                mgr.spawn_process(target)
-            time.sleep(1.0)
+                pid = mgr.spawn_process(shadow_target)
+            if not pid:
+                return f"could not launch '{name}' in Shadow Workspace"
+            _shadow_evidence(mgr, _evidence_words(name, match.name if match else ""))
             return f"launched '{name}' in Shadow Workspace"
-    except Exception:
-        pass
+        except Exception as exc:
+            return f"could not launch '{name}' in Shadow Workspace: {exc}"
 
     if target.startswith(("http://", "https://")):
         return open_url(target)
 
-    # Try to focus it first if a matching window already exists.
+    # Try to focus it first if a matching window already exists: one enumeration
+    # is cheaper than a launch, and it is what the user means by "open X" when X
+    # is already running.
     if focus_window(name).startswith("focused"):
         return f"focused existing '{name}'"
 
+    evidence_words = _evidence_words(name, match.name if match else "")
 
-    if target.startswith("ms-settings:") or target.startswith("http"):
+    if target.startswith("ms-settings:"):
         os.startfile(target)  # type: ignore[attr-defined]
-        return f"opened '{target}'"
+        return _launch_report(name, match, _window_evidence(evidence_words),
+                              verb="opened")
+
+    if match is not None and match.rail == "start-apps":
+        # A Microsoft Store app has no executable to start: the shell opens it
+        # through its AppsFolder namespace, by the application id the Start menu
+        # itself uses. This is what makes "open calculator" one call instead of
+        # a Start-menu search, a screenshot and a click.
+        try:
+            subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{target}"],
+                             shell=False)
+        except Exception as exc:
+            return f"could not launch '{name}': {exc}"
+        return _launch_report(name, match, _window_evidence(evidence_words))
+
+    if match is not None:
+        # A Start Menu shortcut (or an App Paths executable) launches exactly the
+        # way the shell launches it - a double-click - so shell targets work
+        # without a second interpretation step.
+        try:
+            os.startfile(target)  # type: ignore[attr-defined]
+        except Exception as exc:
+            return f"could not launch '{name}': {exc}"
+        return _launch_report(name, match, _window_evidence(evidence_words))
 
     try:
         if os.name == "nt":
@@ -89,28 +241,28 @@ def open_app(name: str) -> str:
             subprocess.Popen(["cmd", "/c", "start", "", target], shell=False)
         else:
             subprocess.Popen([target])
-        time.sleep(1.0)
-        return f"launched '{name}'"
+        return _launch_report(name, None, _window_evidence(evidence_words))
     except Exception as exc:
         # Last resort: hand it to the shell / Start.
         try:
             os.startfile(target)  # type: ignore[attr-defined]
-            return f"opened '{name}'"
+            return _launch_report(name, None, _window_evidence(evidence_words),
+                                  verb="opened")
         except Exception:
             return f"could not launch '{name}': {exc}"
 
 
 def focus_window(title: str) -> str:
     """Activate the first window whose title contains ``title``."""
-    try:
-        from ..desktop import is_shadow_enabled, get_shadow_manager
-        if is_shadow_enabled():
+    from ..desktop import is_shadow_enabled, get_shadow_manager
+    if is_shadow_enabled():
+        try:
             win = get_shadow_manager().find_window(title)
             if win:
                 return f"focused '{win.title}' in Shadow Workspace"
             return f"no window matching '{title}' in Shadow Workspace"
-    except Exception:
-        pass
+        except Exception as exc:
+            return f"could not focus '{title}' in Shadow Workspace: {exc}"
 
     try:
         import pygetwindow as gw  # type: ignore
@@ -177,6 +329,9 @@ def active_is_own_console() -> bool:
 def close_window(title: str) -> str:
     """Gracefully close the first window whose title contains ``title``.
     Refuses to close the terminal Jarvis itself is running in."""
+    from ..desktop import is_shadow_enabled
+    if is_shadow_enabled():
+        return "refused: close_window is not supported in Shadow Workspace"
     title = (title or "").strip()
     if not title:
         return "close_window needs a title"
@@ -202,12 +357,12 @@ def close_window(title: str) -> str:
 
 
 def list_windows() -> list[str]:
-    try:
-        from ..desktop import is_shadow_enabled, get_shadow_manager
-        if is_shadow_enabled():
+    from ..desktop import is_shadow_enabled, get_shadow_manager
+    if is_shadow_enabled():
+        try:
             return [w.title for w in get_shadow_manager().list_windows() if w.title]
-    except Exception:
-        pass
+        except Exception:
+            return []
 
     try:
         import pygetwindow as gw  # type: ignore
@@ -220,6 +375,9 @@ def list_windows() -> list[str]:
 
 def snap_window(direction: str, title: str | None = None) -> str:
     """Position the active or named window (left, right, top, bottom, maximize, minimize, restore, center)."""
+    from ..desktop import is_shadow_enabled
+    if is_shadow_enabled():
+        return "refused: snap_window is not supported in Shadow Workspace"
     dir_clean = (direction or "").strip().lower()
     try:
         import pygetwindow as gw  # type: ignore
@@ -288,6 +446,9 @@ def snap_window(direction: str, title: str | None = None) -> str:
 
 def tile_windows(layout: str = "side_by_side") -> str:
     """Tile open visible windows into a clean desktop layout (side_by_side, grid, minimize_all)."""
+    from ..desktop import is_shadow_enabled
+    if is_shadow_enabled():
+        return "refused: tile_windows is not supported in Shadow Workspace"
     layout_clean = (layout or "side_by_side").strip().lower()
     try:
         import pygetwindow as gw  # type: ignore

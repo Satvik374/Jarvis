@@ -29,8 +29,6 @@ class TaskTelemetryTracker:
         self.status: str = "idle"  # idle | running | waiting_user | completed | error | cancelled
         self.start_time: float = 0.0
         self.last_update_time: float = 0.0
-        self.current_plan: str = "None"
-        self.plan_description: str = ""
         self.current_step: int = 0
         self.total_steps: int = 30
         self.current_action: str = ""
@@ -47,11 +45,9 @@ class TaskTelemetryTracker:
             self.status = "running"
             self.start_time = time.time()
             self.last_update_time = time.time()
-            self.current_plan = "Initializing..."
-            self.plan_description = ""
             self.current_step = 0
             self.total_steps = max_steps
-            self.current_action = "planning"
+            self.current_action = "starting"
             self.current_thought = "Analyzing requirements"
             self.current_args = {}
             self.last_result_summary = ""
@@ -64,12 +60,7 @@ class TaskTelemetryTracker:
             self.last_update_time = time.time()
             ev_type = event.get("event", "")
 
-            if ev_type == "plan_start":
-                self.current_plan = event.get("plan_name", self.current_plan)
-                self.plan_description = event.get("plan_description", "")
-                self.status = "running"
-
-            elif ev_type == "step_action":
+            if ev_type == "step_action":
                 self.current_step = event.get("step", self.current_step)
                 self.total_steps = event.get("max_steps", self.total_steps)
                 self.current_action = event.get("action", "")
@@ -135,7 +126,6 @@ class TaskTelemetryTracker:
                 "active_task": self.active_task,
                 "status": self.status,
                 "elapsed_seconds": elapsed,
-                "plan": self.current_plan,
                 "current_step": self.current_step,
                 "total_steps": self.total_steps,
                 "current_action": self.current_action,
@@ -155,7 +145,6 @@ class TaskTelemetryTracker:
             f"[MAIN WORKER AGENT STATUS - {summary['status'].upper()}]",
             f"Active Task: \"{summary['active_task']}\"",
             f"Elapsed Time: {summary['elapsed_seconds']}s | Step: {summary['current_step']}/{summary['total_steps']}",
-            f"Current Plan: {summary['plan']}",
             f"Current Action: {summary['current_action']}",
             f"Current Reasoning: {summary['current_thought']}",
         ]

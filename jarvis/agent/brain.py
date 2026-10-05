@@ -26,14 +26,47 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..config import BrainConfig
+from ..providers import (apply_defaults, attribution_headers, busy_status,
+                         default_base_url, env_api_key, image_refusal, is_busy_error,
+                         is_transient_error, provider_error, provider_for,
+                         same_provider)
+from ..utils import logging as log
 from ..utils.adc import adc_path as find_adc_path
 
 
 class BrainError(RuntimeError):
-    pass
+    """A provider or transport failure. ``status`` is the HTTP code when there was one.
+
+    The retry policy reads that number, not the wording: a busy 504 once counted
+    as retryable only because its text happened to say "timeout".
+    """
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+class ProviderBusy(BrainError):
+    """Out of capacity: a busy status, or a 200 carrying no text.
+
+    ``silent`` says which, and that shape has no status to read.
+    """
+
+    def __init__(self, message: str, status: int | None = None, silent: bool = False):
+        super().__init__(message, status)
+        self.silent = silent
+
+
+class VisionState(NamedTuple):
+    """What the setting says, what can really be used now, why not, and until when."""
+
+    configured: bool
+    usable: bool
+    reason: str = ""
+    retry_in: int = 0
 
 
 class Brain:
@@ -56,6 +89,10 @@ class Brain:
         ``image`` is an optional PIL image for the current turn (vision mode).
         """
         raise NotImplementedError
+
+    def vision_state(self) -> VisionState:
+        """Screenshots are usable exactly when the setting asks (brains that throttle override)."""
+        return VisionState(self.cfg.use_vision, self.cfg.use_vision)
 
     def warmup(self) -> None:
         """Best-effort backend warmup for interactive frontends."""
@@ -80,10 +117,21 @@ class Brain:
         return list(image) if isinstance(image, (list, tuple)) else [image]
 
     @staticmethod
-    def _png_b64(image) -> str:
+    def _vision_b64(image, quality: int = 90) -> tuple[str, str]:
+        """JPEG-encode a screenshot for a vision call, at the size it was taken.
+
+        Returns ``(base64_string, mime_type)``. The same 1920x1080 frame costs
+        ~80ms to encode and ~950KiB to upload as PNG, on every step of every
+        task; as JPEG it is ~6ms and ~330KiB. The dimensions are deliberately
+        untouched: a backend that answers in image pixels would have every
+        click silently rescaled by a resize. Callers that do want a reshaped
+        image (Codex, Foundry) use ``_prepare_vision_b64``.
+        """
+        if image.mode not in ("RGB", "L"):
+            image = image.convert("RGB")
         buf = io.BytesIO()
-        image.save(buf, format="PNG")
-        return base64.b64encode(buf.getvalue()).decode("ascii")
+        image.save(buf, format="JPEG", quality=quality)
+        return base64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg"
 
     @staticmethod
     def _prepare_vision_b64(image, max_dim: int = 1280,
@@ -106,92 +154,69 @@ class Brain:
         return base64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg"
 
 
-# Error-message fragments that mark a RETRYABLE failure. Trajectory analysis
-# showed 21 runs (11%) killed by these: 429 quota (resets on a per-minute
-# window - a 2s retry never survives it), network blips, token refresh flakes.
-_TRANSIENT_MARKS = ("429", "502", "503", "timed out", "timeout", "max retries",
-                    "connection", "temporarily", "overloaded", "exhausted",
-                    "recitation", "refresh access token", "empty content")
+# Long honest waits for a capacity window (~95s in total), then a clear stop;
+# which failures count as busy is the provider module's answer.
+_BUSY_BUDGET = 5
+_BUSY_DELAYS = (5, 15, 30, 45)
 
-# Fragments that mean "this model cannot take an image". The call is retried
-# once without the screenshot instead of failing the task: a text-only model
-# (deepseek/deepseek-v4-flash-0731:free, for instance) answers a vision request
-# with "No endpoints found that support image input", and losing the whole task
-# to a 404 is a bad way to learn that.
-_NO_VISION_MARKS = ("image", "modalit", "multimodal", "vision")
-
-# Status -> the one-line remedy worth printing next to the provider's own words.
-_PROVIDER_HINTS = {
-    401: "the API key is missing or invalid",
-    402: "the account has no credit left for this model",
-    403: "this key is not allowed to use that model",
-    404: "no provider serves this model id (or not for this input type)",
-    429: "rate limited - free models allow only a few requests per minute",
-}
-
-
-def provider_error_message(response: Any) -> str:
-    """The provider's own error text, not requests' generic status line.
-
-    OpenRouter answers with ``{"error": {"message": ...}}``. ``raise_for_status``
-    reports "404 Client Error ... for url", which cannot tell a retired model
-    slug from a model that simply takes no images - the two mistakes a new model
-    id actually makes.
+def is_provider_busy(exc: BaseException) -> bool:
+    """The ONE verdict on "out of capacity": the status, the wording, or our marker for
+    a route that answered 200 with nothing. ``logging`` reads it too, so a busy
+    failure cannot arrive as a generic "something went wrong".
     """
-    try:
-        body = response.json()
-    except Exception:
-        body = None
-    detail = ""
-    if isinstance(body, dict):
-        err = body.get("error")
-        if isinstance(err, dict):
-            detail = str(err.get("message") or err.get("type") or "")
-        elif err:
-            detail = str(err)
-        detail = detail or str(body.get("message") or body.get("detail") or "")
-    if not detail:
-        detail = str(getattr(response, "text", "") or "").strip()[:400]
-    return detail
-
-
-def provider_error(url: str, response: Any, model: str) -> str:
-    """A BrainError message for a request the provider rejected."""
-    status = getattr(response, "status_code", "?")
-    detail = provider_error_message(response)
-    message = f"provider rejected model '{model}' ({status}) at {url}"
-    if detail:
-        message += f": {detail}"
-    hint = _PROVIDER_HINTS.get(status)
-    if hint:
-        message += f" - {hint}"
-    return message
+    return (isinstance(exc, ProviderBusy)          # a silent route has no status
+            or busy_status(getattr(exc, "status", None))
+            or is_busy_error(exc))
 
 
 def complete_with_retry(brain: "Brain", system: str, messages: list[dict],
-                        image=None, tries: int = 3) -> str:
-    """Self-healing brain call: transient failures are retried instead of
-    killing the whole task. Known-transient errors (rate limits, network
-    blips) get a bigger budget with long exponential backoff - a 429 quota
-    needs ~a minute, not 2 seconds. Unknown errors keep the short retry.
-    Only after every attempt fails does the error propagate."""
-    attempt = 0
+                        image=None, tries: int = 3,
+                        task_patience: bool = False) -> str:
+    """Retry a transient failure instead of killing the task.
+
+    A caller on a task's critical path may wait out a capacity window
+    (``task_patience``, ~95s, dropping the screenshot on retry); callers a person is
+    waiting on fail in seconds and keep the picture, which there IS the question.
+    Other transient errors keep the old backoff.
+    """
+    attempt, waited = 0, 0.0
     while True:
         try:
-            return brain.complete(system, messages, image=image)
+            text = brain.complete(system, messages, image=image)
+            if not str(text or "").strip():
+                # A blank 200 is capacity, not a malformed reply: same policy.
+                raise ProviderBusy("the AI service answered with nothing at all",
+                                   silent=True)
+            return text
         except KeyboardInterrupt:
             raise
         except Exception as exc:
-            msg = str(exc).lower()
-            transient = any(m in msg for m in _TRANSIENT_MARKS)
-            budget = max(tries, 5) if transient else tries
+            busy = is_provider_busy(exc)
+            transient = busy or is_transient_error(exc)
+            budget = (max(_BUSY_BUDGET, tries) if busy and task_patience
+                      else max(tries, 5) if transient and not busy else tries)
             attempt += 1
             if attempt >= budget:
-                raise
-            delay = min(60, 5 * 2 ** (attempt - 1)) if transient else 2 * attempt
-            from ..utils import logging as log
+                if not busy:
+                    raise
+                # ProviderBusy, not BrainError: logging keys the sentence off it.
+                raise ProviderBusy(
+                    f"{exc} - the provider stayed busy through {attempt} "
+                    f"attempts, about {waited:.0f}s of waiting. Ask again in "
+                    f"a minute, or point the brain at a model with more "
+                    f"capacity",
+                    status=getattr(exc, "status", None),
+                    silent=getattr(exc, "silent", False)) from exc
+            delay = (_BUSY_DELAYS[min(attempt - 1, len(_BUSY_DELAYS) - 1)] if busy and task_patience
+                     else min(60, 5 * 2 ** (attempt - 1)) if transient else 2 * attempt)
+            waited += delay
+            dropped = ""
+            if busy and task_patience and image is not None:
+                # Stop paying for the failing route; the element list still grounds it.
+                image, dropped = None, (" - the screenshot route is the one failing, "
+                                        "so the next attempt goes without it")
             log.warn(f"brain hiccup (attempt {attempt}/{budget}): {exc} "
-                     f"- retrying in {delay:.0f}s")
+                     f"- retrying in {delay:.0f}s{dropped}")
             time.sleep(delay)
 
 
@@ -224,27 +249,25 @@ def _coalesce_roles(messages: list[dict]) -> list[dict]:
 
 
 def make_brain(cfg: BrainConfig) -> Brain:
-    backend = cfg.backend.lower()
-    if backend in {"foundry", "azure", "azure-foundry", "azure_foundry", "foundry-agent", "gpt-6"}:
-        return AzureFoundryBrain(cfg)
-    if backend in {"gemini", "vertex"}:
-        return GeminiVertexBrain(cfg)
-    if backend == "ollama":
-        return OllamaBrain(cfg)
-    if backend in {"hf", "transformers", "local"}:
-        return HFLocalBrain(cfg)
-    if backend in {"llamacpp", "openai", "lmstudio", "vllm", "openrouter"}:
-        if backend == "openrouter" or (cfg.api_key and cfg.api_key.startswith("sk-or-")):
-            if not cfg.base_url:
-                cfg.base_url = "https://openrouter.ai/api/v1"
-            if not cfg.api_key_env or cfg.api_key_env == "OPENAI_API_KEY":
-                cfg.api_key_env = "OPENROUTER_API_KEY"
+    """Build the brain a backend name selects; which names exist is the table's answer."""
+    provider = provider_for(cfg.backend)
+    if provider is None:
+        raise BrainError(f"unknown brain backend: {cfg.backend}")
+    if provider.kind == "openai":
+        # OmniRoute first: it mints its own keys, so the sk-or- heuristic must
+        # not send a gateway key to openrouter.ai.
+        if not same_provider(cfg.backend, "omniroute") and (
+                same_provider(cfg.backend, "openrouter")
+                or (cfg.api_key and cfg.api_key.startswith("sk-or-"))):
+            provider = provider_for("openrouter")
+        apply_defaults(cfg, provider)
         return OpenAICompatBrain(cfg)
-    if backend == "anthropic":
-        return AnthropicBrain(cfg)
-    if backend in {"codex", "openai-codex", "chatgpt"}:
-        return OpenAICodexBrain(cfg)
-    raise BrainError(f"unknown brain backend: {cfg.backend}")
+    transports = {"ollama": OllamaBrain, "hf": HFLocalBrain, "anthropic": AnthropicBrain,
+                  "gemini": GeminiVertexBrain, "foundry": AzureFoundryBrain, "codex": OpenAICodexBrain}
+    transport = transports.get(provider.kind)
+    if transport is None:
+        raise BrainError(f"unknown brain kind {provider.kind!r} for backend {cfg.backend!r}")
+    return transport(cfg)
 
 
 # --------------------------------------------------------------------------- #
@@ -261,7 +284,7 @@ class OllamaBrain(Brain):
             msgs.append(msg)
         imgs = self._as_images(image)
         if imgs and self.cfg.use_vision and msgs:
-            msgs[-1]["images"] = [self._png_b64(i) for i in imgs]
+            msgs[-1]["images"] = [self._vision_b64(i)[0] for i in imgs]
 
         payload = {
             "model": self.cfg.model,
@@ -388,52 +411,58 @@ def _dtype_kwarg(dtype) -> dict:
 # --------------------------------------------------------------------------- #
 
 class OpenAICompatBrain(Brain):
-    def _env_api_key(self) -> str:
-        """The API key this backend's environment actually provides.
+# Stop attaching screenshots after a capacity refusal: the gateway refuses the
+# whole request and the limit clears on its own, so this is a pause, not a switch.
+    _VISION_PAUSE_SECONDS = 120.0
 
-        Order matters, and it is not the order the variables are named in:
-        `load_config` mirrors a resolved OpenRouter key into ``OPENAI_API_KEY``
-        (a compatibility shim for the older code paths), so for an OpenRouter
-        backend the generic OpenAI name has to be consulted *last*. Otherwise a
-        stale mirrored key silently shadows the ``OPENROUTER_API_KEY`` the user
-        just set, and every request goes out with credentials they did not
-        choose - which reads as "my new key does not work".
-        """
-        backend = str(getattr(self.cfg, "backend", "") or "").lower()
-        base_url = str(getattr(self.cfg, "base_url", "") or "")
-        openrouter = backend == "openrouter" or "openrouter.ai" in base_url
-        configured = str(getattr(self.cfg, "api_key_env", "") or "").strip()
-        names: list[str] = []
-        if openrouter:
-            names.append("OPENROUTER_API_KEY")
-            # A name the operator chose for *this* backend still comes first;
-            # the generic default does not, because the mirror writes into it.
-            if configured and configured != "OPENAI_API_KEY":
-                names.append(configured)
-        else:
-            names.append(configured or "OPENAI_API_KEY")
-        names += ["OPENROUTER_API_KEY", "OPENAI_API_KEY"]
-        seen: list[str] = []
-        for name in names:
-            if name and name not in seen:
-                seen.append(name)
-        return next((os.environ.get(name, "") for name in seen if os.environ.get(name)), "")
+    def __init__(self, cfg: BrainConfig):
+        super().__init__(cfg)
+        self._vision_paused_until, self._vision_pause_reason = 0.0, ""
+
+    def vision_state(self) -> VisionState:
+        """The live answer: the setting, less any active pause."""
+        if not self.cfg.use_vision:
+            return VisionState(False, False)
+        waiting = self._vision_paused_until - time.time()
+        return (VisionState(True, False, self._vision_pause_reason, int(waiting) + 1)
+                if waiting > 0 else VisionState(True, True))
+
+    def _post_chat(self, url: str, payload: dict, headers: dict):
+        """One request, with the transport failure translated."""
+        try:
+            return self._http_post(url, json=payload, headers=headers,
+                                   timeout=self.cfg.request_timeout)
+        except Exception as exc:
+            raise BrainError(f"cannot reach endpoint {url}: {exc}") from exc
+
+    def _retry_as_text(self, msgs: list[dict], payload: dict, url: str, headers: dict):
+        """Resend the turn without screenshots on fresh messages and payload, so
+        the caller's dicts and the first body are left untouched."""
+        text_only = [{"role": m["role"], "content": "\n".join(
+            p.get("text", "") for p in m["content"] if p.get("type") == "text")}
+            if isinstance(m.get("content"), list) else m for m in msgs]
+        return self._post_chat(url, {**payload, "messages": text_only}, headers)
 
     def complete(self, system, messages, image=None) -> str:
         msgs: list[dict] = [{"role": "system", "content": system}]
         for m in _coalesce_roles(messages):
             msgs.append({"role": m["role"], "content": m["content"]})
         imgs = self._as_images(image)
-        if imgs and self.cfg.use_vision and msgs:
+        # `imgs` is what the caller offered, `attached` what this request carries.
+        attached = bool(imgs and msgs and self.vision_state().usable)
+        if attached:
+            shots = [self._vision_b64(i) for i in imgs]
             last = msgs[-1]
             last["content"] = [{"type": "text", "text": last["content"]}] + [
                 {"type": "image_url",
-                 "image_url": {"url": f"data:image/png;base64,{self._png_b64(i)}"}}
-                for i in imgs
+                 "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                for b64, mime in shots
             ]
 
         headers = {"Content-Type": "application/json"}
-        key = getattr(self.cfg, "api_key", "") or self._env_api_key()
+        key = getattr(self.cfg, "api_key", "") or env_api_key(
+            getattr(self.cfg, "backend", ""), getattr(self.cfg, "base_url", ""),
+            getattr(self.cfg, "api_key_env", ""))  # the table's variable order
         if not key:
             try:
                 from ..security import get_secret
@@ -442,9 +471,8 @@ class OpenAICompatBrain(Brain):
                 pass
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        if "openrouter.ai" in (self.cfg.base_url or "") or getattr(self.cfg, "backend", "").lower() == "openrouter" or (key and key.startswith("sk-or-")):
-            headers["HTTP-Referer"] = "https://github.com/jarvis-agent"
-            headers["X-Title"] = "Jarvis Desktop Assistant"
+        headers.update(attribution_headers(getattr(self.cfg, "backend", ""),
+                                           self.cfg.base_url, key))
 
         payload = {
             "model": self.cfg.model,
@@ -452,46 +480,30 @@ class OpenAICompatBrain(Brain):
             "temperature": self.cfg.temperature,
             "max_tokens": self.cfg.max_tokens,
         }
-        base = self.cfg.base_url.rstrip("/") if self.cfg.base_url else (
-            "https://openrouter.ai/api/v1" if (getattr(self.cfg, "backend", "").lower() == "openrouter" or (key and key.startswith("sk-or-")))
-            else "https://api.openai.com/v1"
-        )
+        # Nothing configured: the table's own default for that provider.
+        base = (self.cfg.base_url.rstrip("/") if self.cfg.base_url
+                else default_base_url(getattr(self.cfg, "backend", ""), key))
         url = base + ("/chat/completions" if base.endswith("/v1")
                       else "/v1/chat/completions")
-        try:
-            r = self._http_post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=self.cfg.request_timeout,
-            )
-        except Exception as exc:
-            raise BrainError(f"cannot reach endpoint {url}: {exc}") from exc
+        r = self._post_chat(url, payload, headers)
 
-        # Graceful fallback if the model does not accept images (OpenRouter's
-        # text-only models, e.g. deepseek/deepseek-v4-flash-0731:free). Vision is
-        # switched off for good so only the first call pays for finding out.
-        if not getattr(r, "ok", True) and imgs and self.cfg.use_vision:
-            err_text = provider_error_message(r).lower()
-            if any(mark in err_text for mark in _NO_VISION_MARKS) or "filter by image support" in err_text:
+        # Both refusals share one remedy - resend without screenshots - but the first is permanent.
+        if not getattr(r, "ok", True) and attached:
+            refusal = image_refusal(r)
+            if refusal == "rejected":
+                # Say so: silence would leave a :status line reading "Vision off" as if chosen.
+                log.warn(f"'{self.cfg.model}' does not accept images - "
+                         "screenshots are off for the rest of this run.")
                 self.cfg.use_vision = False
-                for m in msgs:
-                    if isinstance(m.get("content"), list):
-                        texts = [item.get("text", "") for item in m["content"] if item.get("type") == "text"]
-                        m["content"] = "\n".join(texts)
-                payload["messages"] = msgs
-                try:
-                    r = self._http_post(
-                        url,
-                        json=payload,
-                        headers=headers,
-                        timeout=self.cfg.request_timeout,
-                    )
-                except Exception as exc:
-                    raise BrainError(f"cannot reach endpoint {url}: {exc}") from exc
+            elif refusal == "congested":
+                self._vision_paused_until = time.time() + self._VISION_PAUSE_SECONDS
+                self._vision_pause_reason = "the service was too busy to accept images"
+            if refusal:
+                r = self._retry_as_text(msgs, payload, url, headers)
 
         if not getattr(r, "ok", True):
-            raise BrainError(provider_error(url, r, self.cfg.model))
+            raise BrainError(provider_error(url, r, self.cfg.model),
+                             status=getattr(r, "status_code", None))
         data = r.json()
         choice = data["choices"][0]
         content = choice["message"].get("content")
@@ -516,7 +528,7 @@ class OpenAICodexBrain(Brain):
         from ..auth import codex_oauth
         self.auth = codex_oauth
         if not self.cfg.base_url:
-            self.cfg.base_url = "https://chatgpt.com/backend-api/codex"
+            self.cfg.base_url = provider_for("codex").base_url
         if not self.cfg.model:
             self.cfg.model = "gpt-5.3-codex"
 
@@ -1044,11 +1056,12 @@ class AnthropicBrain(Brain):
         api_msgs = _coalesce_roles(messages)
         imgs = self._as_images(image)
         if imgs and self.cfg.use_vision and api_msgs:
+            shots = [self._vision_b64(i) for i in imgs]
             last = api_msgs[-1]
             last["content"] = [{"type": "text", "text": last["content"]}] + [
                 {"type": "image", "source": {"type": "base64",
-                 "media_type": "image/png", "data": self._png_b64(i)}}
-                for i in imgs
+                 "media_type": mime, "data": b64}}
+                for b64, mime in shots
             ]
 
         payload = {

@@ -169,3 +169,52 @@ def test_volume_gesture_releases_after_brief_pose_loss():
     assert gesture.update(False, 0.50) == 0
     assert not gesture.active
     assert gesture.anchor_x is None
+
+
+# --------------------------------------------------------------------------- #
+# routing: the console and the live voice supervisor both gate on
+# Agent._looks_like_task, and a false answer sends the request to the chat path
+# --------------------------------------------------------------------------- #
+
+def _router():
+    """The agent's own chat/task router, without a brain or a desktop."""
+    from jarvis.agent.loop import Agent
+
+    agent = object.__new__(Agent)
+    for name in dir(Agent):
+        if name.startswith(("_TASK_", "_UI_", "_KEY_")):
+            setattr(agent, name, getattr(Agent, name))
+    return agent._looks_like_task
+
+
+def test_asking_for_mouse_control_is_a_task_not_chat():
+    """Both real messages that reached the chat path, plus the phrasings the
+    voice agent's delegated task arrives in.
+
+    "enable" is not a task verb and "mouse control" names no UI target, so these
+    used to fall through to the Communicating Agent - whose chat prompt has no
+    tools and answered that Jarvis cannot control the mouse at all.
+    """
+    router = _router()
+
+    for phrase in ("Enable mouse control JARVIS. What are you doing?",
+                   "Enable mouse control or assist with keyboard navigation/"
+                   "mouse emulation as requested by the user.",
+                   "turn on mouse control",
+                   "turn off the camera hand/mouse control",
+                   "start gesture control",
+                   "can you enable hand control on camera 1",
+                   "I want to control the mouse with my hand"):
+        assert router(phrase), phrase
+
+
+def test_mouse_and_hand_words_alone_do_not_swallow_ordinary_conversation():
+    """The new rule has to stay narrow: mentioning a mouse or a hand is not a
+    control request, and "controls" is not "control"."""
+    router = _router()
+
+    for phrase in ("can you give me a hand with this pitch deck",
+                   "my mouse is laggy, any ideas",
+                   "the market controls prices",
+                   "how are you doing today"):
+        assert not router(phrase), phrase

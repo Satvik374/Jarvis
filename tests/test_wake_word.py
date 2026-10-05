@@ -96,6 +96,46 @@ class WakeLoopTests(unittest.TestCase):
             console._wake_loop(agent, Config())   # returns, doesn't raise
         agent.run.assert_not_called()
 
+    def test_stop_event_leaves_hands_free_mode_without_opening_the_microphone(self):
+        """A frontend with no console to press Ctrl+C in (the browser) stops the
+        loop with an event - and a stop that arrived first means no wait at all."""
+        agent = self._agent()
+        stop = threading.Event()
+        stop.set()
+
+        with (
+            patch.object(console.voice, "speak"),
+            patch.object(console.voice, "wait_for_wake") as wait,
+        ):
+            console._wake_loop(agent, Config(), stop_event=stop)
+
+        wait.assert_not_called()
+        agent.run.assert_not_called()
+
+    def test_stop_during_the_wait_ends_the_loop_and_skips_the_capture(self):
+        """The stop has to reach the listener itself: that wait has no timeout
+        and no phrase coming, so nothing else in the loop can end it."""
+        agent = self._agent()
+        stop = threading.Event()
+        seen: dict = {}
+
+        def fake_wait_for_wake(*args, **kwargs):
+            seen.update(kwargs)
+            stop.set()          # what the browser's STOP button does
+            return False        # and the worker breaks off the wait
+
+        with (
+            patch.object(console.voice, "speak"),
+            patch.object(console.voice, "wait_for_wake",
+                         side_effect=fake_wait_for_wake),
+            patch.object(console.voice, "listen") as listen,
+        ):
+            console._wake_loop(agent, Config(), stop_event=stop)
+
+        self.assertIs(seen.get("stop_event"), stop)
+        listen.assert_not_called()
+        agent.run.assert_not_called()
+
     def test_announce_false_skips_the_startup_greeting(self):
         agent = self._agent()
         with (
@@ -248,6 +288,39 @@ class WaitForWakeRobustnessTests(unittest.TestCase):
             time.sleep(0.02)
         self.assertIn("cancel_event", captured)
         self.assertTrue(captured["cancel_event"].is_set())
+
+    def test_a_caller_stop_event_ends_the_wait_and_is_the_workers_cancel_event(self):
+        """The caller's event *is* the worker's cancellation, not a copy of it:
+        sharing the object is the whole mechanism that lets another thread (the
+        browser's STOP button) end a wait that has no timeout of its own."""
+        voice = self.voice
+        captured: dict = {}
+
+        def fake_ensure_worker():
+            requests = voice.queue.Queue()
+
+            def _serve():
+                _phrase, _timeout, ready_q, done_q, cancel_event = requests.get()
+                captured["cancel_event"] = cancel_event
+                ready_q.put(("ok", None))
+                # Stand in for the real pump loop: the wait ends when cancelled.
+                cancel_event.wait(2.0)
+                done_q.put(("ok", False))
+
+            thread = type("FakeThread", (), {"is_alive": lambda self: True})()
+            threading.Thread(target=_serve, daemon=True).start()
+            return {"thread": thread, "requests": requests}
+
+        stop = threading.Event()
+        with patch.object(voice, "_ensure_wake_worker", side_effect=fake_ensure_worker):
+            threading.Timer(0.1, stop.set).start()
+            started = time.time()
+            result = voice.wait_for_wake("hey jarvis", stop_event=stop)
+            elapsed = time.time() - started
+
+        self.assertFalse(result)
+        self.assertLess(elapsed, 1.5)          # ended by the stop, not by a timeout
+        self.assertIs(captured.get("cancel_event"), stop)
 
 
 if __name__ == "__main__":
