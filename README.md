@@ -25,12 +25,12 @@
 
 ## 🎥 Demonstration & Video Previews
 
-| Interactive Holographic UI & Spectrum Core | Autonomous Multi-App Desktop Orchestration |
-|:---:|:---:|
-| <img src="assets/jarvis_dashboard_preview.png" width="460px" style="border-radius: 8px;" /> | <img src="assets/jarvis_dashboard_preview.png" width="460px" style="border-radius: 8px;" /> |
-| *Cyber HUD with Liquid Energy Blob & Audio Amplitude Spectrum* | *Set-of-Marks Precision UI Automation & Vision Loops* |
+| Interactive Holographic UI & Spectrum Core | Autonomous Multi-App Desktop Orchestration | Browser Agent Automation |
+|:---:|:---:|:---:|
+| <img src="assets/jarvis_dashboard_preview.png" width="300px" style="border-radius: 8px;" /> | <img src="assets/jarvis_desktop_orchestration.png" width="300px" style="border-radius: 8px;" /> | <img src="assets/jarvis_browser_agent.png" width="300px" style="border-radius: 8px;" /> |
+| *Cyber HUD with Liquid Energy Blob & Audio Amplitude Spectrum* | *Set-of-Marks Precision UI Automation & Vision Loops* | *Autonomous Browser Task Execution & Web Navigation* |
 
-> 🎬 **Interactive Video Demos:** Full video compositions and hyperframes clips are located in [`videos/jarvis-promo`](videos/jarvis-promo) showcasing high-speed autonomous coding, gaming, and OS navigation.
+> 🎬 **Interactive Video Demos & HD Previews:** Full video compositions and hyperframes clips are located in [`videos/jarvis-promo`](videos/jarvis-promo) (`demo.mp4`) showcasing high-speed autonomous coding, gaming, and OS navigation. Additional holo-hud themes (`assets/jarvis_holo_hud.png`) and mobile control interfaces (`assets/jarvis_mobile_control.png`) are fully integrated.
 
 ---
 
