@@ -132,6 +132,14 @@ class LiveVoiceSupervisor:
 
         # 2. Start WebSocket client
         ws_ok = self.client.start()
+        if not ws_ok:
+            # A refused start (no API key, bad endpoint) used to be reported as
+            # success: LiveCliHUD then entered "Live Voice Active" with no
+            # session, and the microphone stayed open for nobody.
+            log.error("Live voice client did not start; closing the session.")
+            self._is_running = False
+            self.audio_stream.stop()
+            return False
 
         return True
 

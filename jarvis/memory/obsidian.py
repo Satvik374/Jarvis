@@ -232,7 +232,20 @@ class ObsidianVault:
         raw = (name or "").strip().strip('"').strip("'")
         if not raw:
             raise ValueError("a note name is required")
+        # Note names are vault-relative on EVERY host. Path() parses
+        # "..\\outside" as one literal filename on POSIX and "C:/x" as a
+        # relative path, so Windows-style traversal, drive letters and UNC
+        # prefixes are refused here rather than by host-specific parsing.
+        if raw.startswith(("\\\\", "//")):
+            raise ValueError(
+                f"'{name}' is a UNC path; note names are relative to the vault")
+        if len(raw) >= 2 and raw[1] == ":" and raw[0].isalpha():
+            raise ValueError(
+                f"'{name}' is an absolute path; note names are relative to the vault, "
+                "e.g. 'Projects/Roadmap'")
         stem = raw[:-3] if raw.lower().endswith(".md") else raw
+        if any(part == ".." for part in stem.replace("\\", "/").split("/")):
+            raise ValueError(f"'{name}' leaves the vault; note names may not contain '..'")
         candidate = Path(stem)
         # ``anchor`` catches what ``is_absolute`` misses on Windows: a rooted
         # path with no drive (``/etc/passwd``) is not absolute there, but it is

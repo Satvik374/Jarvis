@@ -2178,6 +2178,11 @@ def _h_self_heal(args, obs, cfg):
 
     elif strategy == "escape":
         ok = director.perform_escape()
+        if not ok:
+            # perform_escape() reports whether the key could actually be sent.
+            # Claiming success regardless hid a stuck modal from the model,
+            # which then repeated the same failing step.
+            return ActionResult(False, "Self-healing: the Escape key could not be sent.", needs_observe=False)
         return ActionResult(True, "Self-healing: sent Escape key to clear dialogs/popups.", needs_observe=True)
 
     elif strategy == "restart_app":
