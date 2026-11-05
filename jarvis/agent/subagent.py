@@ -11,7 +11,7 @@ specialist SUB-AGENT via the ``agent`` action. A sub-agent:
 
 Built-ins: ``researcher`` (multi-source web research) and ``coder`` (the
 coding engine in coder.py, which reuses the same loop below). Custom agents
-are loaded from ``agents/*.yaml`` in the project root - drop in a file with
+are loaded from ``jarvis/agents/*.yaml`` - drop in a file with
 ``name``, ``description``, ``prompt`` and optionally ``actions``.
 """
 
@@ -150,7 +150,9 @@ def _project_root() -> Path:
 
 def _load_custom(root: Path) -> dict[str, AgentSpec]:
     out: dict[str, AgentSpec] = {}
-    d = root / "agents"
+    d = root / "jarvis" / "agents"
+    if not d.is_dir():
+        d = root / "agents"          # specs written before the layout change
     if not d.is_dir():
         return out
     for f in sorted(d.glob("*.yaml")):
@@ -172,7 +174,7 @@ def _load_custom(root: Path) -> dict[str, AgentSpec]:
 
 
 def available(root: Path | None = None) -> dict[str, AgentSpec]:
-    """All delegatable sub-agents (built-ins + agents/*.yaml). The coder is
+    """All delegatable sub-agents (built-ins + jarvis/agents/*.yaml). The coder is
     exposed separately (it needs workdir machinery) but is listed in the note."""
     agents = {
         "researcher": RESEARCHER,

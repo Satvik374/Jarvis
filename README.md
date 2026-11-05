@@ -56,7 +56,7 @@
 | <img src="assets/jarvis_dashboard_preview.png" width="320px" style="border-radius: 8px;" /> | <img src="assets/jarvis_mobile_control.png" width="320px" style="border-radius: 8px;" /> |
 | *Liquid Energy Blob, audio spectrum and live agent transcript* | *Paired Android device with element-level control* |
 
-> 🎬 **Video demos:** the promo composition lives in [`videos/jarvis-promo`](videos/jarvis-promo) (`demo.mp4`), with the storyboard and brief alongside it. Hero banners are in [`assets/banners/jarvis-hero`](assets/banners/jarvis-hero).
+> 🎬 **Video demos:** the promo composition lives in [`assets/videos/jarvis-promo`](assets/videos/jarvis-promo) (`demo.mp4`), with the storyboard and brief alongside it. Hero banners are in [`assets/banners/jarvis-hero`](assets/banners/jarvis-hero).
 
 ---
 
@@ -195,7 +195,7 @@ python run.py
 
 The browser UI binds to `127.0.0.1` on a random port and opens automatically. Pin the port with `JARVIS_BROWSER_PORT=8765` if you want a stable URL.
 
-Optional: add `bin\` to your `PATH` and type `jarvis` from any directory (see [`bin/jarvis.bat`](bin/jarvis.bat)).
+Optional: add `scripts\` to your `PATH` and type `jarvis` from any directory (see [`scripts/jarvis.bat`](scripts/jarvis.bat)).
 
 ---
 
@@ -413,9 +413,9 @@ python run.py --remove pair "Office PC"
 
 ### Android companion
 
-Install the APK built from [`jarvis_mobile_android/`](jarvis_mobile_android) to enable touch gestures, element-level app dispatching and mobile screen perception. The phone can also run **standalone Mobile Jarvis** against a Vertex- or OmniRoute-backed relay, so it keeps answering when the computer is off.
+Install the APK built from [`apps/android/`](apps/android) to enable touch gestures, element-level app dispatching and mobile screen perception. The phone can also run **standalone Mobile Jarvis** against a Vertex- or OmniRoute-backed relay, so it keeps answering when the computer is off.
 
-See [`jarvis_mobile_android/README.md`](jarvis_mobile_android/README.md) for build steps, accessibility setup and the full mobile command set (`mobile: open YouTube`, `mobile: tap element 7`, …).
+See [`apps/android/README.md`](apps/android/README.md) for build steps, accessibility setup and the full mobile command set (`mobile: open YouTube`, `mobile: tap element 7`, …).
 
 ---
 
@@ -455,6 +455,7 @@ Jarvis/
 │   ├── hud/                      # Floating mini HUD, hotkeys, choreography
 │   ├── daemon/                   # Proactive watchers and event engine
 │   ├── skills/                   # Built-in and user-installed skills
+│   ├── agents/                   # Custom sub-agent specs (writer.yaml)
 │   ├── auth/                     # Codex OAuth, Azure login
 │   ├── browser.py                # Local HTTP/SSE dashboard server
 │   ├── providers.py              # The single owner of "what is a backend?"
@@ -464,12 +465,10 @@ Jarvis/
 ├── 📁 docs/                      # Obsidian memory and task-speed write-ups
 ├── 📁 dataset/                   # Synthetic SFT data generator + real trajectories
 ├── 📁 training/                  # QLoRA fine-tune, eval, Ollama export
-├── 📁 jarvis_mobile_android/     # Android companion (Gradle project)
+├── 📁 apps/                      # Companion Android app (Gradle project)
 ├── 📁 relay_server/              # Git submodule: hosted pairing relay
-├── 📁 FlyBrain/                  # FlyWire-connectome Flappy Bird experiment
-├── 📁 videos/                    # Hyperframes promo composition (demo.mp4)
-├── 📁 assets/                    # Screenshots, banners, icons
-├── 📁 bin/                       # `jarvis` launcher for PATH use
+├── 📁 assets/                    # Screenshots, banners, icons, videos/
+├── 📁 scripts/                   # Diagnostics, dataset report, `jarvis` launcher
 ├── 📁 tests/                     # 105 test files, ~899 tests
 ├── 📄 config.yaml                # Master settings: brain, voice, safety, memory
 ├── 📄 .env.example               # Every optional connector, documented
@@ -572,9 +571,8 @@ Logs, screenshots and trajectories are written under the app's data directory; `
 | [`docs/task_speed.md`](docs/task_speed.md) | UIA walk overhead, tool-image reuse, measured evidence and limits |
 | [`training/README.md`](training/README.md) | QLoRA on 4 GB VRAM, eval, GGUF/Ollama export |
 | [`dataset/README.md`](dataset/README.md) | Synthetic SFT generator and real trajectory format |
-| [`jarvis_mobile_android/README.md`](jarvis_mobile_android/README.md) | APK build, pairing, accessibility, mobile command set |
-| [`videos/jarvis-promo/`](videos/jarvis-promo) | Promo storyboard, brief and rendered `demo.mp4` |
-| [`FlyBrain/README.md`](FlyBrain/README.md) | Flappy Bird driven by a simulated FlyWire connectome |
+| [`apps/android/README.md`](apps/android/README.md) | APK build, pairing, accessibility, mobile command set |
+| [`assets/videos/jarvis-promo/`](assets/videos/jarvis-promo) | Promo storyboard, brief and rendered `demo.mp4` |
 | [`AGENTS.md`](AGENTS.md) | Notes for coding agents working in this repository |
 
 ---

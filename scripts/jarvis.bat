@@ -3,10 +3,10 @@ REM ===================================================================
 REM  Jarvis launcher - lets you start Jarvis by typing "jarvis" in any
 REM  terminal, from any directory.
 REM
-REM  This file lives in <project>\bin. %~dp0 expands to that folder (with
+REM  This file lives in <project>\scripts. %~dp0 expands to that folder (with
 REM  a trailing backslash), so "%~dp0..\run.py" always points at run.py in
 REM  the project root - the launcher is fully portable: move the project
-REM  and it still works, as long as this bin folder stays on your PATH.
+REM  and it still works, as long as this scripts folder stays on your PATH.
 REM
 REM  Prefers the Windows "py" launcher (never resolves to the Microsoft
 REM  Store stub); falls back to "python" if py is not installed.

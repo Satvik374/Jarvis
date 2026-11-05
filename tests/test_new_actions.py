@@ -370,8 +370,8 @@ class SubAgentTests(unittest.TestCase):
 
     def test_custom_agent_loads_and_filters_desktop_actions(self):
         from jarvis.agent import subagent
-        (self.tmp / "agents").mkdir()
-        (self.tmp / "agents" / "reviewer.yaml").write_text(
+        (self.tmp / "jarvis" / "agents").mkdir(parents=True)
+        (self.tmp / "jarvis" / "agents" / "reviewer.yaml").write_text(
             "name: reviewer\ndescription: reviews text\n"
             "actions: [click, type, read_file]\n"
             "prompt: You are a reviewer.\n", encoding="utf-8")
@@ -389,7 +389,7 @@ class SubAgentTests(unittest.TestCase):
         note = agents_note()
         self.assertIn("researcher", note)
         self.assertIn("coder", note)
-        self.assertIn("writer", note)            # the sample agents/writer.yaml
+        self.assertIn("writer", note)            # the sample jarvis/agents/writer.yaml
         self.assertIn("DELEGATION POLICY", note)
         self.assertIn("bounded specialist task", note)
 
